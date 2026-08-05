@@ -8,6 +8,9 @@ export class PeerConnectionManager {
   private dataChannel: RTCDataChannel | null = null;
   private localId: string;
   private remoteId: string | null = null;
+  private pendingIceCandidates: RTCIceCandidateInit[] = [];
+  private makingOffer = false;
+  private polite = false;
   private onState: (state: ConnectionState) => void;
   private onData: (message: string) => void;
   private onSignal: (message: SignalMessage) => void;
@@ -72,12 +75,15 @@ export class PeerConnectionManager {
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {
     this.remoteId = remoteId;
+    this.polite = this.localId > remoteId;
+    this.makingOffer = true;
     this.onState('signalling');
     const channel = this.peerConnection.createDataChannel('chat');
     this.attachDataChannel(channel);
 
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
+    this.makingOffer = false;
 
     this.sendSignal(signallingSocket, {
       type: 'offer',
@@ -87,14 +93,38 @@ export class PeerConnectionManager {
     });
   }
 
+  private async addIceCandidate(candidate: RTCIceCandidateInit) {
+    if (this.peerConnection.remoteDescription) {
+      await this.peerConnection.addIceCandidate(candidate);
+    } else {
+      this.pendingIceCandidates.push(candidate);
+    }
+  }
+
+  private async flushPendingIceCandidates() {
+    for (const candidate of this.pendingIceCandidates) {
+      await this.peerConnection.addIceCandidate(candidate);
+    }
+    this.pendingIceCandidates = [];
+  }
+
   public async handleSignal(message: SignalMessage, signallingSocket: WebSocket) {
     if (message.to !== this.localId) return;
 
     this.remoteId = message.from;
+    this.polite = this.localId > message.from;
     this.onState('signalling');
 
     if (message.type === 'offer') {
+      const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';
+      if (offerCollision && !this.polite) {
+        console.warn('Ignoring incoming offer due to glare collision');
+        return;
+      }
+
       await this.peerConnection.setRemoteDescription(message.payload);
+      await this.flushPendingIceCandidates();
+
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
       this.sendSignal(signallingSocket, {
@@ -105,8 +135,9 @@ export class PeerConnectionManager {
       });
     } else if (message.type === 'answer') {
       await this.peerConnection.setRemoteDescription(message.payload);
+      await this.flushPendingIceCandidates();
     } else if (message.type === 'ice-candidate') {
-      await this.peerConnection.addIceCandidate(message.payload);
+      await this.addIceCandidate(message.payload);
     }
   }
 
