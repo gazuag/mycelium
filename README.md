@@ -60,8 +60,8 @@ python3 server.py
 
 ## Signalling server configuration
 
-- The Python server runs at `ws://localhost:8765` by default.
-- Set `VITE_SIGNAL_SERVER_URL` if your VPS address differs.
+- The Python server now defaults to `ws://217.154.78.152:8765`.
+- Set `VITE_SIGNAL_SERVER_URL` if you want to override it locally.
 
 ## What travels through the signalling server
 

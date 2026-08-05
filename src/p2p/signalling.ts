@@ -5,7 +5,7 @@ export interface SignalMessage {
   payload: any;
 }
 
-const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://localhost:8765';
+const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://217.154.78.152:8765';
 
 export function connectToSignalling(localId: string, onMessage: (message: SignalMessage) => void) {
   const socket = new WebSocket(SIGNAL_SERVER);
