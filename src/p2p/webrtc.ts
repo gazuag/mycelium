@@ -1,5 +1,5 @@
 import type { SignalMessage } from './signalling';
-import type { ConnectionState } from '../types';
+import type { ConnectionState, SignedPost } from '../types';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
@@ -13,6 +13,7 @@ export class PeerConnectionManager {
   private polite = false;
   private onState: (state: ConnectionState) => void;
   private onData: (message: string) => void;
+  private onPost: (post: SignedPost) => void;
   private onSignal: (message: SignalMessage) => void;
   private onEvent: (event: string) => void;
 
@@ -21,11 +22,13 @@ export class PeerConnectionManager {
     onState: (state: ConnectionState) => void,
     onData: (message: string) => void,
     onSignal: (message: SignalMessage) => void,
+    onPost: (post: SignedPost) => void,
     onEvent: (event: string) => void
   ) {
     this.localId = localId;
     this.onState = onState;
     this.onData = onData;
+    this.onPost = onPost;
     this.onSignal = onSignal;
     this.onEvent = onEvent;
     this.peerConnection = this.createConnection();
@@ -84,8 +87,38 @@ export class PeerConnectionManager {
       this.onState('disconnected');
     };
     this.dataChannel.onmessage = (event) => {
-      this.onData(event.data);
+      const data = event.data;
+      if (typeof data === 'string') {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed?.type === 'chat' && typeof parsed.text === 'string') {
+            this.onData(parsed.text);
+            return;
+          }
+          if (parsed?.type === 'signed-post' && parsed.post) {
+            this.onPost(parsed.post);
+            return;
+          }
+        } catch {
+          // Fall back to raw text if parsing fails
+        }
+      }
+      this.onData(String(data));
     };
+  }
+
+  private sendData(payload: unknown) {
+    if (this.dataChannel?.readyState === 'open') {
+      this.dataChannel.send(JSON.stringify(payload));
+    }
+  }
+
+  public sendChatMessage(text: string) {
+    this.sendData({ type: 'chat', text });
+  }
+
+  public sendSignedPost(post: SignedPost) {
+    this.sendData({ type: 'signed-post', post });
   }
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {
@@ -167,8 +200,6 @@ export class PeerConnectionManager {
   }
 
   public sendMessage(text: string) {
-    if (this.dataChannel?.readyState === 'open') {
-      this.dataChannel.send(text);
-    }
+    this.sendChatMessage(text);
   }
 }

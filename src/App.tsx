@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey } from './crypto/identity';
+import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256 } from './crypto/identity';
 import { connectToSignalling, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity } from './storage/idb';
-import type { ConnectionState } from './types';
+import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction } from './storage/idb';
+import { createSignedPost, verifySignedPost } from './crypto/signed';
+import { publishPost, fetchDiscovery } from './services/discovery';
+import type { ConnectionState, Contact, SignedPost, StoredPost } from './types';
 
 interface IdentityRecord {
   key: string;
@@ -13,7 +15,6 @@ interface IdentityRecord {
 }
 
 function App() {
-  const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const peerManagerRef = useRef<PeerConnectionManager | null>(null);
   const signallingSocketRef = useRef<WebSocket | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
@@ -22,6 +23,13 @@ function App() {
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
+  const [identity, setIdentity] = useState<IdentityRecord | null>(null);
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [posts, setPosts] = useState<StoredPost[]>([]);
+  const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
+  const [newPostContent, setNewPostContent] = useState('');
+  const [newPostTags, setNewPostTags] = useState('');
+  const [currentPeerId, setCurrentPeerId] = useState<string | null>(null);
 
   const addLog = (entry: string) => {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
@@ -55,6 +63,16 @@ function App() {
   }, []);
 
   useEffect(() => {
+    async function loadLocalData() {
+      const cs = await loadContacts();
+      setContacts(cs || []);
+      const ps = await loadPosts();
+      setPosts(ps || []);
+    }
+    loadLocalData();
+  }, []);
+
+  useEffect(() => {
     if (!identity?.id) return;
 
     const manager = new PeerConnectionManager(
@@ -69,6 +87,18 @@ function App() {
           socket.send(JSON.stringify(signal));
         }
       },
+      async (post) => {
+        const valid = await verifySignedPost(post);
+        const stored: StoredPost = {
+          ...post,
+          source: 'peer',
+          receivedAt: new Date().toISOString(),
+          valid
+        };
+        await savePost(stored);
+        setPosts((prev) => [stored, ...prev]);
+        addLog(`Received ${valid ? 'verified' : 'invalid'} post from peer`);
+      },
       (event) => {
         addLog(event);
       }
@@ -79,6 +109,9 @@ function App() {
     const socket = connectToSignalling(
       identity.id,
       (message: SignalMessage) => {
+        if (message.from && message.from !== identity.id) {
+          setCurrentPeerId(message.from);
+        }
         manager.handleSignal(message, socket);
       },
       (status) => {
@@ -88,6 +121,103 @@ function App() {
     );
     signallingSocketRef.current = socket;
   }, [identity]);
+
+  async function handleAddContactFromKey(publicKey: string, displayName?: string) {
+    const fingerprint = await deriveFingerprint(publicKey);
+    const contact: Contact = {
+      publicKey,
+      fingerprint,
+      displayName,
+      addedAt: new Date().toISOString(),
+      followed: false
+    };
+    await saveContact(contact);
+    setContacts((prev) => [...prev.filter((c) => c.publicKey !== publicKey), contact]);
+    addLog(`Added contact ${fingerprint}`);
+  }
+
+  async function handleToggleFollow(publicKey: string) {
+    const existing = contacts.find((c) => c.publicKey === publicKey);
+    if (!existing) return;
+    const updated = { ...existing, followed: !existing.followed };
+    await saveContact(updated);
+    setContacts((prev) => prev.map((c) => (c.publicKey === publicKey ? updated : c)));
+    addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint}`);
+  }
+
+  async function handleRemoveContact(publicKey: string) {
+    await deleteContact(publicKey);
+    setContacts((prev) => prev.filter((c) => c.publicKey !== publicKey));
+    addLog(`Removed contact`);
+  }
+
+  async function handleCreatePost(publishToDiscovery = false) {
+    if (!identity) return;
+    const id = await sha256(identity.publicKey + Date.now().toString());
+    const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
+    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, newPostContent, tags);
+    const stored: StoredPost = {
+      ...signed,
+      source: 'local',
+      receivedAt: new Date().toISOString(),
+      valid: true
+    };
+    await savePost(stored);
+    setPosts((prev) => [stored, ...prev]);
+    addLog('Created local post');
+    setNewPostContent('');
+    setNewPostTags('');
+
+    const connectedPeer = currentPeerId && connectionStatus === 'connected';
+    const peerFollowed = currentPeerId
+      ? contacts.some((c) => c.fingerprint === currentPeerId && c.followed)
+      : false;
+    if (connectedPeer && peerFollowed) {
+      peerManagerRef.current?.sendSignedPost(stored);
+      addLog('Shared post with connected followed peer');
+    }
+
+    if (publishToDiscovery) {
+      try {
+        await publishPost(signed);
+        addLog('Published post to discovery');
+      } catch (err: any) {
+        addLog(`Discovery publish failed: ${err.message}`);
+      }
+    }
+  }
+
+  async function handleFetchDiscovery() {
+    try {
+      const items = await fetchDiscovery(20);
+      const verifiedPosts = await Promise.all(
+        items.map(async (post) => ({
+          ...post,
+          source: 'discovery' as const,
+          receivedAt: new Date().toISOString(),
+          valid: await verifySignedPost(post)
+        }))
+      );
+      setDiscoveryPosts(verifiedPosts);
+      addLog(`Fetched ${verifiedPosts.length} discovery posts`);
+    } catch (err: any) {
+      addLog(`Discovery fetch failed: ${err.message}`);
+    }
+  }
+
+  async function handleSaveDiscoveryPost(post: SignedPost) {
+    const valid = await verifySignedPost(post);
+    const stored: StoredPost = {
+      ...post,
+      source: 'discovery',
+      receivedAt: new Date().toISOString(),
+      valid
+    };
+    await savePost(stored);
+    setPosts((prev) => [stored, ...prev]);
+    await saveDiscoveryInteraction({ id: post.id, type: 'saved', timestamp: new Date().toISOString() });
+    addLog(`Saved discovery post locally (${valid ? 'verified' : 'invalid'})`);
+  }
 
   async function handleCreateIdentity() {
     const keys = await generateIdentityKeyPair();
@@ -115,6 +245,7 @@ function App() {
     const manager = peerManagerRef.current;
     const socket = signallingSocketRef.current;
     if (!manager || !socket || !remoteId) return;
+    setCurrentPeerId(remoteId);
     addLog(`Starting call to ${remoteId}`);
     setChat((prev) => [...prev, 'System: Starting call...']);
     manager.createOffer(remoteId, socket);
@@ -127,6 +258,13 @@ function App() {
     manager.sendMessage(message.trim());
     setChat((prev) => [...prev, `You: ${message.trim()}`]);
     setMessage('');
+  }
+
+  function handleSendPostToPeer(post: StoredPost) {
+    const manager = peerManagerRef.current;
+    if (!manager || connectionStatus !== 'connected') return;
+    manager.sendSignedPost(post);
+    addLog(`Sent post ${post.id} to connected peer`);
   }
 
   return (
@@ -175,6 +313,85 @@ function App() {
         </div>
         <p className="note">Use the remote peer's local ID to connect. The signalling server only passes offer/answer and ICE candidates.</p>
         <p className="note">If the call starts, watch the connection log for offer/answer/ICE events, then wait for status to become <strong>Connected</strong>.</p>
+      </div>
+
+      <div className="card">
+        <h2>Contacts</h2>
+        <div>
+          {contacts.map((c) => (
+            <div key={c.fingerprint} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+              <div>
+                <div><strong>{c.displayName ?? c.fingerprint}</strong></div>
+                <div className="note">{c.fingerprint}</div>
+              </div>
+              <div>
+                <button className="btn secondary" onClick={() => handleToggleFollow(c.publicKey)}>{c.followed ? 'Unfollow' : 'Follow'}</button>
+                <button className="btn secondary" onClick={() => { setRemoteId(c.fingerprint); addLog(`Prepared to connect to ${c.fingerprint}`); }}>Connect</button>
+                <button className="btn secondary" onClick={() => handleRemoveContact(c.publicKey)}>Remove</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="note">Add contacts by public key or from discovery results.</p>
+      </div>
+
+      <div className="card">
+        <h2>Create Post</h2>
+        <textarea value={newPostContent} onChange={(e) => setNewPostContent(e.target.value)} placeholder="Write a post..." />
+        <input value={newPostTags} onChange={(e) => setNewPostTags(e.target.value)} placeholder="tags (comma separated)" />
+        <div className="row">
+          <button className="btn" onClick={() => handleCreatePost(false)}>Save locally</button>
+          <button className="btn" onClick={() => handleCreatePost(true)}>Publish to discovery</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Discovery</h2>
+        <div className="row">
+          <button className="btn" onClick={handleFetchDiscovery}>Fetch discovery posts</button>
+        </div>
+        <div>
+          {discoveryPosts.map((p) => (
+            <div key={p.id} style={{ border: '1px solid rgba(255,255,255,0.06)', padding: '0.5rem', marginTop: '0.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
+                <div><strong>{p.author.slice(0, 16)}</strong> <span className="note">{new Date(p.timestamp).toLocaleString()}</span></div>
+                <span className={`note ${p.valid === false ? 'invalid' : 'verified'}`}>{p.valid === false ? 'Invalid' : 'Verified'}</span>
+              </div>
+              <div>{p.content}</div>
+              <div className="note">{p.tags.join(', ')}</div>
+              <div className="row">
+                <button className="btn secondary" onClick={() => handleAddContactFromKey(p.author)}>Add contact</button>
+                <button className="btn secondary" onClick={() => handleToggleFollow(p.author)}>Follow</button>
+                <button className="btn secondary" onClick={() => handleSaveDiscoveryPost(p)}>Save</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card">
+        <h2>Local feed</h2>
+        {posts.length === 0 ? (
+          <p>No posts yet.</p>
+        ) : (
+          <div>
+            {posts.map((p) => (
+              <div key={p.id} style={{ border: '1px solid rgba(255,255,255,0.06)', padding: '0.5rem', marginTop: '0.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
+                  <div><strong>{p.source === 'local' ? 'You' : p.author.slice(0, 16)}</strong> <span className="note">{new Date(p.receivedAt).toLocaleString()}</span></div>
+                  <span className={`note ${p.valid === false ? 'invalid' : 'verified'}`}>{p.valid === false ? 'Invalid' : 'Verified'}</span>
+                </div>
+                <div>{p.content}</div>
+                <div className="note">{p.tags.join(', ')}</div>
+                {connectionStatus === 'connected' && (
+                  <div className="row">
+                    <button className="btn secondary" onClick={() => handleSendPostToPeer(p)}>Send to peer</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card">

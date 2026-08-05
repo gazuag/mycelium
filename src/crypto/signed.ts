@@ -22,8 +22,8 @@ function canonicalizeProfile(profile: Omit<SignedProfile, 'signature'>): string 
     id: profile.id,
     author: profile.author,
     timestamp: profile.timestamp,
-    displayName: profile.displayName ?? null,
-    bio: profile.bio ?? null,
+    displayName: profile.displayName ?? undefined,
+    bio: profile.bio ?? undefined,
     tags: profile.tags ?? []
   });
 }
@@ -125,8 +125,8 @@ export async function verifySignedProfile(profile: SignedProfile): Promise<boole
     id: profile.id,
     author: profile.author,
     timestamp: profile.timestamp,
-    displayName: profile.displayName ?? null,
-    bio: profile.bio ?? null,
+    displayName: profile.displayName ?? undefined,
+    bio: profile.bio ?? undefined,
     tags: profile.tags ?? []
   });
   return verifyData(profile.author, canonical, profile.signature);

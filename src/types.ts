@@ -41,6 +41,7 @@ export interface SignedProfile {
 export interface StoredPost extends SignedPost {
   source: FeedSource;
   receivedAt: string;
+  valid?: boolean;
   saved?: boolean;
   liked?: boolean;
   disliked?: boolean;
