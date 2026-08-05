@@ -7,13 +7,30 @@ export interface SignalMessage {
 
 const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://217.154.78.152:8765';
 
-export function connectToSignalling(localId: string, onMessage: (message: SignalMessage) => void) {
+export function connectToSignalling(
+  localId: string,
+  onMessage: (message: SignalMessage) => void,
+  onStatus?: (status: string) => void
+) {
   const socket = new WebSocket(SIGNAL_SERVER);
 
+  onStatus?.('connecting');
+
   socket.addEventListener('open', () => {
+    onStatus?.('connected');
     console.log('Signalling server connected');
     const registerMessage = JSON.stringify({ type: 'register', id: localId });
     socket.send(registerMessage);
+  });
+
+  socket.addEventListener('close', () => {
+    onStatus?.('closed');
+    console.log('Signalling server disconnected');
+  });
+
+  socket.addEventListener('error', (event) => {
+    onStatus?.('error');
+    console.error('Signalling server error', event);
   });
 
   socket.addEventListener('message', (event) => {

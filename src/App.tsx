@@ -17,9 +17,15 @@ function App() {
   const peerManagerRef = useRef<PeerConnectionManager | null>(null);
   const signallingSocketRef = useRef<WebSocket | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
+  const [signallingStatus, setSignallingStatus] = useState('idle');
   const [remoteId, setRemoteId] = useState('');
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<string[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const addLog = (entry: string) => {
+    setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
+  };
 
   const statusLabel = useMemo(() => {
     switch (connectionStatus) {
@@ -62,14 +68,24 @@ function App() {
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify(signal));
         }
+      },
+      (event) => {
+        addLog(event);
       }
     );
 
     peerManagerRef.current = manager;
 
-    const socket = connectToSignalling(identity.id, (message: SignalMessage) => {
-      manager.handleSignal(message, socket);
-    });
+    const socket = connectToSignalling(
+      identity.id,
+      (message: SignalMessage) => {
+        manager.handleSignal(message, socket);
+      },
+      (status) => {
+        setSignallingStatus(status);
+        addLog(`Signalling server status: ${status}`);
+      }
+    );
     signallingSocketRef.current = socket;
   }, [identity]);
 
@@ -99,13 +115,15 @@ function App() {
     const manager = peerManagerRef.current;
     const socket = signallingSocketRef.current;
     if (!manager || !socket || !remoteId) return;
-    manager.createOffer(remoteId, socket);
+    addLog(`Starting call to ${remoteId}`);
     setChat((prev) => [...prev, 'System: Starting call...']);
+    manager.createOffer(remoteId, socket);
   }
 
   function handleSendMessage() {
     const manager = peerManagerRef.current;
     if (!manager || !message.trim()) return;
+    addLog(`Sending message: ${message.trim()}`);
     manager.sendMessage(message.trim());
     setChat((prev) => [...prev, `You: ${message.trim()}`]);
     setMessage('');
@@ -116,9 +134,15 @@ function App() {
       <div className="card header">
         <h1>Mycelium P2P Social</h1>
         <p className="note">Phase 1 prototype: local identity + WebRTC messaging through a signalling server.</p>
-        <div className="status-badge">
-          <span>Status:</span>
-          <strong>{statusLabel}</strong>
+        <div className="status-row">
+          <div className="status-badge">
+            <span>Connection:</span>
+            <strong>{statusLabel}</strong>
+          </div>
+          <div className="status-badge secondary">
+            <span>Signalling:</span>
+            <strong>{signallingStatus}</strong>
+          </div>
         </div>
       </div>
 
@@ -150,6 +174,7 @@ function App() {
           <button className="btn secondary" onClick={handleStartCall} disabled={!identity?.id || !remoteId}>Connect</button>
         </div>
         <p className="note">Use the remote peer's local ID to connect. The signalling server only passes offer/answer and ICE candidates.</p>
+        <p className="note">If the call starts, watch the connection log for offer/answer/ICE events, then wait for status to become <strong>Connected</strong>.</p>
       </div>
 
       <div className="card">
@@ -163,11 +188,22 @@ function App() {
           <input
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder="Type a message"
+            placeholder={connectionStatus === 'connected' ? 'Type a message' : 'Waiting for connection...'}
             disabled={connectionStatus !== 'connected'}
           />
           <button className="btn" onClick={handleSendMessage} disabled={connectionStatus !== 'connected'}>Send</button>
         </div>
+        <p className="note">The chat box is enabled only when the connection state becomes <strong>Connected</strong>.</p>
+      </div>
+
+      <div className="card">
+        <h2>Connection log</h2>
+        <div className="log-box">
+          {logs.slice(-15).map((entry, index) => (
+            <p key={index}>{entry}</p>
+          ))}
+        </div>
+        <p className="note">Latest signalling and WebRTC events are shown here.</p>
       </div>
     </div>
   );

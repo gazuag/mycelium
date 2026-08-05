@@ -14,17 +14,20 @@ export class PeerConnectionManager {
   private onState: (state: ConnectionState) => void;
   private onData: (message: string) => void;
   private onSignal: (message: SignalMessage) => void;
+  private onEvent: (event: string) => void;
 
   constructor(
     localId: string,
     onState: (state: ConnectionState) => void,
     onData: (message: string) => void,
-    onSignal: (message: SignalMessage) => void
+    onSignal: (message: SignalMessage) => void,
+    onEvent: (event: string) => void
   ) {
     this.localId = localId;
     this.onState = onState;
     this.onData = onData;
     this.onSignal = onSignal;
+    this.onEvent = onEvent;
     this.peerConnection = this.createConnection();
   }
 
@@ -33,6 +36,7 @@ export class PeerConnectionManager {
 
     pc.onicecandidate = (event) => {
       if (event.candidate && this.remoteId) {
+        this.onEvent(`Local ICE candidate ready for ${this.remoteId}`);
         this.onSignal({
           type: 'ice-candidate',
           from: this.localId,
@@ -44,6 +48,7 @@ export class PeerConnectionManager {
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
+      this.onEvent(`PeerConnection state: ${state}`);
       if (state === 'connected') {
         this.onState('connected');
       } else if (state === 'connecting') {
@@ -51,6 +56,14 @@ export class PeerConnectionManager {
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.onState('disconnected');
       }
+    };
+
+    pc.onsignalingstatechange = () => {
+      this.onEvent(`Signaling state: ${pc.signalingState}`);
+    };
+
+    pc.onicegatheringstatechange = () => {
+      this.onEvent(`ICE gathering state: ${pc.iceGatheringState}`);
     };
 
     pc.ondatachannel = (event) => {
@@ -63,9 +76,11 @@ export class PeerConnectionManager {
   private attachDataChannel(channel: RTCDataChannel) {
     this.dataChannel = channel;
     this.dataChannel.onopen = () => {
+      this.onEvent('Data channel opened');
       this.onState('connected');
     };
     this.dataChannel.onclose = () => {
+      this.onEvent('Data channel closed');
       this.onState('disconnected');
     };
     this.dataChannel.onmessage = (event) => {
@@ -78,12 +93,14 @@ export class PeerConnectionManager {
     this.polite = this.localId > remoteId;
     this.makingOffer = true;
     this.onState('signalling');
+    this.onEvent(`Creating offer for ${remoteId}`);
     const channel = this.peerConnection.createDataChannel('chat');
     this.attachDataChannel(channel);
 
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
     this.makingOffer = false;
+    this.onEvent(`Sending offer to ${remoteId}`);
 
     this.sendSignal(signallingSocket, {
       type: 'offer',
@@ -118,15 +135,17 @@ export class PeerConnectionManager {
     if (message.type === 'offer') {
       const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';
       if (offerCollision && !this.polite) {
-        console.warn('Ignoring incoming offer due to glare collision');
+        this.onEvent('Ignoring incoming offer due to glare collision');
         return;
       }
 
+      this.onEvent(`Received offer from ${message.from}`);
       await this.peerConnection.setRemoteDescription(message.payload);
       await this.flushPendingIceCandidates();
 
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
+      this.onEvent(`Sending answer to ${message.from}`);
       this.sendSignal(signallingSocket, {
         type: 'answer',
         from: this.localId,
@@ -134,9 +153,11 @@ export class PeerConnectionManager {
         payload: answer
       });
     } else if (message.type === 'answer') {
+      this.onEvent(`Received answer from ${message.from}`);
       await this.peerConnection.setRemoteDescription(message.payload);
       await this.flushPendingIceCandidates();
     } else if (message.type === 'ice-candidate') {
+      this.onEvent(`Received ICE candidate from ${message.from}`);
       await this.addIceCandidate(message.payload);
     }
   }
