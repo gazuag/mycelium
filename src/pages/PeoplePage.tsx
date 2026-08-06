@@ -1,92 +1,71 @@
-import { CollapsibleSection } from '../components/CollapsibleSection';
-import { PeerCard } from '../components/PeerCard';
+import { useState } from 'react';
 import type { Contact } from '../types';
+import { PeerCard } from '../components/PeerCard';
+import { CollapsibleSection } from '../components/CollapsibleSection';
 
 interface PeoplePageProps {
   contacts: Contact[];
-  onOpenProfile: (peerId: string) => void;
-  onToggleFollow: (publicKey: string) => void;
-  onSelectPeer: (peerId: string) => void;
+  onViewProfile: (peerId: string) => void;
+  onMessage: (peerId: string) => void;
+  onToggleFollow: (peerId: string) => void;
 }
 
-const groupContacts = (contacts: Contact[]) => {
-  const unread = contacts.filter((contact) => contact.unreadMessages && contact.unreadMessages > 0);
-  const friends = contacts.filter((contact) => contact.followed && contact.follower);
-  const following = contacts.filter((contact) => contact.followed && !contact.follower);
-  const followers = contacts.filter((contact) => contact.follower && !contact.followed);
-  const others = contacts.filter((contact) => !contact.followed && !contact.follower && !(contact.unreadMessages && contact.unreadMessages > 0));
-  return { unread, friends, following, followers, others };
-};
+export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow }: PeoplePageProps) {
+  const [openGroups, setOpenGroups] = useState({
+    inbox: true,
+    friends: true,
+    following: true,
+    followers: true,
+    everyone: true
+  });
 
-export function PeoplePage({ contacts, onOpenProfile, onToggleFollow, onSelectPeer }: PeoplePageProps) {
-  const groups = groupContacts(contacts);
+  const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
+  const friends = contacts.filter((c) => c.followed && c.follower);
+  const following = contacts.filter((c) => c.followed && !c.follower);
+  const followers = contacts.filter((c) => !c.followed && c.follower);
+  const everyoneElse = contacts.filter((c) => !c.followed && !c.follower && (c.unreadMessages || 0) === 0);
+
+  const toggleGroup = (group: keyof typeof openGroups) => {
+    setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }));
+  };
+
+  const renderGroup = (title: string, items: Contact[], key: keyof typeof openGroups) => (
+    <CollapsibleSection
+      key={title}
+      title={title}
+      summary={`${items.length} ${items.length === 1 ? 'person' : 'people'}`}
+      isOpen={openGroups[key]}
+      onToggle={() => toggleGroup(key)}
+    >
+      {items.length === 0 ? (
+        <div className="empty-state card"><p>No one here yet.</p></div>
+      ) : (
+        <div className="group-list">
+          {items.map((contact) => (
+            <PeerCard
+              key={contact.fingerprint}
+              contact={contact}
+              onViewProfile={onViewProfile}
+              onMessage={onMessage}
+              onToggleFollow={onToggleFollow}
+            />
+          ))}
+        </div>
+      )}
+    </CollapsibleSection>
+  );
 
   return (
-    <main className="page-content">
-      <section className="section-title">
+    <section className="page-view">
+      <div className="page-header">
         <h2>People</h2>
-        <p className="note">Your inbox, friends, followers, and everyone else.</p>
-      </section>
-
-      <CollapsibleSection title={`Unread Inbox (${groups.unread.length})`} defaultOpen={true}>
-        {groups.unread.length === 0 ? <p className="note">No unread messages.</p> : groups.unread.map((contact) => (
-          <PeerCard
-            key={contact.fingerprint}
-            contact={contact}
-            onSelect={onSelectPeer}
-            onToggleFollow={onToggleFollow}
-            onOpenProfile={onOpenProfile}
-          />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection title={`Friends (${groups.friends.length})`} defaultOpen={true}>
-        {groups.friends.length === 0 ? <p className="note">No friends yet.</p> : groups.friends.map((contact) => (
-          <PeerCard
-            key={contact.fingerprint}
-            contact={contact}
-            onSelect={onSelectPeer}
-            onToggleFollow={onToggleFollow}
-            onOpenProfile={onOpenProfile}
-          />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection title={`Following (${groups.following.length})`} defaultOpen={false}>
-        {groups.following.length === 0 ? <p className="note">You are not following anyone yet.</p> : groups.following.map((contact) => (
-          <PeerCard
-            key={contact.fingerprint}
-            contact={contact}
-            onSelect={onSelectPeer}
-            onToggleFollow={onToggleFollow}
-            onOpenProfile={onOpenProfile}
-          />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection title={`Followers (${groups.followers.length})`} defaultOpen={false}>
-        {groups.followers.length === 0 ? <p className="note">No followers yet.</p> : groups.followers.map((contact) => (
-          <PeerCard
-            key={contact.fingerprint}
-            contact={contact}
-            onSelect={onSelectPeer}
-            onToggleFollow={onToggleFollow}
-            onOpenProfile={onOpenProfile}
-          />
-        ))}
-      </CollapsibleSection>
-
-      <CollapsibleSection title={`Everyone Else (${groups.others.length})`} defaultOpen={false}>
-        {groups.others.length === 0 ? <p className="note">No other contacts yet.</p> : groups.others.map((contact) => (
-          <PeerCard
-            key={contact.fingerprint}
-            contact={contact}
-            onSelect={onSelectPeer}
-            onToggleFollow={onToggleFollow}
-            onOpenProfile={onOpenProfile}
-          />
-        ))}
-      </CollapsibleSection>
-    </main>
+        <p className="note">Manage your contacts, messages, and peers.</p>
+      </div>
+      {renderGroup('Unread Inbox', unreadInbox, 'inbox')}
+      {renderGroup('Friends', friends, 'friends')}
+      {renderGroup('Following', following, 'following')}
+      {renderGroup('Followers', followers, 'followers')}
+      {renderGroup('Everyone Else', everyoneElse, 'everyone')}
+    </section>
   );
 }

@@ -1,35 +1,49 @@
-import type { ReactNode } from 'react';
 import type { StoredPost } from '../types';
 
 interface PostCardProps {
   post: StoredPost;
-  onToggleHide?: (id: string) => void;
-  onLike?: (id: string) => void;
-  onDislike?: (id: string) => void;
-  onReply?: (id: string) => void;
-  onOpenProfile?: (author: string) => void;
-  extraActions?: ReactNode;
+  authorName: string;
+  authorId: string;
+  onAuthorClick: (peerId: string) => void;
+  onLike: () => void;
+  onDislike: () => void;
+  onReply: () => void;
+  footerActions?: React.ReactNode;
 }
 
-export function PostCard({ post, onToggleHide, onLike, onDislike, onReply, onOpenProfile, extraActions }: PostCardProps) {
+export function PostCard({
+  post,
+  authorName,
+  authorId,
+  onAuthorClick,
+  onLike,
+  onDislike,
+  onReply,
+  footerActions
+}: PostCardProps) {
   return (
     <article className="post-card">
-      <div className="post-meta">
-        <button className="post-author" onClick={() => onOpenProfile?.(post.author)}>
-          <strong>{post.authorDisplayName ?? post.author.slice(0, 12)}</strong>
-          <span>{post.author.slice(0, 16)}</span>
+      <div className="post-card-header">
+        <button className="ghost-link" onClick={() => onAuthorClick(authorId)} type="button">
+          <strong>{authorName}</strong>
+          <span className="note">{authorId.slice(0, 16)}</span>
         </button>
-        <span className="post-time">{new Date(post.timestamp).toLocaleString()}</span>
+        <span className="note">{new Date(post.timestamp).toLocaleString()}</span>
       </div>
+
       <p className="post-content">{post.content}</p>
-      <div className="post-tags">{post.tags.map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
+
+      {post.tags.length > 0 ? (
+        <div className="post-tags">{post.tags.map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
+      ) : null}
+
       <div className="post-actions">
-        <button className="btn secondary" onClick={() => onLike?.(post.id)}>Like</button>
-        <button className="btn secondary" onClick={() => onDislike?.(post.id)}>Dislike</button>
-        <button className="btn secondary" onClick={() => onReply?.(post.id)}>Reply</button>
-        <button className="btn secondary" onClick={() => onToggleHide?.(post.id)}>Hide</button>
+        <button className="chip" onClick={onLike} type="button">Like</button>
+        <button className="chip" onClick={onDislike} type="button">Dislike</button>
+        <button className="chip" onClick={onReply} type="button">Reply</button>
       </div>
-      {extraActions && <div className="post-extra-actions">{extraActions}</div>}
+
+      {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}
     </article>
   );
 }

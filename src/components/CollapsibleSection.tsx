@@ -1,21 +1,22 @@
-import { useState } from 'react';
-
 interface CollapsibleSectionProps {
   title: string;
+  summary?: string;
+  isOpen: boolean;
+  onToggle: () => void;
   children: React.ReactNode;
-  defaultOpen?: boolean;
 }
 
-export function CollapsibleSection({ title, children, defaultOpen = true }: CollapsibleSectionProps) {
-  const [open, setOpen] = useState(defaultOpen);
-
+export function CollapsibleSection({ title, summary, isOpen, onToggle, children }: CollapsibleSectionProps) {
   return (
-    <section className="collapsible-section card">
-      <button className="collapsible-trigger" onClick={() => setOpen((prev) => !prev)}>
-        <span>{title}</span>
-        <span>{open ? '−' : '+'}</span>
+    <section className="collapsible-section">
+      <button className="collapsible-toggle" onClick={onToggle} type="button">
+        <div>
+          <strong>{title}</strong>
+          {summary ? <span className="note">{summary}</span> : null}
+        </div>
+        <span>{isOpen ? '▾' : '▸'}</span>
       </button>
-      {open && <div className="collapsible-body">{children}</div>}
+      {isOpen ? <div className="collapsible-content">{children}</div> : null}
     </section>
   );
 }

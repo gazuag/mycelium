@@ -1,22 +1,25 @@
+type PageKey = 'home' | 'people' | 'discover';
+
 interface TabBarProps {
-  currentTab: string;
-  onChangeTab: (tab: string) => void;
+  active: PageKey;
+  onChange: (page: PageKey) => void;
 }
 
-const tabs = [
-  { id: 'home', label: 'Home' },
-  { id: 'people', label: 'People' },
-  { id: 'discover', label: 'Discover' }
+const tabs: Array<{ key: PageKey; label: string }> = [
+  { key: 'home', label: 'Home' },
+  { key: 'people', label: 'People' },
+  { key: 'discover', label: 'Discover' }
 ];
 
-export function TabBar({ currentTab, onChangeTab }: TabBarProps) {
+export function TabBar({ active, onChange }: TabBarProps) {
   return (
     <nav className="tab-bar">
       {tabs.map((tab) => (
         <button
-          key={tab.id}
-          className={`tab-button ${currentTab === tab.id ? 'active' : ''}`}
-          onClick={() => onChangeTab(tab.id)}
+          key={tab.key}
+          className={`tab-item ${active === tab.key ? 'active' : ''}`}
+          onClick={() => onChange(tab.key)}
+          type="button"
         >
           {tab.label}
         </button>

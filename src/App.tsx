@@ -2,17 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256 } from './crypto/identity';
 import { connectToSignalling, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, saveProfile, loadProfile, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
+import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
-import { PeoplePage } from './pages/PeoplePage';
 import { DiscoverPage } from './pages/DiscoverPage';
-import { ChatPage } from './pages/ChatPage';
+import { PeoplePage } from './pages/PeoplePage';
 import { ProfilePage } from './pages/ProfilePage';
 import { MyProfilePage } from './pages/MyProfilePage';
+import { ChatPage } from './pages/ChatPage';
+import { SettingsPage } from './pages/SettingsPage';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -20,11 +21,15 @@ interface IdentityRecord {
   publicKey: string;
   privateKey: string;
   id: string;
-  nickname?: string;
-  bio?: string;
 }
 
-type AppPage = 'home' | 'people' | 'discover' | 'profile' | 'myprofile' | 'chat';
+type PageKey = 'home' | 'people' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
+
+interface ChatEntry {
+  text: string;
+  isMine: boolean;
+  timestamp: string;
+}
 
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
@@ -38,42 +43,38 @@ function App() {
   const [dataChannelOpen, setDataChannelOpen] = useState(false);
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
-  const [directChats, setDirectChats] = useState<Record<string, string[]>>({});
+  const [directChats, setDirectChats] = useState<Record<string, ChatEntry[]>>({});
   const [messageQueue, setMessageQueue] = useState<Record<string, QueuedMessage[]>>({});
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [posts, setPosts] = useState<StoredPost[]>([]);
+  const [page, setPage] = useState<PageKey>('home');
+  const [profileContactId, setProfileContactId] = useState<string | null>(null);
+  const [chatContactId, setChatContactId] = useState<string | null>(null);
+  const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
+  const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
+  const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
+  const [myProfile, setMyProfile] = useState({ displayName: '', bio: '' });
+  const [messageDraft, setMessageDraft] = useState('');
+  const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
+    home: 0,
+    people: 0,
+    discover: 0,
+    profile: 0,
+    myProfile: 0,
+    chat: 0,
+    settings: 0
+  });
   const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
-  const [currentPage, setCurrentPage] = useState<'home' | 'people' | 'discover' | 'profile' | 'myprofile' | 'chat'>('home');
-  const [headerCollapsed, setHeaderCollapsed] = useState(() => localStorage.getItem('headerCollapsed') === 'true');
-  const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
-  const [profilePeerId, setProfilePeerId] = useState<string | null>(null);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
-  const profileContact = profilePeerId ? contacts.find((c) => c.fingerprint === profilePeerId) : undefined;
   const chatInputEnabled = selectedContactId !== null;
   const selectedContactOnline = selectedContact?.online ?? false;
   const selectedContactConnected = selectedContact?.connected ?? false;
   const selectedContactQueued = selectedContact?.queuedMessages ?? 0;
   const selectedContactUnread = selectedContact?.unreadMessages ?? 0;
-  const homeFeedPosts = posts
-    .filter((post) => !hiddenPostIds.has(post.id))
-    .filter((post) => post.author === identity?.id || contacts.some((contact) => contact.fingerprint === post.author && contact.followed))
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  const discoveryFeedPosts = discoveryPosts
-    .filter((post) => !hiddenPostIds.has(post.id))
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  const myPosts = posts
-    .filter((post) => post.author === identity?.id)
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  const profilePosts = profilePeerId
-    ? posts.filter((post) => post.author === profilePeerId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    : [];
-  const profileLikedPosts = posts
-    .filter((post) => post.reaction === 'like' && post.author !== profilePeerId)
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   const addLog = (entry: string) => {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
@@ -95,6 +96,8 @@ function App() {
   }, [connectionStatus]);
 
   const chatEnabled = selectedContactId !== null && selectedContactConnected && dataChannelOpen;
+  const pageContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
+  const chatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
 
   const setContactState = async (peerId: string, updates: Partial<Contact>, persist = false) => {
     setContacts((prev) => prev.map((contact) => (contact.fingerprint === peerId ? { ...contact, ...updates } : contact)));
@@ -163,9 +166,14 @@ function App() {
   };
 
   const saveDirectMessage = (peerId: string, messageText: string, fromPeer = true) => {
+    const chatEntry: ChatEntry = {
+      text: messageText,
+      isMine: !fromPeer,
+      timestamp: new Date().toISOString()
+    };
     setDirectChats((prev) => ({
       ...prev,
-      [peerId]: [...(prev[peerId] || []), fromPeer ? `Peer: ${messageText}` : `You: ${messageText}`]
+      [peerId]: [...(prev[peerId] || []), chatEntry]
     }));
   };
 
@@ -475,6 +483,32 @@ function App() {
     addLog(`Removed contact`);
   }
 
+  const handleHidePost = (postId: string) => {
+    setHiddenPostIds((prev) => {
+      const next = new Set(prev);
+      next.add(postId);
+      localStorage.setItem('hiddenPosts', JSON.stringify(Array.from(next)));
+      return next;
+    });
+  };
+
+  const handleHideDiscoveryPost = (postId: string) => {
+    setHiddenDiscoveryIds((prev) => {
+      const next = new Set(prev);
+      next.add(postId);
+      localStorage.setItem('hiddenDiscovery', JSON.stringify(Array.from(next)));
+      return next;
+    });
+  };
+
+  const handleLikePost = async (postId: string) => {
+    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'like' } : post)));
+  };
+
+  const handleDislikePost = async (postId: string) => {
+    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'dislike' } : post)));
+  };
+
   async function handleCreatePost(publishToDiscovery = false) {
     if (!identity) return;
     const id = await sha256(identity.publicKey + Date.now().toString());
@@ -509,6 +543,45 @@ function App() {
       }
     }
   }
+
+  const visibleHomePosts = posts
+    .filter((post) => !hiddenPostIds.has(post.id))
+    .filter((post) => post.author === identity?.id || contacts.some((c) => c.fingerprint === post.author && c.followed))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id));
+
+  const profilePosts = profileContactId
+    ? posts.filter((post) => post.author === profileContactId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    : [];
+
+  const likedProfilePosts = profileContactId
+    ? posts.filter((post) => post.author === profileContactId && post.reaction === 'like').sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    : [];
+
+  const currentChatMessages = chatContactId ? directChats[chatContactId] || [] : [];
+
+  function handlePageChange(nextPage: PageKey) {
+    const pageContainer = document.getElementById('page-content');
+    if (pageContainer) {
+      setPageScrollPositions((prev) => ({ ...prev, [page]: pageContainer.scrollTop }));
+    }
+    setPage(nextPage);
+  }
+
+  const handleToggleHeader = () => {
+    setCollapsedHeader((prev) => {
+      localStorage.setItem('myceliumHeaderCollapsed', JSON.stringify(!prev));
+      return !prev;
+    });
+  };
+
+  useEffect(() => {
+    const pageContainer = document.getElementById('page-content');
+    if (pageContainer) {
+      pageContainer.scrollTop = pageScrollPositions[page] || 0;
+    }
+  }, [page, pageScrollPositions]);
 
   async function handleFetchDiscovery() {
     try {
@@ -578,14 +651,14 @@ function App() {
   }
 
   function handleSelectContact(peerId: string) {
-    setSelectedContactId(peerId);
-    addLog(`Selected contact ${peerId}`);
+    setSelectedContactId(peerId);    setChatContactId(peerId);
+    setPage('chat');    addLog(`Selected contact ${peerId}`);
     updateContactState(peerId, { unreadMessages: 0 });
   }
 
   async function handleSendDirectMessage() {
-    if (!selectedContactId || !message.trim()) return;
-    const peerId = selectedContactId;
+    if (!chatContactId || !message.trim()) return;
+    const peerId = chatContactId;
     const trimmedMessage = message.trim();
     const manager = peerManagersRef.current[peerId];
 
@@ -599,10 +672,7 @@ function App() {
       addLog(`Queued direct message for ${peerId}`);
     }
 
-    if (selectedContactId === peerId) {
-      updateContactState(peerId, { unreadMessages: 0 });
-    }
-
+    updateContactState(peerId, { unreadMessages: 0 });
     setMessage('');
   }
 
@@ -614,179 +684,138 @@ function App() {
     addLog(`Sent post ${post.id} to peer ${selectedContactId}`);
   }
 
+  const connectedPeersCount = contacts.filter((contact) => contact.connected).length;
+  const syncStatus = signallingStatus === 'connected' ? 'synced' : signallingStatus;
+  const activeProfileContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
+  const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
+
   return (
     <div className="app-shell">
-      <div className="card header">
-        <h1>Mycelium P2P Social</h1>
-        <p className="note">Phase 1 prototype: local identity + WebRTC messaging through a signalling server.</p>
-        <div className="status-row">
-          <div className="status-badge">
-            <span>Connection:</span>
-            <strong>{statusLabel}</strong>
-          </div>
-          <div className="status-badge secondary">
-            <span>Signalling:</span>
-            <strong>{signallingStatus}</strong>
-          </div>
-        </div>
-      </div>
+      <AppHeader
+        collapsed={collapsedHeader}
+        onToggleCollapse={handleToggleHeader}
+        connectionStatus={connectionStatus}
+        signallingStatus={signallingStatus}
+        connectedPeers={connectedPeersCount}
+        syncStatus={syncStatus}
+        myFingerprint={identity?.id}
+        onOpenMyProfile={() => setPage('myProfile')}
+        onOpenSettings={() => setPage('settings')}
+        onRefreshDiscovery={handleFetchDiscovery}
+      />
 
-      <div className="card">
-        <h2>Identity</h2>
-        {identity ? (
-          <>
-            <p><strong>Local ID:</strong> {identity.id}</p>
-            <p><strong>Fingerprint:</strong> {identity.id}</p>
-            <button className="btn" onClick={handleExportIdentity}>Export identity backup</button>
-            <p className="note">Your private key stays on this device. Losing it means losing this identity.</p>
-          </>
-        ) : (
-          <>
-            <p>No local identity found.</p>
-            <button className="btn" onClick={handleCreateIdentity}>Create local identity</button>
-          </>
-        )}
-      </div>
-
-      <div className="card">
-        <h2>Peer connection</h2>
-        <div className="row">
-          <input
-            value={remoteId}
-            onChange={(event) => setRemoteId(event.target.value)}
-            placeholder="Remote peer ID"
+      <main id="page-content" className="page-content">
+        {page === 'home' && (
+          <HomePage
+            posts={visibleHomePosts}
+            contacts={contacts}
+            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onLike={handleLikePost}
+            onDislike={handleDislikePost}
+            onReply={() => {}}
+            onHide={handleHidePost}
           />
-          <button className="btn secondary" onClick={handleStartCall} disabled={!identity?.id || !remoteId}>Connect</button>
-        </div>
-        <p className="note">Use the remote peer's local ID to connect. The signalling server only passes offer/answer and ICE candidates.</p>
-        <p className="note">If the call starts, watch the connection log for offer/answer/ICE events, then wait for status to become <strong>Connected</strong>.</p>
-      </div>
-
-      <div className="card">
-        <h2>Connections</h2>
-        <div>
-          {contacts.map((c) => (
-            <div key={c.fingerprint} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', padding: '0.75rem', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-              <div style={{ minWidth: 0 }}>
-                <div><strong>{c.displayName ?? c.fingerprint}</strong></div>
-                <div className="note">{c.fingerprint}</div>
-                <div className="note">
-                  {c.followed ? 'Following' : 'Not following'} · {c.follower ? 'Follower' : 'Not follower'} · {c.online ? 'Online' : 'Offline'} · {c.connected ? 'Connected' : 'Disconnected'}
-                  {c.unreadMessages ? ` · ${c.unreadMessages} new` : ''}
-                  {c.queuedMessages ? ` · ${c.queuedMessages} queued` : ''}
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <button className="btn secondary" onClick={() => handleToggleFollow(c.publicKey)}>{c.followed ? 'Unfollow' : 'Follow'}</button>
-                <button className="btn secondary" onClick={() => handleSelectContact(c.fingerprint)}>
-                  DM{c.unreadMessages ? ` (${c.unreadMessages})` : ''}
-                </button>
-                <button className="btn secondary" onClick={() => {
-                  if (window.confirm(`Remove peer ${c.fingerprint}? This will forget connection history.`)) {
-                    handleRemoveContact(c.publicKey);
-                  }
-                }}>Remove</button>
-              </div>
-            </div>
-          ))}
-        </div>
-        <p className="note">The Connections section includes all peers you've added or discovered. Followed peers are auto-connected when online, and offline DMs queue until delivery.</p>
-      </div>
-
-      <div className="card">
-        <h2>Create Post</h2>
-        <textarea value={newPostContent} onChange={(e) => setNewPostContent(e.target.value)} placeholder="Write a post..." />
-        <input value={newPostTags} onChange={(e) => setNewPostTags(e.target.value)} placeholder="tags (comma separated)" />
-        <div className="row">
-          <button className="btn" onClick={() => handleCreatePost(false)}>Save locally</button>
-          <button className="btn" onClick={() => handleCreatePost(true)}>Publish to discovery</button>
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>Discovery</h2>
-        <div className="row">
-          <button className="btn" onClick={handleFetchDiscovery}>Fetch discovery posts</button>
-        </div>
-        <div>
-          {discoveryPosts.map((p) => (
-            <div key={p.id} style={{ border: '1px solid rgba(255,255,255,0.06)', padding: '0.5rem', marginTop: '0.5rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
-                <div><strong>{p.author.slice(0, 16)}</strong> <span className="note">{new Date(p.timestamp).toLocaleString()}</span></div>
-                <span className={`note ${p.valid === false ? 'invalid' : 'verified'}`}>{p.valid === false ? 'Invalid' : 'Verified'}</span>
-              </div>
-              <div>{p.content}</div>
-              <div className="note">{p.tags.join(', ')}</div>
-              <div className="row">
-                <button className="btn secondary" onClick={() => handleAddContactFromKey(p.author)}>Add contact</button>
-                <button className="btn secondary" onClick={() => handleToggleFollow(p.author)}>Follow</button>
-                <button className="btn secondary" onClick={() => handleSaveDiscoveryPost(p)}>Save</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="card">
-        <h2>Local feed</h2>
-        {posts.length === 0 ? (
-          <p>No posts yet.</p>
-        ) : (
-          <div>
-            {posts.map((p) => (
-              <div key={p.id} style={{ border: '1px solid rgba(255,255,255,0.06)', padding: '0.5rem', marginTop: '0.5rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
-                  <div><strong>{p.source === 'local' ? 'You' : p.author.slice(0, 16)}</strong> <span className="note">{new Date(p.receivedAt).toLocaleString()}</span></div>
-                  <span className={`note ${p.valid === false ? 'invalid' : 'verified'}`}>{p.valid === false ? 'Invalid' : 'Verified'}</span>
-                </div>
-                <div>{p.content}</div>
-                <div className="note">{p.tags.join(', ')}</div>
-                {connectionStatus === 'connected' && (
-                  <div className="row">
-                    <button className="btn secondary" onClick={() => handleSendPostToPeer(p)}>Send to peer</button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
         )}
-      </div>
 
-      {selectedContactId && selectedContact && (
-        <div className="card">
-          <h3>Chat with {selectedContact.displayName ?? selectedContact.fingerprint}</h3>
-          <p className="note">
-            Status: {selectedContact.connected ? 'Connected' : selectedContact.online ? 'Online' : 'Offline'} ·
-            {selectedContact.followed ? ' You follow them' : ' You do not follow them'} ·
-            {selectedContact.follower ? ' Follows you' : ' Does not follow you'}
-          </p>
-          <div>
-            {(directChats[selectedContactId] || []).map((entry, index) => (
-              <p key={index}>{entry}</p>
-            ))}
-          </div>
-          <div className="row">
-            <input
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              placeholder={selectedContactId ? 'Type a message' : 'Select a contact first'}
-              disabled={!selectedContactId}
-            />
-            <button className="btn" onClick={handleSendDirectMessage} disabled={!chatInputEnabled || !message.trim()}>Send</button>
-          </div>
-          <p className="note">Message will queue when the peer is offline or not connected, then deliver automatically when the data channel opens.</p>
-        </div>
-      )}
+        {page === 'people' && (
+          <PeoplePage
+            contacts={contacts}
+            onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onMessage={(peerId) => { setChatContactId(peerId); setPage('chat'); }}
+            onToggleFollow={handleToggleFollow}
+          />
+        )}
 
-      <div className="card">
-        <h2>Connection log</h2>
-        <div className="log-box">
-          {logs.slice(-15).map((entry, index) => (
-            <p key={index}>{entry}</p>
-          ))}
-        </div>
-        <p className="note">Latest signalling and WebRTC events are shown here.</p>
-      </div>
+        {page === 'discover' && (
+          <DiscoverPage
+            discoveryPosts={visibleDiscoveryPosts}
+            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onAddContact={handleAddContactFromKey}
+            onFollow={handleToggleFollow}
+            onLike={handleLikePost}
+            onDislike={handleDislikePost}
+            onHide={handleHideDiscoveryPost}
+            onSave={handleSaveDiscoveryPost}
+          />
+        )}
+
+        {page === 'profile' && activeProfileContact && (
+          <ProfilePage
+            contact={activeProfileContact}
+            posts={profilePosts}
+            likedPosts={likedProfilePosts}
+            onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
+            onBlock={() => undefined}
+            onMessage={() => { setChatContactId(activeProfileContact.fingerprint); setPage('chat'); }}
+            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onLike={handleLikePost}
+            onDislike={handleDislikePost}
+          />
+        )}
+
+        {page === 'myProfile' && (
+          <MyProfilePage
+            identityId={identity?.id ?? ''}
+            publicKey={identity?.publicKey ?? ''}
+            contacts={contacts}
+            posts={posts}
+            nickname={myProfile.displayName}
+            bio={myProfile.bio}
+            onNicknameChange={(value) => setMyProfile((prev) => ({ ...prev, displayName: value }))}
+            onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
+            onSaveProfile={() => {
+              localStorage.setItem('myProfile', JSON.stringify(myProfile));
+            }}
+            onExportIdentity={handleExportIdentity}
+            onImportIdentity={() => {
+              const input = document.createElement('input');
+              input.type = 'file';
+              input.accept = 'application/json';
+              input.onchange = async (event) => {
+                const file = (event.target as HTMLInputElement).files?.[0];
+                if (!file) return;
+                const text = await file.text();
+                try {
+                  const imported = JSON.parse(text);
+                  if (imported?.publicKey && imported?.privateKey && imported?.id) {
+                    await saveIdentity(imported);
+                    setIdentity(imported);
+                  }
+                } catch (error) {
+                  addLog('Import failed');
+                }
+              };
+              input.click();
+            }}
+          />
+        )}
+
+        {page === 'chat' && activeChatContact && (
+          <ChatPage
+            contact={activeChatContact}
+            messages={currentChatMessages}
+            messageDraft={message}
+            onMessageChange={setMessage}
+            onSendMessage={handleSendDirectMessage}
+            connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
+          />
+        )}
+
+        {page === 'settings' && (
+          <SettingsPage
+            onResetApp={() => {
+              setHiddenPostIds(new Set());
+              setHiddenDiscoveryIds(new Set());
+              setCollapsedHeader(false);
+              localStorage.removeItem('hiddenPosts');
+              localStorage.removeItem('hiddenDiscovery');
+              localStorage.removeItem('myceliumHeaderCollapsed');
+            }}
+          />
+        )}
+      </main>
+
+      <TabBar active={page === 'home' || page === 'people' || page === 'discover' ? page : 'home'} onChange={handlePageChange} />
     </div>
   );
 }

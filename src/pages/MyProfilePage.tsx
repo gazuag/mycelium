@@ -1,66 +1,76 @@
-import type { StoredPost } from '../types';
+import type { Contact, StoredPost } from '../types';
 
 interface MyProfilePageProps {
-  fingerprint: string;
+  identityId: string;
   publicKey: string;
+  contacts: Contact[];
+  posts: StoredPost[];
   nickname: string;
   bio: string;
-  connectedPeerCount: number;
-  onSaveProfile: (nickname: string, bio: string) => void;
+  onNicknameChange: (value: string) => void;
+  onBioChange: (value: string) => void;
+  onSaveProfile: () => void;
   onExportIdentity: () => void;
   onImportIdentity: () => void;
-  onBack: () => void;
-  posts: StoredPost[];
 }
 
-export function MyProfilePage({ fingerprint, publicKey, nickname, bio, connectedPeerCount, onSaveProfile, onExportIdentity, onImportIdentity, onBack, posts }: MyProfilePageProps) {
-  const [draftNickname, setDraftNickname] = useState(nickname);
-  const [draftBio, setDraftBio] = useState(bio);
-
+export function MyProfilePage({
+  identityId,
+  publicKey,
+  contacts,
+  posts,
+  nickname,
+  bio,
+  onNicknameChange,
+  onBioChange,
+  onSaveProfile,
+  onExportIdentity,
+  onImportIdentity
+}: MyProfilePageProps) {
   return (
-    <main className="page-content">
-      <section className="page-header">
-        <button className="link-button" onClick={onBack}>Back</button>
-        <div>
-          <h2>My Profile</h2>
-          <p className="note">Manage your identity and connection stats.</p>
-        </div>
-      </section>
+    <section className="page-view">
+      <div className="page-header">
+        <h2>My Profile</h2>
+        <p className="note">Manage your identity and export/import data safely.</p>
+      </div>
 
-      <div className="profile-editor card">
+      <div className="card profile-edit-card">
         <label>
           Nickname
-          <input value={draftNickname} onChange={(e) => setDraftNickname(e.target.value)} />
+          <input value={nickname} onChange={(e) => onNicknameChange(e.target.value)} placeholder="Your display name" />
         </label>
         <label>
           Bio
-          <textarea value={draftBio} onChange={(e) => setDraftBio(e.target.value)} />
+          <textarea value={bio} onChange={(e) => onBioChange(e.target.value)} placeholder="Write a short bio" />
         </label>
-        <div className="button-row">
-          <button className="btn" onClick={() => onSaveProfile(draftNickname, draftBio)}>Save Profile</button>
+        <div className="row">
+          <button className="btn" onClick={onSaveProfile}>Save Profile</button>
           <button className="btn secondary" onClick={onExportIdentity}>Export Identity</button>
-          <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
+        </div>
+        <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
+      </div>
+
+      <div className="card">
+        <h3>Identity</h3>
+        <p><strong>Fingerprint</strong></p>
+        <p className="note monospace">{identityId}</p>
+        <p><strong>Public key</strong></p>
+        <p className="note monospace break-word">{publicKey}</p>
+      </div>
+
+      <div className="card">
+        <h3>Stats</h3>
+        <div className="stat-grid">
+          <div>
+            <strong>{contacts.length}</strong>
+            <p className="note">Peers</p>
+          </div>
+          <div>
+            <strong>{posts.length}</strong>
+            <p className="note">Posts</p>
+          </div>
         </div>
       </div>
-
-      <div className="card">
-        <p><strong>Fingerprint</strong></p>
-        <p className="note">{fingerprint}</p>
-        <p><strong>Public key</strong></p>
-        <p className="note">{publicKey}</p>
-        <p><strong>Connected peers</strong></p>
-        <p className="note">{connectedPeerCount}</p>
-      </div>
-
-      <div className="card">
-        <h3>Your posts</h3>
-        {posts.length === 0 ? <p className="note">No posts yet.</p> : posts.map((post) => (
-          <article key={post.id} className="post-card">
-            <p>{post.content}</p>
-            <p className="note">{new Date(post.timestamp).toLocaleString()}</p>
-          </article>
-        ))}
-      </div>
-    </main>
+    </section>
   );
 }

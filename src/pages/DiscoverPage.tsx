@@ -1,42 +1,53 @@
-import { PostCard } from '../components/PostCard';
 import type { StoredPost } from '../types';
+import { PostCard } from '../components/PostCard';
 
 interface DiscoverPageProps {
-  posts: StoredPost[];
-  onOpenProfile: (peerId: string) => void;
-  onLike: (id: string) => void;
-  onDislike: (id: string) => void;
-  onHide: (id: string) => void;
-  onFollow: (publicKey: string) => void;
+  discoveryPosts: StoredPost[];
+  onAuthorClick: (peerId: string) => void;
   onAddContact: (publicKey: string) => void;
+  onFollow: (publicKey: string) => void;
+  onLike: (postId: string) => void;
+  onDislike: (postId: string) => void;
+  onHide: (postId: string) => void;
+  onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ posts, onOpenProfile, onLike, onDislike, onHide, onFollow, onAddContact }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
   return (
-    <main className="page-content">
-      <section className="section-title">
+    <section className="page-view">
+      <div className="page-header">
         <h2>Discover</h2>
-        <p className="note">Explore content from the wider Mycelium network.</p>
-      </section>
-      <div className="feed-list">
-        {posts.length === 0 ? (
-          <div className="empty-state card">
-            <p>No discovery posts loaded yet. Refresh to load new cards.</p>
-          </div>
-        ) : (
-          posts.map((post) => (
+        <p className="note">Explore public posts from the wider network.</p>
+      </div>
+
+      {discoveryPosts.length === 0 ? (
+        <div className="empty-state card">
+          <p>No discovery posts available yet. Pull to refresh or publish a post.</p>
+        </div>
+      ) : (
+        <div className="feed-list">
+          {discoveryPosts.map((post) => (
             <PostCard
               key={post.id}
               post={post}
-              onOpenProfile={onOpenProfile}
-              onLike={onLike}
-              onDislike={onDislike}
-              onToggleHide={onHide}
-              onReply={() => undefined}
+              authorName={post.author.slice(0, 16)}
+              authorId={post.author}
+              onAuthorClick={onAuthorClick}
+              onLike={() => onLike(post.id)}
+              onDislike={() => onDislike(post.id)}
+              onReply={() => {} }
+              footerActions={
+                <div className="discover-actions">
+                  <button className="chip" type="button" onClick={() => onAddContact(post.author)}>Add contact</button>
+                  <button className="chip" type="button" onClick={() => onFollow(post.author)}>Follow</button>
+                  <button className="chip" type="button" onClick={() => onSave(post)}>Save</button>
+                  <button className="chip secondary" type="button" onClick={() => onHide(post.id)}>Hide</button>
+                </div>
+              }
             />
-          ))
-        )}
-      </div>
-    </main>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

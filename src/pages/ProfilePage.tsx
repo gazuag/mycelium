@@ -1,41 +1,62 @@
 import { useState } from 'react';
+import type { Contact, StoredPost } from '../types';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
-import type { Contact, StoredPost } from '../types';
 
 interface ProfilePageProps {
   contact: Contact;
   posts: StoredPost[];
   likedPosts: StoredPost[];
-  onFollowToggle: (publicKey: string) => void;
-  onMessage: (peerId: string) => void;
-  onBlock: (peerId: string) => void;
-  onOpenPostAuthor: (peerId: string) => void;
+  onFollowToggle: () => void;
+  onBlock: () => void;
+  onMessage: () => void;
+  onAuthorClick: (peerId: string) => void;
+  onLike: (postId: string) => void;
+  onDislike: (postId: string) => void;
 }
 
-export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onMessage, onBlock, onOpenPostAuthor }: ProfilePageProps) {
+export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBlock, onMessage, onAuthorClick, onLike, onDislike }: ProfilePageProps) {
   const [activeTab, setActiveTab] = useState<'posts' | 'liked'>('posts');
 
+  const visiblePosts = activeTab === 'posts' ? posts : likedPosts;
+
   return (
-    <main className="page-content">
-      <ProfileHeader contact={contact} onFollowToggle={onFollowToggle} onMessage={onMessage} onBlock={onBlock} />
+    <section className="page-view profile-page">
+      <div className="page-header">
+        <h2>Profile</h2>
+        <p className="note">{contact.displayName ?? contact.fingerprint.slice(0, 16)}</p>
+      </div>
+
+      <ProfileHeader
+        contact={contact}
+        onFollowToggle={onFollowToggle}
+        onBlock={onBlock}
+        onMessage={onMessage}
+      />
+
       <div className="segment-control">
-        <button className={activeTab === 'posts' ? 'active' : ''} onClick={() => setActiveTab('posts')}>Posts</button>
-        <button className={activeTab === 'liked' ? 'active' : ''} onClick={() => setActiveTab('liked')}>Liked</button>
+        <button className={activeTab === 'posts' ? 'active' : ''} type="button" onClick={() => setActiveTab('posts')}>Posts</button>
+        <button className={activeTab === 'liked' ? 'active' : ''} type="button" onClick={() => setActiveTab('liked')}>Liked</button>
       </div>
-      <div className="feed-list">
-        {(activeTab === 'posts' ? posts : likedPosts).map((post) => (
-          <PostCard
-            key={post.id}
-            post={post}
-            onOpenProfile={onOpenPostAuthor}
-            onLike={() => undefined}
-            onDislike={() => undefined}
-            onToggleHide={() => undefined}
-            onReply={() => undefined}
-          />
-        ))}
-      </div>
-    </main>
+
+      {visiblePosts.length === 0 ? (
+        <div className="empty-state card"><p>No posts found for this profile.</p></div>
+      ) : (
+        <div className="feed-list">
+          {visiblePosts.map((post) => (
+            <PostCard
+              key={post.id}
+              post={post}
+              authorName={contact.displayName ?? contact.fingerprint.slice(0, 16)}
+              authorId={contact.fingerprint}
+              onAuthorClick={onAuthorClick}
+              onLike={() => onLike(post.id)}
+              onDislike={() => onDislike(post.id)}
+              onReply={() => {} }
+            />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

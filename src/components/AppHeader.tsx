@@ -2,80 +2,74 @@ import type { ConnectionState } from '../types';
 
 interface AppHeaderProps {
   collapsed: boolean;
-  onToggleCollapsed: () => void;
+  onToggleCollapse: () => void;
   connectionStatus: ConnectionState;
   signallingStatus: string;
   connectedPeers: number;
   syncStatus: string;
+  myFingerprint?: string;
   onOpenMyProfile: () => void;
+  onOpenSettings: () => void;
   onRefreshDiscovery: () => void;
-  onImportIdentity: () => void;
-  showBack?: boolean;
-  onBack?: () => void;
-  pageTitle: string;
 }
 
 export function AppHeader({
   collapsed,
-  onToggleCollapsed,
+  onToggleCollapse,
   connectionStatus,
   signallingStatus,
   connectedPeers,
   syncStatus,
+  myFingerprint,
   onOpenMyProfile,
-  onRefreshDiscovery,
-  onImportIdentity,
-  showBack = false,
-  onBack,
-  pageTitle
+  onOpenSettings,
+  onRefreshDiscovery
 }: AppHeaderProps) {
   return (
-    <header className="app-header card">
-      <div className="header-top">
-        {showBack && onBack ? (
-          <button className="icon-button" onClick={onBack} aria-label="Back">
-            ←
-          </button>
-        ) : (
-          <div className="header-spacer" />
-        )}
+    <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
+      <div className="app-header-top">
         <div>
-          <p className="eyebrow">Mycelium</p>
-          <h1>{pageTitle}</h1>
+          <p className="app-title">Mycelium</p>
+          <p className="app-subtitle">Private peer-to-peer social</p>
         </div>
-        <button className="icon-button" onClick={onToggleCollapsed} aria-label="Toggle header">
-          {collapsed ? '∨' : '∧'}
+        <button className="icon-btn" onClick={onToggleCollapse} aria-label="Toggle header">
+          {collapsed ? '▼' : '▲'}
         </button>
       </div>
 
-      {!collapsed && (
-        <div className="header-body">
-          <div className="status-row wrap">
-            <div className="status-pill">
-              <span>Connection</span>
-              <strong>{connectionStatus}</strong>
-            </div>
-            <div className="status-pill secondary">
-              <span>Signalling</span>
-              <strong>{signallingStatus}</strong>
-            </div>
-            <div className="status-pill secondary">
-              <span>Peers</span>
-              <strong>{connectedPeers}</strong>
-            </div>
-            <div className="status-pill secondary">
-              <span>Sync</span>
-              <strong>{syncStatus}</strong>
-            </div>
+      <div className={`app-header-body ${collapsed ? 'collapsed' : ''}`}>
+        <div className="status-row">
+          <div className="status-pill">
+            <span>Net</span>
+            <strong>{connectionStatus}</strong>
           </div>
-
-          <div className="button-row">
-            <button className="btn" onClick={onOpenMyProfile}>My Profile</button>
-            <button className="btn secondary" onClick={onRefreshDiscovery}>Refresh</button>
-            <button className="btn secondary" onClick={onImportIdentity}>Import</button>
+          <div className="status-pill secondary">
+            <span>Signal</span>
+            <strong>{signallingStatus}</strong>
+          </div>
+          <div className="status-pill secondary">
+            <span>Peers</span>
+            <strong>{connectedPeers}</strong>
+          </div>
+          <div className="status-pill secondary">
+            <span>Sync</span>
+            <strong>{syncStatus}</strong>
           </div>
         </div>
-      )}
+
+        {myFingerprint && (
+          <div className="identity-line">
+            <span>Me</span>
+            <strong>{myFingerprint}</strong>
+          </div>
+        )}
+
+        <div className="app-header-actions">
+          <button className="btn" onClick={onOpenMyProfile}>My profile</button>
+          <button className="btn secondary" onClick={onRefreshDiscovery}>Refresh</button>
+          <button className="btn secondary" onClick={onOpenSettings}>Settings</button>
+        </div>
+      </div>
     </header>
   );
 }
