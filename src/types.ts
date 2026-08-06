@@ -9,8 +9,11 @@ export interface Contact {
   profile?: SignedProfile;
   addedAt: string;
   followed: boolean;
+  online?: boolean;
+  connected?: boolean;
   lastConnectionStatus?: string;
   lastSeen?: string;
+  unreadMessages?: number;
 }
 
 export interface SignedPost {
@@ -22,6 +25,9 @@ export interface SignedPost {
   timestamp: string;
   content: string;
   tags: string[];
+  reaction?: 'like' | 'dislike';
+  repostOf?: string;
+  originalAuthor?: string;
   signature: string;
 }
 

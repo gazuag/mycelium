@@ -1,9 +1,14 @@
-export interface SignalMessage {
-  type: 'offer' | 'answer' | 'ice-candidate';
-  from: string;
-  to: string;
-  payload: any;
-}
+export type SignalMessage =
+  | {
+      type: 'offer' | 'answer' | 'ice-candidate';
+      from: string;
+      to: string;
+      payload: any;
+    }
+  | {
+      type: 'peer-list';
+      peers: string[];
+    };
 
 const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://217.154.78.152:8765';
 
@@ -13,13 +18,14 @@ export function connectToSignalling(
   onStatus?: (status: string) => void
 ) {
   const socket = new WebSocket(SIGNAL_SERVER);
+  const normalizedId = localId.trim();
 
   onStatus?.('connecting');
 
   socket.addEventListener('open', () => {
     onStatus?.('connected');
     console.log('Signalling server connected');
-    const registerMessage = JSON.stringify({ type: 'register', id: localId });
+    const registerMessage = JSON.stringify({ type: 'register', id: normalizedId });
     socket.send(registerMessage);
   });
 

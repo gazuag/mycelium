@@ -10,7 +10,10 @@ function canonicalizePost(post: Omit<SignedPost, 'signature'>): string {
     author: post.author,
     timestamp: post.timestamp,
     content: post.content,
-    tags: post.tags
+    tags: post.tags,
+    reaction: post.reaction ?? undefined,
+    repostOf: post.repostOf ?? undefined,
+    originalAuthor: post.originalAuthor ?? undefined
   });
 }
 
@@ -54,7 +57,8 @@ export async function createSignedPost(
   authorKey: string,
   privateKey: string,
   content: string,
-  tags: string[]
+  tags: string[],
+  options: { reaction?: 'like' | 'dislike'; repostOf?: string; originalAuthor?: string } = {}
 ): Promise<SignedPost> {
   const post: Omit<SignedPost, 'signature'> = {
     protocol: 'mycelium',
@@ -64,7 +68,10 @@ export async function createSignedPost(
     author: authorKey,
     timestamp: new Date().toISOString(),
     content,
-    tags
+    tags,
+    reaction: options.reaction,
+    repostOf: options.repostOf,
+    originalAuthor: options.originalAuthor
   };
 
   const canonical = canonicalizePost(post);
@@ -84,7 +91,10 @@ export async function verifySignedPost(post: SignedPost): Promise<boolean> {
     author: post.author,
     timestamp: post.timestamp,
     content: post.content,
-    tags: post.tags
+    tags: post.tags,
+    reaction: post.reaction,
+    repostOf: post.repostOf,
+    originalAuthor: post.originalAuthor
   });
   return verifyData(post.author, canonical, post.signature);
 }

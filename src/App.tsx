@@ -15,7 +15,7 @@ interface IdentityRecord {
 }
 
 function App() {
-  const peerManagerRef = useRef<PeerConnectionManager | null>(null);
+  const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
   const signallingSocketRef = useRef<WebSocket | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
@@ -23,13 +23,16 @@ function App() {
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
+  const [dataChannelOpen, setDataChannelOpen] = useState(false);
+  const [activePeerId, setActivePeerId] = useState<string | null>(null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
+  const [directChats, setDirectChats] = useState<Record<string, string[]>>({});
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [posts, setPosts] = useState<StoredPost[]>([]);
   const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
-  const [currentPeerId, setCurrentPeerId] = useState<string | null>(null);
 
   const addLog = (entry: string) => {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
@@ -49,6 +52,158 @@ function App() {
         return 'Idle';
     }
   }, [connectionStatus]);
+
+  const chatEnabled = selectedContactId !== null && selectedContactId === activePeerId && dataChannelOpen;
+
+  const setContactState = async (peerId: string, updates: Partial<Contact>, persist = false) => {
+    setContacts((prev) => prev.map((contact) => (contact.fingerprint === peerId ? { ...contact, ...updates } : contact)));
+    if (persist) {
+      const contact = contacts.find((c) => c.fingerprint === peerId);
+      if (contact) {
+        await saveContact({ ...contact, ...updates });
+      }
+    }
+  };
+
+  const updateContactState = (peerId: string, updates: Partial<Contact>) => {
+    setContacts((prev) => prev.map((contact) => (contact.fingerprint === peerId ? { ...contact, ...updates } : contact)));
+  };
+
+  const saveDirectMessage = (peerId: string, messageText: string, fromPeer = true) => {
+    setDirectChats((prev) => ({
+      ...prev,
+      [peerId]: [...(prev[peerId] || []), fromPeer ? `Peer: ${messageText}` : `You: ${messageText}`]
+    }));
+  };
+
+  const ensurePeerManager = (peerId: string) => {
+    if (peerManagersRef.current[peerId]) {
+      return peerManagersRef.current[peerId];
+    }
+    if (!identity) return null;
+
+    const manager = new PeerConnectionManager(
+      identity.id,
+      (peer, state) => {
+        setConnectionStatus(state);
+        updateContactState(peer, { connected: state === 'connected', lastConnectionStatus: state });
+        if (state !== 'connected') {
+          setDataChannelOpen(false);
+        }
+      },
+      (peer, incoming) => {
+        saveDirectMessage(peer, incoming, true);
+        if (peer !== selectedContactId) {
+          updateContactState(peer, { unreadMessages: (contacts.find((c) => c.fingerprint === peer)?.unreadMessages || 0) + 1 });
+        }
+      },
+      (signal) => {
+        const socket = signallingSocketRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(signal));
+        }
+      },
+      async (peer, post) => {
+        const valid = await verifySignedPost(post);
+        const stored: StoredPost = {
+          ...post,
+          source: 'peer',
+          receivedAt: new Date().toISOString(),
+          valid
+        };
+        await savePost(stored);
+        setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
+        addLog(`Received ${valid ? 'verified' : 'invalid'} post from ${peer}`);
+      },
+      async (peer) => {
+        const outgoingPosts = posts.map((stored) => ({
+          protocol: stored.protocol,
+          version: stored.version,
+          type: stored.type,
+          id: stored.id,
+          author: stored.author,
+          timestamp: stored.timestamp,
+          content: stored.content,
+          tags: stored.tags,
+          reaction: stored.reaction,
+          repostOf: stored.repostOf,
+          originalAuthor: stored.originalAuthor,
+          signature: stored.signature
+        }));
+        peerManagersRef.current[peer]?.sendPostsBatch(outgoingPosts);
+      },
+      async (peer, posts) => {
+        const newStoredPosts: StoredPost[] = [];
+        for (const post of posts) {
+          const valid = await verifySignedPost(post);
+          const stored: StoredPost = {
+            ...post,
+            source: 'peer',
+            receivedAt: new Date().toISOString(),
+            valid
+          };
+          await savePost(stored);
+          newStoredPosts.push(stored);
+        }
+        setPosts((prev) => [...newStoredPosts, ...prev.filter((existing) => !newStoredPosts.some((p) => p.id === existing.id))]);
+        addLog(`Synchronized ${posts.length} posts from ${peer}`);
+      },
+      (peer) => {
+        setDataChannelOpen(true);
+        setActivePeerId(peer);
+        updateContactState(peer, { connected: true });
+        peerManagersRef.current[peer]?.sendRequestPosts();
+      },
+      (peer) => {
+        if (selectedContactId === peer) {
+          setDataChannelOpen(false);
+          setActivePeerId(null);
+        }
+        updateContactState(peer, { connected: false });
+      },
+      (peer, event) => {
+        addLog(`Peer ${peer}: ${event}`);
+      }
+    );
+
+    peerManagersRef.current[peerId] = manager;
+    return manager;
+  };
+
+  const handlePeerList = (peers: string[]) => {
+    setContacts((prev) =>
+      prev.map((contact) => ({
+        ...contact,
+        online: peers.includes(contact.fingerprint)
+      }))
+    );
+
+    peers.forEach((peerId) => {
+      const contact = contacts.find((c) => c.fingerprint === peerId && c.followed);
+      if (contact && !peerManagersRef.current[peerId]) {
+        const manager = ensurePeerManager(peerId);
+        const socket = signallingSocketRef.current;
+        if (manager && socket && socket.readyState === WebSocket.OPEN) {
+          manager.createOffer(peerId, socket);
+        }
+      }
+    });
+  };
+
+  const handleSelectContact = (peerId: string) => {
+    setSelectedContactId(peerId);
+    updateContactState(peerId, { unreadMessages: 0 });
+  };
+
+  const handleSendDirectMessage = () => {
+    if (!selectedContactId || !message.trim()) return;
+    const manager = peerManagersRef.current[selectedContactId];
+    if (!manager || activePeerId !== selectedContactId) return;
+
+    manager.sendChatMessage(message.trim());
+    saveDirectMessage(selectedContactId, message.trim(), false);
+    setMessage('');
+  };
 
   useEffect(() => {
     async function bootstrap() {
@@ -75,51 +230,31 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
 
-    const manager = new PeerConnectionManager(
-      identity.id,
-      setConnectionStatus,
-      (incoming) => {
-        setChat((prev) => [...prev, `Peer: ${incoming}`]);
-      },
-      (signal) => {
-        const socket = signallingSocketRef.current;
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(signal));
-        }
-      },
-      async (post) => {
-        const valid = await verifySignedPost(post);
-        const stored: StoredPost = {
-          ...post,
-          source: 'peer',
-          receivedAt: new Date().toISOString(),
-          valid
-        };
-        await savePost(stored);
-        setPosts((prev) => [stored, ...prev]);
-        addLog(`Received ${valid ? 'verified' : 'invalid'} post from peer`);
-      },
-      (event) => {
-        addLog(event);
-      }
-    );
-
-    peerManagerRef.current = manager;
-
     const socket = connectToSignalling(
       identity.id,
-      (message: SignalMessage) => {
-        if (message.from && message.from !== identity.id) {
-          setCurrentPeerId(message.from);
+      async (message: SignalMessage) => {
+        if (message.type === 'peer-list') {
+          handlePeerList(message.peers);
+          return;
         }
-        manager.handleSignal(message, socket);
+
+        if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
+          const manager = ensurePeerManager(message.from);
+          if (manager) {
+            await manager.handleSignal(message, socket);
+          }
+        }
       },
       (status) => {
         setSignallingStatus(status);
         addLog(`Signalling server status: ${status}`);
       }
     );
+
     signallingSocketRef.current = socket;
+    return () => {
+      socket.close();
+    };
   }, [identity]);
 
   async function handleAddContactFromKey(publicKey: string, displayName?: string) {
@@ -168,14 +303,13 @@ function App() {
     setNewPostContent('');
     setNewPostTags('');
 
-    const connectedPeer = currentPeerId && connectionStatus === 'connected';
-    const peerFollowed = currentPeerId
-      ? contacts.some((c) => c.fingerprint === currentPeerId && c.followed)
-      : false;
-    if (connectedPeer && peerFollowed) {
-      peerManagerRef.current?.sendSignedPost(stored);
-      addLog('Shared post with connected followed peer');
-    }
+    Object.entries(peerManagersRef.current).forEach(([peerId, manager]) => {
+      const contact = contacts.find((c) => c.fingerprint === peerId);
+      if (contact?.followed && contact.connected && manager) {
+        manager.sendSignedPost(stored);
+        addLog(`Shared post with connected followed peer ${peerId}`);
+      }
+    });
 
     if (publishToDiscovery) {
       try {
@@ -242,29 +376,33 @@ function App() {
   }
 
   function handleStartCall() {
-    const manager = peerManagerRef.current;
     const socket = signallingSocketRef.current;
-    if (!manager || !socket || !remoteId) return;
-    setCurrentPeerId(remoteId);
-    addLog(`Starting call to ${remoteId}`);
-    setChat((prev) => [...prev, 'System: Starting call...']);
-    manager.createOffer(remoteId, socket);
+    const normalizedRemoteId = remoteId.trim();
+    if (!socket || !normalizedRemoteId) return;
+    const manager = ensurePeerManager(normalizedRemoteId);
+    if (!manager) return;
+    setRemoteId(normalizedRemoteId);
+    setSelectedContactId(normalizedRemoteId);
+    addLog(`Starting call to ${normalizedRemoteId}`);
+    manager.createOffer(normalizedRemoteId, socket);
   }
 
   function handleSendMessage() {
-    const manager = peerManagerRef.current;
-    if (!manager || !message.trim()) return;
-    addLog(`Sending message: ${message.trim()}`);
-    manager.sendMessage(message.trim());
-    setChat((prev) => [...prev, `You: ${message.trim()}`]);
+    if (!selectedContactId || !message.trim()) return;
+    const manager = peerManagersRef.current[selectedContactId];
+    if (!manager || !chatEnabled) return;
+    addLog(`Sending message to ${selectedContactId}: ${message.trim()}`);
+    manager.sendChatMessage(message.trim());
+    saveDirectMessage(selectedContactId, message.trim(), false);
     setMessage('');
   }
 
   function handleSendPostToPeer(post: StoredPost) {
-    const manager = peerManagerRef.current;
-    if (!manager || connectionStatus !== 'connected') return;
+    if (!selectedContactId) return;
+    const manager = peerManagersRef.current[selectedContactId];
+    if (!manager || selectedContactId !== activePeerId) return;
     manager.sendSignedPost(post);
-    addLog(`Sent post ${post.id} to connected peer`);
+    addLog(`Sent post ${post.id} to peer ${selectedContactId}`);
   }
 
   return (
@@ -323,16 +461,19 @@ function App() {
               <div>
                 <div><strong>{c.displayName ?? c.fingerprint}</strong></div>
                 <div className="note">{c.fingerprint}</div>
+                <div className="note">{c.online ? 'Online' : 'Offline'} · {c.connected ? 'Connected' : 'Disconnected'}{c.unreadMessages ? ` · ${c.unreadMessages} unread` : ''}</div>
               </div>
               <div>
                 <button className="btn secondary" onClick={() => handleToggleFollow(c.publicKey)}>{c.followed ? 'Unfollow' : 'Follow'}</button>
-                <button className="btn secondary" onClick={() => { setRemoteId(c.fingerprint); addLog(`Prepared to connect to ${c.fingerprint}`); }}>Connect</button>
+                <button className="btn secondary" onClick={() => { setRemoteId(c.fingerprint); setSelectedContactId(c.fingerprint); addLog(`Prepared to connect to ${c.fingerprint}`); }}>
+                  Select
+                </button>
                 <button className="btn secondary" onClick={() => handleRemoveContact(c.publicKey)}>Remove</button>
               </div>
             </div>
           ))}
         </div>
-        <p className="note">Add contacts by public key or from discovery results.</p>
+        <p className="note">Add contacts by public key or from discovery results. Followed contacts are auto-connected when online.</p>
       </div>
 
       <div className="card">
@@ -397,20 +538,24 @@ function App() {
       <div className="card">
         <h2>Chat</h2>
         <div>
-          {chat.map((entry, index) => (
-            <p key={index}>{entry}</p>
-          ))}
+          {selectedContactId ? (
+            (directChats[selectedContactId] || []).map((entry, index) => (
+              <p key={index}>{entry}</p>
+            ))
+          ) : (
+            <p className="note">Select a contact to view chat history.</p>
+          )}
         </div>
         <div className="row">
           <input
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder={connectionStatus === 'connected' ? 'Type a message' : 'Waiting for connection...'}
-            disabled={connectionStatus !== 'connected'}
+            placeholder={selectedContactId ? 'Type a message' : 'Select a contact first'}
+            disabled={!selectedContactId || !chatEnabled}
           />
-          <button className="btn" onClick={handleSendMessage} disabled={connectionStatus !== 'connected'}>Send</button>
+          <button className="btn" onClick={handleSendMessage} disabled={!chatEnabled || !message.trim()}>Send</button>
         </div>
-        <p className="note">The chat box is enabled only when the connection state becomes <strong>Connected</strong>.</p>
+        <p className="note">Select a contact and wait for the data channel to open before sending messages.</p>
       </div>
 
       <div className="card">

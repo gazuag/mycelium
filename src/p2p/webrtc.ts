@@ -11,25 +11,37 @@ export class PeerConnectionManager {
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
   private makingOffer = false;
   private polite = false;
-  private onState: (state: ConnectionState) => void;
-  private onData: (message: string) => void;
-  private onPost: (post: SignedPost) => void;
+  private onState: (peerId: string, state: ConnectionState) => void;
+  private onData: (peerId: string, message: string) => void;
+  private onPost: (peerId: string, post: SignedPost) => void;
+  private onRequestPosts: (peerId: string) => void;
+  private onPostsBatch: (peerId: string, posts: SignedPost[]) => void;
   private onSignal: (message: SignalMessage) => void;
-  private onEvent: (event: string) => void;
+  private onOpen: (peerId: string) => void;
+  private onClose: (peerId: string) => void;
+  private onEvent: (peerId: string, event: string) => void;
 
   constructor(
     localId: string,
-    onState: (state: ConnectionState) => void,
-    onData: (message: string) => void,
+    onState: (peerId: string, state: ConnectionState) => void,
+    onData: (peerId: string, message: string) => void,
     onSignal: (message: SignalMessage) => void,
-    onPost: (post: SignedPost) => void,
-    onEvent: (event: string) => void
+    onPost: (peerId: string, post: SignedPost) => void,
+    onRequestPosts: (peerId: string) => void,
+    onPostsBatch: (peerId: string, posts: SignedPost[]) => void,
+    onOpen: (peerId: string) => void,
+    onClose: (peerId: string) => void,
+    onEvent: (peerId: string, event: string) => void
   ) {
     this.localId = localId;
     this.onState = onState;
     this.onData = onData;
     this.onPost = onPost;
+    this.onRequestPosts = onRequestPosts;
+    this.onPostsBatch = onPostsBatch;
     this.onSignal = onSignal;
+    this.onOpen = onOpen;
+    this.onClose = onClose;
     this.onEvent = onEvent;
     this.peerConnection = this.createConnection();
   }
@@ -39,7 +51,7 @@ export class PeerConnectionManager {
 
     pc.onicecandidate = (event) => {
       if (event.candidate && this.remoteId) {
-        this.onEvent(`Local ICE candidate ready for ${this.remoteId}`);
+        this.onEvent(this.remoteId, `Local ICE candidate ready for ${this.remoteId}`);
         this.onSignal({
           type: 'ice-candidate',
           from: this.localId,
@@ -51,22 +63,25 @@ export class PeerConnectionManager {
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      this.onEvent(`PeerConnection state: ${state}`);
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, `PeerConnection state: ${state}`);
       if (state === 'connected') {
-        this.onState('connected');
+        this.onState(peerId, 'connected');
       } else if (state === 'connecting') {
-        this.onState('connecting');
+        this.onState(peerId, 'connecting');
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-        this.onState('disconnected');
+        this.onState(peerId, 'disconnected');
       }
     };
 
     pc.onsignalingstatechange = () => {
-      this.onEvent(`Signaling state: ${pc.signalingState}`);
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, `Signaling state: ${pc.signalingState}`);
     };
 
     pc.onicegatheringstatechange = () => {
-      this.onEvent(`ICE gathering state: ${pc.iceGatheringState}`);
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, `ICE gathering state: ${pc.iceGatheringState}`);
     };
 
     pc.ondatachannel = (event) => {
@@ -79,31 +94,44 @@ export class PeerConnectionManager {
   private attachDataChannel(channel: RTCDataChannel) {
     this.dataChannel = channel;
     this.dataChannel.onopen = () => {
-      this.onEvent('Data channel opened');
-      this.onState('connected');
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, 'Data channel opened');
+      this.onState(peerId, 'connected');
+      this.onOpen(peerId);
     };
     this.dataChannel.onclose = () => {
-      this.onEvent('Data channel closed');
-      this.onState('disconnected');
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, 'Data channel closed');
+      this.onState(peerId, 'disconnected');
+      this.onClose(peerId);
     };
     this.dataChannel.onmessage = (event) => {
       const data = event.data;
+      const peerId = this.remoteId ?? '<unknown>';
       if (typeof data === 'string') {
         try {
           const parsed = JSON.parse(data);
           if (parsed?.type === 'chat' && typeof parsed.text === 'string') {
-            this.onData(parsed.text);
+            this.onData(peerId, parsed.text);
             return;
           }
           if (parsed?.type === 'signed-post' && parsed.post) {
-            this.onPost(parsed.post);
+            this.onPost(peerId, parsed.post);
+            return;
+          }
+          if (parsed?.type === 'request-posts') {
+            this.onRequestPosts(peerId);
+            return;
+          }
+          if (parsed?.type === 'posts-batch' && Array.isArray(parsed.posts)) {
+            this.onPostsBatch(peerId, parsed.posts);
             return;
           }
         } catch {
           // Fall back to raw text if parsing fails
         }
       }
-      this.onData(String(data));
+      this.onData(peerId, String(data));
     };
   }
 
@@ -121,19 +149,27 @@ export class PeerConnectionManager {
     this.sendData({ type: 'signed-post', post });
   }
 
+  public sendRequestPosts() {
+    this.sendData({ type: 'request-posts' });
+  }
+
+  public sendPostsBatch(posts: SignedPost[]) {
+    this.sendData({ type: 'posts-batch', posts });
+  }
+
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {
     this.remoteId = remoteId;
     this.polite = this.localId > remoteId;
     this.makingOffer = true;
-    this.onState('signalling');
-    this.onEvent(`Creating offer for ${remoteId}`);
+    this.onState(remoteId, 'signalling');
+    this.onEvent(remoteId, `Creating offer for ${remoteId}`);
     const channel = this.peerConnection.createDataChannel('chat');
     this.attachDataChannel(channel);
 
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
     this.makingOffer = false;
-    this.onEvent(`Sending offer to ${remoteId}`);
+    this.onEvent(remoteId, `Sending offer to ${remoteId}`);
 
     this.sendSignal(signallingSocket, {
       type: 'offer',
@@ -159,26 +195,27 @@ export class PeerConnectionManager {
   }
 
   public async handleSignal(message: SignalMessage, signallingSocket: WebSocket) {
+    if (message.type === 'peer-list') return;
     if (message.to !== this.localId) return;
 
     this.remoteId = message.from;
     this.polite = this.localId > message.from;
-    this.onState('signalling');
+    this.onState(message.from, 'signalling');
 
     if (message.type === 'offer') {
       const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';
       if (offerCollision && !this.polite) {
-        this.onEvent('Ignoring incoming offer due to glare collision');
+        this.onEvent(message.from, 'Ignoring incoming offer due to glare collision');
         return;
       }
 
-      this.onEvent(`Received offer from ${message.from}`);
+      this.onEvent(message.from, `Received offer from ${message.from}`);
       await this.peerConnection.setRemoteDescription(message.payload);
       await this.flushPendingIceCandidates();
 
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
-      this.onEvent(`Sending answer to ${message.from}`);
+      this.onEvent(message.from, `Sending answer to ${message.from}`);
       this.sendSignal(signallingSocket, {
         type: 'answer',
         from: this.localId,
@@ -186,11 +223,11 @@ export class PeerConnectionManager {
         payload: answer
       });
     } else if (message.type === 'answer') {
-      this.onEvent(`Received answer from ${message.from}`);
+      this.onEvent(message.from, `Received answer from ${message.from}`);
       await this.peerConnection.setRemoteDescription(message.payload);
       await this.flushPendingIceCandidates();
     } else if (message.type === 'ice-candidate') {
-      this.onEvent(`Received ICE candidate from ${message.from}`);
+      this.onEvent(message.from, `Received ICE candidate from ${message.from}`);
       await this.addIceCandidate(message.payload);
     }
   }
