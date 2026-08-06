@@ -52,6 +52,33 @@ export async function sha256(data: string) {
   return arrayBufferToHex(digest);
 }
 
+export async function signString(privateKeyBase64: string, data: string) {
+  const privateKey = await importPrivateKey(privateKeyBase64);
+  const signature = await crypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: 'SHA-256'
+    },
+    privateKey,
+    new TextEncoder().encode(data)
+  );
+  return arrayBufferToBase64(signature);
+}
+
+export async function verifySignedString(publicKeyBase64: string, data: string, signatureBase64: string) {
+  const publicKey = await importPublicKey(publicKeyBase64);
+  const signatureBuffer = base64ToArrayBuffer(signatureBase64);
+  return crypto.subtle.verify(
+    {
+      name: 'ECDSA',
+      hash: 'SHA-256'
+    },
+    publicKey,
+    signatureBuffer,
+    new TextEncoder().encode(data)
+  );
+}
+
 export function deriveFingerprint(publicKeyBase64: string) {
   const stripped = publicKeyBase64.replace(/\s+/g, '');
   const hash = crypto.subtle.digest('SHA-256', new TextEncoder().encode(stripped));

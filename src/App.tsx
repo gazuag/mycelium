@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256 } from './crypto/identity';
+import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
 import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
@@ -14,6 +14,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { MyProfilePage } from './pages/MyProfilePage';
 import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { canonicalize } from './p2p/protocol';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -70,11 +71,6 @@ function App() {
   const [newPostTags, setNewPostTags] = useState('');
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
-  const chatInputEnabled = selectedContactId !== null;
-  const selectedContactOnline = selectedContact?.online ?? false;
-  const selectedContactConnected = selectedContact?.connected ?? false;
-  const selectedContactQueued = selectedContact?.queuedMessages ?? 0;
-  const selectedContactUnread = selectedContact?.unreadMessages ?? 0;
 
   const addLog = (entry: string) => {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
@@ -95,7 +91,7 @@ function App() {
     }
   }, [connectionStatus]);
 
-  const chatEnabled = selectedContactId !== null && selectedContactConnected && dataChannelOpen;
+  const chatEnabled = selectedContactId !== null && selectedContact?.connected === true && dataChannelOpen;
   const pageContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
   const chatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
 
@@ -253,6 +249,17 @@ function App() {
     }
     if (!identity) return null;
 
+    const packetSigner = async (packet: {
+      protocol: 'mycelium';
+      version: 1;
+      id: string;
+      type: string;
+      timestamp: string;
+      sender: string;
+      recipient: string | null;
+      payload: Record<string, unknown>;
+    }) => signString(identity.privateKey, canonicalize(packet));
+
     const manager = new PeerConnectionManager(
       identity.id,
       (peer, state) => {
@@ -342,7 +349,8 @@ function App() {
       },
       (peer: string, event: string) => {
         addLog(`Peer ${peer}: ${event}`);
-      }
+      },
+      packetSigner
     );
 
     peerManagersRef.current[peerId] = manager;
@@ -646,13 +654,16 @@ function App() {
     if (!manager) return;
     setRemoteId(normalizedRemoteId);
     setSelectedContactId(normalizedRemoteId);
+    setChatContactId(normalizedRemoteId);
     addLog(`Starting call to ${normalizedRemoteId}`);
     manager.createOffer(normalizedRemoteId, socket);
   }
 
   function handleSelectContact(peerId: string) {
-    setSelectedContactId(peerId);    setChatContactId(peerId);
-    setPage('chat');    addLog(`Selected contact ${peerId}`);
+    setSelectedContactId(peerId);
+    setChatContactId(peerId);
+    setPage('chat');
+    addLog(`Selected contact ${peerId}`);
     updateContactState(peerId, { unreadMessages: 0 });
   }
 
@@ -661,10 +672,11 @@ function App() {
     const peerId = chatContactId;
     const trimmedMessage = message.trim();
     const manager = peerManagersRef.current[peerId];
+    const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
 
     saveDirectMessage(peerId, trimmedMessage, false);
 
-    if (manager && selectedContactConnected && dataChannelOpen) {
+    if (manager && targetContact?.connected) {
       manager.sendChatMessage(trimmedMessage);
       addLog(`Sent direct message to ${peerId}`);
     } else {
@@ -721,7 +733,7 @@ function App() {
           <PeoplePage
             contacts={contacts}
             onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
-            onMessage={(peerId) => { setChatContactId(peerId); setPage('chat'); }}
+            onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
           />
         )}
@@ -746,7 +758,7 @@ function App() {
             likedPosts={likedProfilePosts}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
             onBlock={() => undefined}
-            onMessage={() => { setChatContactId(activeProfileContact.fingerprint); setPage('chat'); }}
+            onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
             onDislike={handleDislikePost}

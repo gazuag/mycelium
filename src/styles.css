@@ -469,5 +469,4 @@ body, html, #root {
 
 @media (min-width: 720px) {
   .page-content { padding: 1.5rem 2rem 120px; }
-  .tab-bar { display: none; }
 }

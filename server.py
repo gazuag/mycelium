@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -75,36 +76,24 @@ async def prune_discovery_posts() -> None:
     DB_CONN.commit()
     logging.info('Pruned %d discovery posts, new count %d', delete_count, MAX_DISCOVERY_POSTS)
 
-async def handle_discovery_post(request: web.Request) -> web.Response:
-    if request.content_length is None or request.content_length > MAX_POST_SIZE:
-        return web.Response(status=413, text='Post too large', headers={'Access-Control-Allow-Origin': '*'})
-    try:
-        payload = await request.json()
-    except json.JSONDecodeError:
-        return web.Response(status=400, text='Invalid JSON', headers={'Access-Control-Allow-Origin': '*'})
 
-    if not isinstance(payload, dict):
-        return web.Response(status=400, text='Invalid post payload', headers={'Access-Control-Allow-Origin': '*'})
+def build_discovery_result_packet(posts, recipient: Optional[str] = None):
+    return {
+        'protocol': 'mycelium',
+        'version': 1,
+        'id': str(uuid.uuid4()),
+        'type': 'DISCOVERY_RESULT',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'sender': 'discovery-server',
+        'recipient': recipient,
+        'payload': {
+            'posts': posts,
+        },
+        'signature': 'server-unsigned-v1'
+    }
 
-    required_keys = {'protocol', 'version', 'type', 'id', 'author', 'timestamp', 'content', 'tags', 'signature'}
-    if not required_keys.issubset(payload.keys()):
-        return web.Response(status=400, text='Missing required fields', headers={'Access-Control-Allow-Origin': '*'})
 
-    post_id = payload['id']
-    received_at = datetime.utcnow().isoformat() + 'Z'
-    tags = ','.join(payload.get('tags', []))
-    DB_CONN.execute(
-        'INSERT OR REPLACE INTO discovery_posts (id, received_at, post_json, author, tags) VALUES (?, ?, ?, ?, ?)',
-        (post_id, received_at, json.dumps(payload), payload['author'], tags)
-    )
-    DB_CONN.commit()
-    await prune_discovery_posts()
-    logging.info('Stored public discovery post %s from %s tags=%s', post_id, payload['author'], tags)
-    return web.Response(status=201, text='Post accepted', headers={'Access-Control-Allow-Origin': '*'})
-
-async def handle_discovery_get(request: web.Request) -> web.Response:
-    limit = min(int(request.query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
-    tag = request.query.get('tag')
+def load_discovery_posts(limit: int, tag: Optional[str]):
     if tag:
         cursor = DB_CONN.execute(
             'SELECT post_json FROM discovery_posts WHERE tags LIKE ? ORDER BY RANDOM() LIMIT ?',
@@ -116,7 +105,56 @@ async def handle_discovery_get(request: web.Request) -> web.Response:
             (limit,)
         )
     rows = cursor.fetchall()
-    posts = [json.loads(row[0]) for row in rows]
+    return [json.loads(row[0]) for row in rows]
+
+async def handle_discovery_post(request: web.Request) -> web.Response:
+    if request.content_length is None or request.content_length > MAX_POST_SIZE:
+        return web.Response(status=413, text='Post too large', headers={'Access-Control-Allow-Origin': '*'})
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return web.Response(status=400, text='Invalid JSON', headers={'Access-Control-Allow-Origin': '*'})
+
+    if not isinstance(payload, dict):
+        return web.Response(status=400, text='Invalid post payload', headers={'Access-Control-Allow-Origin': '*'})
+
+    if payload.get('protocol') == 'mycelium' and payload.get('version') == 1 and payload.get('type') == 'DISCOVERY_GET':
+        query = payload.get('payload', {}) if isinstance(payload.get('payload'), dict) else {}
+        limit = min(int(query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
+        tag = query.get('tag')
+        posts = load_discovery_posts(limit, tag if isinstance(tag, str) else None)
+        response = web.json_response(build_discovery_result_packet(posts, payload.get('sender')))
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
+
+    post_payload = payload
+    if payload.get('protocol') == 'mycelium' and payload.get('version') == 1 and payload.get('type') == 'DISCOVERY_PUBLISH':
+        inner_payload = payload.get('payload', {}) if isinstance(payload.get('payload'), dict) else {}
+        post_payload = inner_payload.get('post')
+
+    if not isinstance(post_payload, dict):
+        return web.Response(status=400, text='Invalid post payload', headers={'Access-Control-Allow-Origin': '*'})
+
+    required_keys = {'protocol', 'version', 'type', 'id', 'author', 'timestamp', 'content', 'tags', 'signature'}
+    if not required_keys.issubset(post_payload.keys()):
+        return web.Response(status=400, text='Missing required fields', headers={'Access-Control-Allow-Origin': '*'})
+
+    post_id = post_payload['id']
+    received_at = datetime.utcnow().isoformat() + 'Z'
+    tags = ','.join(post_payload.get('tags', []))
+    DB_CONN.execute(
+        'INSERT OR REPLACE INTO discovery_posts (id, received_at, post_json, author, tags) VALUES (?, ?, ?, ?, ?)',
+        (post_id, received_at, json.dumps(post_payload), post_payload['author'], tags)
+    )
+    DB_CONN.commit()
+    await prune_discovery_posts()
+    logging.info('Stored public discovery post %s from %s tags=%s', post_id, post_payload['author'], tags)
+    return web.Response(status=201, text='Post accepted', headers={'Access-Control-Allow-Origin': '*'})
+
+async def handle_discovery_get(request: web.Request) -> web.Response:
+    limit = min(int(request.query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
+    tag = request.query.get('tag')
+    posts = load_discovery_posts(limit, tag)
     response = web.json_response(posts)
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
