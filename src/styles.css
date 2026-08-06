@@ -122,3 +122,294 @@ input {
   color: #d0d5d1;
   font-size: 0.95rem;
 }
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: 1rem;
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.header-spacer {
+  width: 2rem;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.75rem;
+  color: #8eb39f;
+}
+
+.header-body {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem 0.95rem;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.status-pill.secondary {
+  background: rgba(255,255,255,0.03);
+}
+
+.button-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.tab-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  padding: 0.75rem 1rem 0.5rem;
+  background: rgba(7,18,13,0.96);
+  backdrop-filter: blur(10px);
+}
+
+.tab-button {
+  border: none;
+  border-radius: 14px;
+  padding: 0.9rem 0.75rem;
+  background: rgba(255,255,255,0.06);
+  color: #f6f7f1;
+  font-weight: 600;
+}
+
+.tab-button.active {
+  background: #1f7f59;
+}
+
+.page-content {
+  padding: 0 1rem 4rem;
+}
+
+.section-title {
+  margin-bottom: 1rem;
+}
+
+.feed-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.post-card,
+.peer-card,
+.profile-header,
+.collapsible-section,
+.empty-state,
+.chat-input-bar {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 22px;
+  padding: 1rem;
+}
+
+.post-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.post-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.post-author {
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+}
+
+.post-time {
+  color: #a7b6a5;
+  font-size: 0.85rem;
+}
+
+.post-content {
+  margin: 0;
+}
+
+.post-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tag {
+  color: #8eb39f;
+}
+
+.post-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.peer-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.peer-name {
+  border: none;
+  background: none;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+}
+
+.peer-meta {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  color: #c1d3c1;
+  margin-top: 0.5rem;
+}
+
+.status-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-dot.online {
+  background: #51d88a;
+}
+
+.status-dot.offline {
+  background: #9ca3af;
+}
+
+.profile-header {
+  display: grid;
+  gap: 1rem;
+}
+
+.profile-avatar {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 1.4rem;
+  font-weight: 700;
+  background: rgba(255,255,255,0.08);
+}
+
+.status-pill-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.segment-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+.segment-control button {
+  border: none;
+  border-radius: 999px;
+  padding: 0.85rem;
+  background: rgba(255,255,255,0.05);
+}
+
+.segment-control button.active {
+  background: #1f7f59;
+}
+
+.chat-page {
+  display: grid;
+  gap: 1rem;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.link-button,
+.icon-button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1rem;
+}
+
+.chat-thread {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 0.85rem 1rem;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.08);
+}
+
+.chat-bubble.sent {
+  margin-left: auto;
+  background: #1f7f59;
+}
+
+.chat-bubble.received {
+  margin-right: auto;
+}
+
+.chat-bubble time {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #c1d3c1;
+}
+
+.chat-input-bar {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: rgba(7,18,13,0.9);
+}
+
+.chat-input-bar input {
+  width: 100%;
+}
+
+@media (min-width: 700px) {
+  .page-content {
+    padding: 1rem 2rem 5rem;
+  }
+}

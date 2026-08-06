@@ -2,9 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256 } from './crypto/identity';
 import { connectToSignalling, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
+import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, saveProfile, loadProfile, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery } from './services/discovery';
+import { AppHeader } from './components/AppHeader';
+import { TabBar } from './components/TabBar';
+import { HomePage } from './pages/HomePage';
+import { PeoplePage } from './pages/PeoplePage';
+import { DiscoverPage } from './pages/DiscoverPage';
+import { ChatPage } from './pages/ChatPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { MyProfilePage } from './pages/MyProfilePage';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -12,7 +20,11 @@ interface IdentityRecord {
   publicKey: string;
   privateKey: string;
   id: string;
+  nickname?: string;
+  bio?: string;
 }
+
+type AppPage = 'home' | 'people' | 'discover' | 'profile' | 'myprofile' | 'chat';
 
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
@@ -34,13 +46,34 @@ function App() {
   const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
+  const [currentPage, setCurrentPage] = useState<'home' | 'people' | 'discover' | 'profile' | 'myprofile' | 'chat'>('home');
+  const [headerCollapsed, setHeaderCollapsed] = useState(() => localStorage.getItem('headerCollapsed') === 'true');
+  const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
+  const [profilePeerId, setProfilePeerId] = useState<string | null>(null);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
+  const profileContact = profilePeerId ? contacts.find((c) => c.fingerprint === profilePeerId) : undefined;
   const chatInputEnabled = selectedContactId !== null;
   const selectedContactOnline = selectedContact?.online ?? false;
   const selectedContactConnected = selectedContact?.connected ?? false;
   const selectedContactQueued = selectedContact?.queuedMessages ?? 0;
   const selectedContactUnread = selectedContact?.unreadMessages ?? 0;
+  const homeFeedPosts = posts
+    .filter((post) => !hiddenPostIds.has(post.id))
+    .filter((post) => post.author === identity?.id || contacts.some((contact) => contact.fingerprint === post.author && contact.followed))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  const discoveryFeedPosts = discoveryPosts
+    .filter((post) => !hiddenPostIds.has(post.id))
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  const myPosts = posts
+    .filter((post) => post.author === identity?.id)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  const profilePosts = profilePeerId
+    ? posts.filter((post) => post.author === profilePeerId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    : [];
+  const profileLikedPosts = posts
+    .filter((post) => post.reaction === 'like' && post.author !== profilePeerId)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
   const addLog = (entry: string) => {
     setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
