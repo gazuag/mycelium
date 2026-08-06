@@ -9,11 +9,22 @@ export interface Contact {
   profile?: SignedProfile;
   addedAt: string;
   followed: boolean;
+  follower?: boolean;
   online?: boolean;
   connected?: boolean;
   lastConnectionStatus?: string;
   lastSeen?: string;
   unreadMessages?: number;
+  queuedMessages?: number;
+}
+
+export interface PeerMetadata {
+  author: string;
+  displayName: string;
+  following: boolean;
+  timestamp: string;
+  bio?: string;
+  tags?: string[];
 }
 
 export interface SignedPost {
@@ -54,4 +65,11 @@ export interface StoredPost extends SignedPost {
   notInterested?: boolean;
   seen?: boolean;
   authorDisplayName?: string;
+}
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  timestamp: string;
+  status: 'queued' | 'sent';
 }

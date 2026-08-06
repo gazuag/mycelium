@@ -1,5 +1,5 @@
 import type { SignalMessage } from './signalling';
-import type { ConnectionState, SignedPost } from '../types';
+import type { ConnectionState, PeerMetadata, SignedPost } from '../types';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
@@ -14,6 +14,7 @@ export class PeerConnectionManager {
   private onState: (peerId: string, state: ConnectionState) => void;
   private onData: (peerId: string, message: string) => void;
   private onPost: (peerId: string, post: SignedPost) => void;
+  private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
   private onRequestPosts: (peerId: string) => void;
   private onPostsBatch: (peerId: string, posts: SignedPost[]) => void;
   private onSignal: (message: SignalMessage) => void;
@@ -27,6 +28,7 @@ export class PeerConnectionManager {
     onData: (peerId: string, message: string) => void,
     onSignal: (message: SignalMessage) => void,
     onPost: (peerId: string, post: SignedPost) => void,
+    onMetadata: (peerId: string, metadata: PeerMetadata) => void,
     onRequestPosts: (peerId: string) => void,
     onPostsBatch: (peerId: string, posts: SignedPost[]) => void,
     onOpen: (peerId: string) => void,
@@ -37,6 +39,7 @@ export class PeerConnectionManager {
     this.onState = onState;
     this.onData = onData;
     this.onPost = onPost;
+    this.onMetadata = onMetadata;
     this.onRequestPosts = onRequestPosts;
     this.onPostsBatch = onPostsBatch;
     this.onSignal = onSignal;
@@ -119,6 +122,10 @@ export class PeerConnectionManager {
             this.onPost(peerId, parsed.post);
             return;
           }
+          if (parsed?.type === 'metadata' && parsed.metadata) {
+            this.onMetadata(peerId, parsed.metadata);
+            return;
+          }
           if (parsed?.type === 'request-posts') {
             this.onRequestPosts(peerId);
             return;
@@ -147,6 +154,10 @@ export class PeerConnectionManager {
 
   public sendSignedPost(post: SignedPost) {
     this.sendData({ type: 'signed-post', post });
+  }
+
+  public sendMetadata(metadata: PeerMetadata) {
+    this.sendData({ type: 'metadata', metadata });
   }
 
   public sendRequestPosts() {

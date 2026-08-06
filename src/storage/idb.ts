@@ -7,6 +7,7 @@ const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
 const POST_STORE = 'posts';
 const DISCOVERY_STORE = 'discovery_interactions';
+const QUEUE_STORE = 'message_queue';
 
 export async function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -30,6 +31,10 @@ export async function openDatabase() {
       }
       if (!db.objectStoreNames.contains(DISCOVERY_STORE)) {
         db.createObjectStore(DISCOVERY_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(QUEUE_STORE)) {
+        const queueStore = db.createObjectStore(QUEUE_STORE, { keyPath: 'id' });
+        queueStore.createIndex('recipient', 'recipient');
       }
     };
 
@@ -156,5 +161,38 @@ export async function loadDiscoveryInteractions() {
     const request = store.getAll();
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+  });
+}
+
+export async function saveMessageQueue(message: { id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent' }) {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(QUEUE_STORE, 'readwrite');
+    const store = tx.objectStore(QUEUE_STORE);
+    store.put(message);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function loadMessageQueue(): Promise<Array<{ id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent' }>> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(QUEUE_STORE, 'readonly');
+    const store = tx.objectStore(QUEUE_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deleteMessageQueue(id: string) {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(QUEUE_STORE, 'readwrite');
+    const store = tx.objectStore(QUEUE_STORE);
+    store.delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
