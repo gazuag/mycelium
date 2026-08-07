@@ -65,6 +65,17 @@ export async function loadIdentity() {
   });
 }
 
+export async function deleteIdentity() {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+    const store = tx.objectStore(IDENTITY_STORE);
+    store.delete('local');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export async function saveContact(contact: Contact) {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {

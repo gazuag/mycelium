@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -14,6 +14,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { MyProfilePage } from './pages/MyProfilePage';
 import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { LandingPage } from './pages/LandingPage';
 import { canonicalize } from './p2p/protocol';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
@@ -31,6 +32,18 @@ interface ChatEntry {
   isMine: boolean;
   timestamp: string;
 }
+
+interface FeedMixSettings {
+  followedAuthors: number;
+  followedLikes: number;
+  discoveryRandom: number;
+}
+
+const DEFAULT_FEED_MIX: FeedMixSettings = {
+  followedAuthors: 60,
+  followedLikes: 30,
+  discoveryRandom: 10
+};
 
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
@@ -55,7 +68,11 @@ function App() {
   const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
-  const [myProfile, setMyProfile] = useState({ displayName: '', bio: '' });
+  const [myProfile, setMyProfile] = useState({
+    displayName: '',
+    bio: '',
+    feedMix: DEFAULT_FEED_MIX
+  });
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
     people: 0,
@@ -404,10 +421,22 @@ function App() {
       if (rawProfile) {
         try {
           const parsed = JSON.parse(rawProfile);
-          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string') {
+          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string' || parsed.feedMix) {
+            const parsedFeedMix = parsed.feedMix && typeof parsed.feedMix === 'object'
+              ? {
+                  followedAuthors: Number(parsed.feedMix.followedAuthors ?? DEFAULT_FEED_MIX.followedAuthors),
+                  followedLikes: Number(parsed.feedMix.followedLikes ?? DEFAULT_FEED_MIX.followedLikes),
+                  discoveryRandom: Number(parsed.feedMix.discoveryRandom ?? DEFAULT_FEED_MIX.discoveryRandom)
+                }
+              : DEFAULT_FEED_MIX;
             setMyProfile({
               displayName: typeof parsed.displayName === 'string' ? parsed.displayName : '',
-              bio: typeof parsed.bio === 'string' ? parsed.bio : ''
+              bio: typeof parsed.bio === 'string' ? parsed.bio : '',
+              feedMix: {
+                followedAuthors: Math.max(0, parsedFeedMix.followedAuthors),
+                followedLikes: Math.max(0, parsedFeedMix.followedLikes),
+                discoveryRandom: Math.max(0, parsedFeedMix.discoveryRandom)
+              }
             });
           }
         } catch {
@@ -627,12 +656,83 @@ function App() {
     }
   }
 
-  const visibleHomePosts = posts
-    .filter((post) => !hiddenPostIds.has(post.id))
-    .filter((post) => post.author === identity?.id || contacts.some((c) => c.fingerprint === post.author && c.followed))
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
   const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id));
+
+  const discoverFeedPosts = useMemo(() => {
+    const shuffled = [...visibleDiscoveryPosts];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  }, [visibleDiscoveryPosts]);
+
+  const visibleHomePosts = useMemo(() => {
+    const followedSet = new Set(
+      contacts
+        .filter((contact) => contact.followed)
+        .map((contact) => contact.fingerprint)
+    );
+
+    const authoredByFollowed = posts
+      .filter((post) => !hiddenPostIds.has(post.id))
+      .filter((post) => followedSet.has(post.author))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    const likeEventsByFollowed = posts
+      .filter((post) => !hiddenPostIds.has(post.id))
+      .filter((post) => followedSet.has(post.author) && post.reaction === 'like')
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    const allKnownPosts = [...posts, ...visibleDiscoveryPosts];
+    const likedByFollowed = likeEventsByFollowed.map((likeEvent) => {
+      if (!likeEvent.repostOf) return likeEvent;
+      return allKnownPosts.find((candidate) => candidate.id === likeEvent.repostOf) ?? likeEvent;
+    });
+
+    const randomDiscovery = [...visibleDiscoveryPosts];
+    for (let i = randomDiscovery.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [randomDiscovery[i], randomDiscovery[j]] = [randomDiscovery[j], randomDiscovery[i]];
+    }
+
+    const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes + myProfile.feedMix.discoveryRandom);
+    const totalItems = 30;
+
+    const authoredQuota = Math.floor((totalItems * myProfile.feedMix.followedAuthors) / totalRatio);
+    const likedQuota = Math.floor((totalItems * myProfile.feedMix.followedLikes) / totalRatio);
+    const discoveryQuota = Math.max(0, totalItems - authoredQuota - likedQuota);
+
+    const selected: StoredPost[] = [];
+    const seen = new Set<string>();
+
+    const take = (source: StoredPost[], maxItems: number) => {
+      let remaining = maxItems;
+      for (const item of source) {
+        if (selected.length >= totalItems || remaining <= 0) break;
+        if (seen.has(item.id)) continue;
+        selected.push(item);
+        seen.add(item.id);
+        remaining -= 1;
+      }
+    };
+
+    take(authoredByFollowed, authoredQuota);
+    take(likedByFollowed, likedQuota);
+    take(randomDiscovery, discoveryQuota);
+
+    const fallback = [...authoredByFollowed, ...likedByFollowed, ...randomDiscovery]
+      .filter((item) => !seen.has(item.id))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    for (const item of fallback) {
+      if (selected.length >= totalItems) break;
+      selected.push(item);
+      seen.add(item.id);
+    }
+
+    return selected.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [posts, visibleDiscoveryPosts, hiddenPostIds, contacts, myProfile.feedMix]);
 
   const profilePosts = profileContactId
     ? posts.filter((post) => post.author === profileContactId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -721,6 +821,53 @@ function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleImportIdentity() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.onchange = async (event) => {
+      const file = (event.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      try {
+        const imported = JSON.parse(text);
+        if (imported?.publicKey && imported?.privateKey && imported?.id) {
+          await saveIdentity(imported);
+          setIdentity(imported);
+          addLog('Identity imported successfully');
+        } else {
+          addLog('Identity import failed: invalid file format');
+        }
+      } catch {
+        addLog('Identity import failed: invalid JSON');
+      }
+    };
+    input.click();
+  }
+
+  async function handleClearIdentity() {
+    const confirmed = window.confirm(
+      'Warning: clearing this identity logs you out on this browser. Export your identity backup first, or you may lose access permanently. Continue?'
+    );
+    if (!confirmed) return;
+
+    await deleteIdentity();
+    signallingSocketRef.current?.close();
+    peerManagersRef.current = {};
+    setIdentity(null);
+    setContacts([]);
+    setPosts([]);
+    setDiscoveryPosts([]);
+    setDirectChats({});
+    setMessageQueue({});
+    setSelectedContactId(null);
+    setChatContactId(null);
+    setActivePeerId(null);
+    setConnectionStatus('idle');
+    setSignallingStatus('idle');
+    setPage('home');
+  }
+
   function handleStartCall() {
     const socket = signallingSocketRef.current;
     const normalizedRemoteId = remoteId.trim();
@@ -790,6 +937,15 @@ function App() {
   const activeProfileContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
   const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
 
+  if (!identity) {
+    return (
+      <LandingPage
+        onCreateIdentity={handleCreateIdentity}
+        onImportIdentity={handleImportIdentity}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <AppHeader
@@ -834,7 +990,7 @@ function App() {
 
         {page === 'discover' && (
           <DiscoverPage
-            discoveryPosts={visibleDiscoveryPosts}
+            discoveryPosts={discoverFeedPosts}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onAddContact={handleAddContactFromKey}
             onFollow={handleToggleFollow}
@@ -867,8 +1023,23 @@ function App() {
             posts={posts}
             nickname={myProfile.displayName}
             bio={myProfile.bio}
+            followedAuthorsRatio={myProfile.feedMix.followedAuthors}
+            followedLikesRatio={myProfile.feedMix.followedLikes}
+            discoveryRatio={myProfile.feedMix.discoveryRandom}
             onNicknameChange={(value) => setMyProfile((prev) => ({ ...prev, displayName: value }))}
             onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
+            onFollowedAuthorsRatioChange={(value) => setMyProfile((prev) => ({
+              ...prev,
+              feedMix: { ...prev.feedMix, followedAuthors: Math.max(0, value) }
+            }))}
+            onFollowedLikesRatioChange={(value) => setMyProfile((prev) => ({
+              ...prev,
+              feedMix: { ...prev.feedMix, followedLikes: Math.max(0, value) }
+            }))}
+            onDiscoveryRatioChange={(value) => setMyProfile((prev) => ({
+              ...prev,
+              feedMix: { ...prev.feedMix, discoveryRandom: Math.max(0, value) }
+            }))}
             onSaveProfile={() => {
               localStorage.setItem('myProfile', JSON.stringify(myProfile));
               addLog('Profile saved locally');
@@ -878,26 +1049,9 @@ function App() {
               });
             }}
             onExportIdentity={handleExportIdentity}
-            onImportIdentity={() => {
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = 'application/json';
-              input.onchange = async (event) => {
-                const file = (event.target as HTMLInputElement).files?.[0];
-                if (!file) return;
-                const text = await file.text();
-                try {
-                  const imported = JSON.parse(text);
-                  if (imported?.publicKey && imported?.privateKey && imported?.id) {
-                    await saveIdentity(imported);
-                    setIdentity(imported);
-                  }
-                } catch (error) {
-                  addLog('Import failed');
-                }
-              };
-              input.click();
-            }}
+            onImportIdentity={handleImportIdentity}
+            onCreateIdentity={handleCreateIdentity}
+            onClearIdentity={handleClearIdentity}
           />
         )}
 

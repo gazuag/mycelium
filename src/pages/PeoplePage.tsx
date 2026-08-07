@@ -90,7 +90,7 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow,
       {renderGroup('Friends', friends, 'friends')}
       {renderGroup('Following', following, 'following')}
       {renderGroup('Followers', followers, 'followers')}
-      {renderGroup('Everyone Else', everyoneElse, 'everyone')}
+      {renderGroup('Follow Suggestions', everyoneElse, 'everyone')}
     </section>
   );
 }

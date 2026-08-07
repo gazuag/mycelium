@@ -7,11 +7,19 @@ interface MyProfilePageProps {
   posts: StoredPost[];
   nickname: string;
   bio: string;
+  followedAuthorsRatio: number;
+  followedLikesRatio: number;
+  discoveryRatio: number;
   onNicknameChange: (value: string) => void;
   onBioChange: (value: string) => void;
+  onFollowedAuthorsRatioChange: (value: number) => void;
+  onFollowedLikesRatioChange: (value: number) => void;
+  onDiscoveryRatioChange: (value: number) => void;
   onSaveProfile: () => void;
   onExportIdentity: () => void;
   onImportIdentity: () => void;
+  onCreateIdentity: () => void;
+  onClearIdentity: () => void;
 }
 
 export function MyProfilePage({
@@ -21,11 +29,19 @@ export function MyProfilePage({
   posts,
   nickname,
   bio,
+  followedAuthorsRatio,
+  followedLikesRatio,
+  discoveryRatio,
   onNicknameChange,
   onBioChange,
+  onFollowedAuthorsRatioChange,
+  onFollowedLikesRatioChange,
+  onDiscoveryRatioChange,
   onSaveProfile,
   onExportIdentity,
-  onImportIdentity
+  onImportIdentity,
+  onCreateIdentity,
+  onClearIdentity
 }: MyProfilePageProps) {
   return (
     <section className="page-view">
@@ -43,11 +59,44 @@ export function MyProfilePage({
           Bio
           <textarea value={bio} onChange={(e) => onBioChange(e.target.value)} placeholder="Write a short bio" />
         </label>
+        <h3>Home Feed Mix</h3>
+        <p className="note">These values are weighted ratios for Home feed composition.</p>
+        <label>
+          From people you follow
+          <input
+            type="number"
+            min={0}
+            value={followedAuthorsRatio}
+            onChange={(e) => onFollowedAuthorsRatioChange(Number(e.target.value) || 0)}
+          />
+        </label>
+        <label>
+          From what people you follow like
+          <input
+            type="number"
+            min={0}
+            value={followedLikesRatio}
+            onChange={(e) => onFollowedLikesRatioChange(Number(e.target.value) || 0)}
+          />
+        </label>
+        <label>
+          Random discovery content
+          <input
+            type="number"
+            min={0}
+            value={discoveryRatio}
+            onChange={(e) => onDiscoveryRatioChange(Number(e.target.value) || 0)}
+          />
+        </label>
         <div className="row">
           <button className="btn" onClick={onSaveProfile}>Save Profile</button>
           <button className="btn secondary" onClick={onExportIdentity}>Export Identity</button>
         </div>
-        <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
+        <div className="row">
+          <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
+          <button className="btn secondary" onClick={onCreateIdentity}>Create New Identity</button>
+          <button className="btn secondary" onClick={onClearIdentity}>Clear Identity (Log Out)</button>
+        </div>
       </div>
 
       <div className="card">
