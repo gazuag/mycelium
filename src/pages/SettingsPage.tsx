@@ -1,8 +1,10 @@
 interface SettingsPageProps {
   onResetApp: () => void;
+  logs: string[];
+  onClearLogs: () => void;
 }
 
-export function SettingsPage({ onResetApp }: SettingsPageProps) {
+export function SettingsPage({ onResetApp, logs, onClearLogs }: SettingsPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -12,7 +14,17 @@ export function SettingsPage({ onResetApp }: SettingsPageProps) {
 
       <div className="card">
         <h3>Diagnostics</h3>
-        <p className="note">No network rewrites are performed here. This is UI-only settings surface.</p>
+        <p className="note">Live runtime log of events, discovery fetches, and peer sync activity.</p>
+        <div className="log-box" role="log" aria-live="polite">
+          {logs.length === 0 ? (
+            <p>No diagnostics yet.</p>
+          ) : (
+            logs.slice().reverse().map((entry, index) => <p key={`${entry}-${index}`}>{entry}</p>)
+          )}
+        </div>
+        <div className="row">
+          <button className="btn secondary" type="button" onClick={onClearLogs}>Clear diagnostics log</button>
+        </div>
       </div>
 
       <div className="card">

@@ -10,7 +10,6 @@ interface AppHeaderProps {
   myFingerprint?: string;
   onOpenMyProfile: () => void;
   onOpenSettings: () => void;
-  onRefreshDiscovery: () => void;
 }
 
 export function AppHeader({
@@ -22,8 +21,7 @@ export function AppHeader({
   syncStatus,
   myFingerprint,
   onOpenMyProfile,
-  onOpenSettings,
-  onRefreshDiscovery
+  onOpenSettings
 }: AppHeaderProps) {
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
@@ -66,7 +64,6 @@ export function AppHeader({
 
         <div className="app-header-actions">
           <button className="btn" onClick={onOpenMyProfile}>My profile</button>
-          <button className="btn secondary" onClick={onRefreshDiscovery}>Refresh</button>
           <button className="btn secondary" onClick={onOpenSettings}>Settings</button>
         </div>
       </div>

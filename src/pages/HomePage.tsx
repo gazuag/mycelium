@@ -8,6 +8,7 @@ interface HomePageProps {
   postText: string;
   onPostTextChange: (value: string) => void;
   onSubmitPost: (publish: boolean) => void;
+  onRefreshPosts: () => void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   onLike: (postId: string) => void;
@@ -22,6 +23,7 @@ export function HomePage({
   postText,
   onPostTextChange,
   onSubmitPost,
+  onRefreshPosts,
   canCreatePost,
   onAuthorClick,
   onLike,
@@ -39,6 +41,9 @@ export function HomePage({
       <div className="page-header">
         <h2>Home</h2>
         <p className="note">New posts from people you follow.</p>
+        <div className="page-header-actions">
+          <button className="btn secondary" type="button" onClick={onRefreshPosts}>Refresh posts</button>
+        </div>
       </div>
 
       <div className="card home-composer">

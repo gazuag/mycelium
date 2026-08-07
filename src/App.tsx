@@ -513,6 +513,16 @@ function App() {
     return () => window.clearInterval(interval);
   }, [contacts, identity]);
 
+  useEffect(() => {
+    if (!identity?.id) return;
+    void handleFetchDiscovery();
+  }, [identity?.id]);
+
+  useEffect(() => {
+    if (page !== 'discover' || discoveryPosts.length > 0) return;
+    void handleFetchDiscovery();
+  }, [page, discoveryPosts.length]);
+
   async function handleAddContactFromKey(publicKey: string, displayName?: string) {
     const fingerprint = await deriveFingerprint(publicKey);
     const contact: Contact = {
@@ -767,16 +777,27 @@ function App() {
   }, [page, pageScrollPositions]);
 
   async function handleFetchDiscovery() {
+    addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(20);
-      const verifiedPosts = await Promise.all(
-        items.map(async (post) => ({
-          ...post,
-          source: 'discovery' as const,
-          receivedAt: new Date().toISOString(),
-          valid: await verifySignedPost(post)
-        }))
-      );
+      const verifiedPosts = await Promise.all(items.map(async (post) => {
+        try {
+          const valid = await verifySignedPost(post);
+          return {
+            ...post,
+            source: 'discovery' as const,
+            receivedAt: new Date().toISOString(),
+            valid
+          };
+        } catch {
+          return {
+            ...post,
+            source: 'discovery' as const,
+            receivedAt: new Date().toISOString(),
+            valid: false
+          };
+        }
+      }));
       setDiscoveryPosts(verifiedPosts);
       addLog(`Fetched ${verifiedPosts.length} discovery posts`);
     } catch (err: any) {
@@ -958,7 +979,6 @@ function App() {
         myFingerprint={identity?.id}
         onOpenMyProfile={() => setPage('myProfile')}
         onOpenSettings={() => setPage('settings')}
-        onRefreshDiscovery={handleFetchDiscovery}
       />
 
       <main id="page-content" className="page-content">
@@ -969,6 +989,7 @@ function App() {
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={handleCreatePost}
+            onRefreshPosts={handleFetchDiscovery}
             canCreatePost={Boolean(identity)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
@@ -991,6 +1012,7 @@ function App() {
         {page === 'discover' && (
           <DiscoverPage
             discoveryPosts={discoverFeedPosts}
+            onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onAddContact={handleAddContactFromKey}
             onFollow={handleToggleFollow}
@@ -1068,6 +1090,8 @@ function App() {
 
         {page === 'settings' && (
           <SettingsPage
+            logs={logs}
+            onClearLogs={() => setLogs([])}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());

@@ -3,6 +3,7 @@ import { PostCard } from '../components/PostCard';
 
 interface DiscoverPageProps {
   discoveryPosts: StoredPost[];
+  onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
   onAddContact: (publicKey: string) => void;
   onFollow: (publicKey: string) => void;
@@ -12,12 +13,15 @@ interface DiscoverPageProps {
   onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, onRefreshDiscovery, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
         <h2>Discover</h2>
         <p className="note">Explore public posts from the wider network.</p>
+        <div className="page-header-actions">
+          <button className="btn secondary" type="button" onClick={onRefreshDiscovery}>Refresh discovery</button>
+        </div>
       </div>
 
       {discoveryPosts.length === 0 ? (

@@ -149,6 +149,7 @@ body, html, #root {
   z-index: 20;
   margin: 0;
   border-radius: 0 0 24px 24px;
+  background-color: #07120d;
 }
 
 .app-header.collapsed .app-header-body {
@@ -274,6 +275,12 @@ body, html, #root {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+}
+
+.page-header-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 0.5rem;
 }
 
 .feed-list,
