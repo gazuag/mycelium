@@ -251,7 +251,7 @@ body, html, #root {
   border: none;
   border-radius: 999px;
   padding: 0.85rem 0.5rem;
-  background: rgba(255,255,255,0.04);
+  background: #132219;
   color: #f6f7f1;
   font-size: 0.95rem;
 }
