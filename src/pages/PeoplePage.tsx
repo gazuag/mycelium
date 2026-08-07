@@ -8,9 +8,10 @@ interface PeoplePageProps {
   onViewProfile: (peerId: string) => void;
   onMessage: (peerId: string) => void;
   onToggleFollow: (peerId: string) => void;
+  onAddPeerAddress: (address: string) => Promise<void>;
 }
 
-export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow }: PeoplePageProps) {
+export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow, onAddPeerAddress }: PeoplePageProps) {
   const [openGroups, setOpenGroups] = useState({
     inbox: true,
     friends: true,
@@ -18,6 +19,7 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow 
     followers: true,
     everyone: true
   });
+  const [newPeerAddress, setNewPeerAddress] = useState('');
 
   const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
   const friends = contacts.filter((c) => c.followed && c.follower);
@@ -60,6 +62,29 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow 
       <div className="page-header">
         <h2>People</h2>
         <p className="note">Manage your contacts, messages, and peers.</p>
+      </div>
+      <div className="card add-peer-card">
+        <h3>Add Peer by Address</h3>
+        <p className="note">Paste peer node ID or public key, then add and connect.</p>
+        <div className="row">
+          <input
+            value={newPeerAddress}
+            onChange={(event) => setNewPeerAddress(event.target.value)}
+            placeholder="Peer address"
+          />
+          <button
+            className="btn"
+            type="button"
+            onClick={async () => {
+              const normalized = newPeerAddress.trim();
+              if (!normalized) return;
+              await onAddPeerAddress(normalized);
+              setNewPeerAddress('');
+            }}
+          >
+            Add peer
+          </button>
+        </div>
       </div>
       {renderGroup('Unread Inbox', unreadInbox, 'inbox')}
       {renderGroup('Friends', friends, 'friends')}

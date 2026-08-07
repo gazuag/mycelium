@@ -5,6 +5,10 @@ import { PostCard } from '../components/PostCard';
 interface HomePageProps {
   posts: StoredPost[];
   contacts: Contact[];
+  postText: string;
+  onPostTextChange: (value: string) => void;
+  onSubmitPost: (publish: boolean) => void;
+  canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
@@ -12,8 +16,21 @@ interface HomePageProps {
   onHide: (postId: string) => void;
 }
 
-export function HomePage({ posts, contacts, onAuthorClick, onLike, onDislike, onReply, onHide }: HomePageProps) {
+export function HomePage({
+  posts,
+  contacts,
+  postText,
+  onPostTextChange,
+  onSubmitPost,
+  canCreatePost,
+  onAuthorClick,
+  onLike,
+  onDislike,
+  onReply,
+  onHide
+}: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
+  const [publishToDiscovery, setPublishToDiscovery] = useState(true);
 
   const visiblePosts = posts.slice(0, visibleCount);
 
@@ -22,6 +39,33 @@ export function HomePage({ posts, contacts, onAuthorClick, onLike, onDislike, on
       <div className="page-header">
         <h2>Home</h2>
         <p className="note">New posts from people you follow.</p>
+      </div>
+
+      <div className="card home-composer">
+        <h3>Create Post</h3>
+        <textarea
+          value={postText}
+          onChange={(event) => onPostTextChange(event.target.value)}
+          placeholder="Share what is happening..."
+        />
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={publishToDiscovery}
+            onChange={(event) => setPublishToDiscovery(event.target.checked)}
+          />
+          <span>Publish to discovery</span>
+        </label>
+        <div className="row">
+          <button
+            className="btn"
+            type="button"
+            onClick={() => onSubmitPost(publishToDiscovery)}
+            disabled={!canCreatePost || !postText.trim()}
+          >
+            Send
+          </button>
+        </div>
       </div>
 
       {visiblePosts.length === 0 ? (

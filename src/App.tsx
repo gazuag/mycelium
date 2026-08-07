@@ -56,7 +56,6 @@ function App() {
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const [myProfile, setMyProfile] = useState({ displayName: '', bio: '' });
-  const [messageDraft, setMessageDraft] = useState('');
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
     people: 0,
@@ -69,6 +68,11 @@ function App() {
   const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
+  const selectedContactIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedContactIdRef.current = selectedContactId;
+  }, [selectedContactId]);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
@@ -120,14 +124,14 @@ function App() {
     });
   };
 
-  const getLocalDisplayName = () => identity?.id.slice(0, 12) ?? 'Me';
+  const getLocalDisplayName = () => myProfile.displayName.trim() || identity?.id.slice(0, 12) || 'Me';
 
   const buildPeerMetadata = (peerId: string) => ({
     author: identity?.id ?? '',
     displayName: getLocalDisplayName(),
     following: contacts.find((c) => c.fingerprint === peerId)?.followed ?? false,
     timestamp: new Date().toISOString(),
-    bio: `Peer ${identity?.id?.slice(0, 12) ?? 'unknown'}`,
+    bio: myProfile.bio.trim() || `Peer ${identity?.id?.slice(0, 12) ?? 'unknown'}`,
     tags: []
   });
 
@@ -271,8 +275,12 @@ function App() {
       },
       (peer, incoming) => {
         saveDirectMessage(peer, incoming, true);
-        if (peer !== selectedContactId) {
-          updateContactState(peer, { unreadMessages: (contacts.find((c) => c.fingerprint === peer)?.unreadMessages || 0) + 1 });
+        if (peer !== selectedContactIdRef.current) {
+          setContacts((prev) => prev.map((contact) => (
+            contact.fingerprint === peer
+              ? { ...contact, unreadMessages: (contact.unreadMessages || 0) + 1 }
+              : contact
+          )));
         }
       },
       (signal) => {
@@ -392,6 +400,20 @@ function App() {
         const loadedIdentity = { ...stored, id };
         setIdentity(loadedIdentity);
       }
+      const rawProfile = localStorage.getItem('myProfile');
+      if (rawProfile) {
+        try {
+          const parsed = JSON.parse(rawProfile);
+          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string') {
+            setMyProfile({
+              displayName: typeof parsed.displayName === 'string' ? parsed.displayName : '',
+              bio: typeof parsed.bio === 'string' ? parsed.bio : ''
+            });
+          }
+        } catch {
+          addLog('Saved profile settings could not be parsed; using defaults.');
+        }
+      }
     }
     bootstrap();
   }, []);
@@ -476,6 +498,57 @@ function App() {
     addLog(`Added contact ${fingerprint}`);
   }
 
+  async function handleAddPeerByAddress(address: string) {
+    if (!identity) return;
+    const normalized = address.trim();
+    if (!normalized) return;
+
+    let fingerprint = normalized;
+    let publicKey = normalized;
+
+    if (!normalized.includes(':') && !normalized.startsWith('myc:') && normalized.length > 40) {
+      try {
+        fingerprint = await deriveFingerprint(normalized);
+      } catch {
+        fingerprint = normalized;
+      }
+    }
+
+    const existing = contacts.find((contact) => contact.fingerprint === fingerprint || contact.publicKey === publicKey);
+    const contact: Contact = {
+      publicKey,
+      fingerprint,
+      displayName: existing?.displayName,
+      addedAt: existing?.addedAt ?? new Date().toISOString(),
+      followed: existing?.followed ?? false,
+      follower: existing?.follower,
+      online: existing?.online ?? false,
+      connected: existing?.connected ?? false,
+      unreadMessages: existing?.unreadMessages ?? 0,
+      queuedMessages: existing?.queuedMessages ?? 0,
+      lastConnectionStatus: existing?.lastConnectionStatus,
+      lastSeen: existing?.lastSeen,
+      profile: existing?.profile
+    };
+
+    await saveContact(contact);
+    setContacts((prev) => {
+      const filtered = prev.filter((entry) => entry.fingerprint !== fingerprint);
+      return [...filtered, contact];
+    });
+
+    addLog(`Added peer address ${fingerprint}`);
+
+    const socket = signallingSocketRef.current;
+    const manager = ensurePeerManager(fingerprint);
+    if (socket && socket.readyState === WebSocket.OPEN && manager) {
+      manager.createOffer(fingerprint, socket);
+      addLog(`Attempting connection to ${fingerprint}`);
+    } else {
+      addLog('Peer added. Waiting for signalling connection to connect.');
+    }
+  }
+
   async function handleToggleFollow(publicKey: string) {
     const existing = contacts.find((c) => c.publicKey === publicKey);
     if (!existing) return;
@@ -519,9 +592,11 @@ function App() {
 
   async function handleCreatePost(publishToDiscovery = false) {
     if (!identity) return;
+    const content = newPostContent.trim();
+    if (!content) return;
     const id = await sha256(identity.publicKey + Date.now().toString());
     const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
-    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, newPostContent, tags);
+    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, content, tags);
     const stored: StoredPost = {
       ...signed,
       source: 'local',
@@ -665,6 +740,14 @@ function App() {
     setPage('chat');
     addLog(`Selected contact ${peerId}`);
     updateContactState(peerId, { unreadMessages: 0 });
+
+    const socket = signallingSocketRef.current;
+    const manager = ensurePeerManager(peerId);
+    const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
+    if (socket && socket.readyState === WebSocket.OPEN && manager && !targetContact?.connected) {
+      manager.createOffer(peerId, socket);
+      addLog(`Opening chat and connecting to ${peerId}`);
+    }
   }
 
   async function handleSendDirectMessage() {
@@ -681,6 +764,12 @@ function App() {
       addLog(`Sent direct message to ${peerId}`);
     } else {
       await queuePeerMessage(peerId, trimmedMessage);
+      const socket = signallingSocketRef.current;
+      const lazyManager = manager ?? ensurePeerManager(peerId);
+      if (socket && socket.readyState === WebSocket.OPEN && lazyManager) {
+        lazyManager.createOffer(peerId, socket);
+        addLog(`Queued message and requested connection to ${peerId}`);
+      }
       addLog(`Queued direct message for ${peerId}`);
     }
 
@@ -721,6 +810,10 @@ function App() {
           <HomePage
             posts={visibleHomePosts}
             contacts={contacts}
+            postText={newPostContent}
+            onPostTextChange={setNewPostContent}
+            onSubmitPost={handleCreatePost}
+            canCreatePost={Boolean(identity)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -735,6 +828,7 @@ function App() {
             onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
+            onAddPeerAddress={handleAddPeerByAddress}
           />
         )}
 
@@ -777,6 +871,11 @@ function App() {
             onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
             onSaveProfile={() => {
               localStorage.setItem('myProfile', JSON.stringify(myProfile));
+              addLog('Profile saved locally');
+              contacts.forEach((contact) => {
+                if (!contact.connected) return;
+                peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
+              });
             }}
             onExportIdentity={handleExportIdentity}
             onImportIdentity={() => {
