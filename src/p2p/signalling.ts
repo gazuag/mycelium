@@ -10,7 +10,7 @@ export type SignalMessage =
       peers: string[];
     };
 
-const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://217.154.78.152:8765';
+const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'wss://217.154.78.152:8765';
 
 export function connectToSignalling(
   localId: string,

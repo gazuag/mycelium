@@ -60,8 +60,9 @@ python3 server.py
 
 ## Signalling server configuration
 
-- The Python server now defaults to `ws://217.154.78.152:8765`.
-- Set `VITE_SIGNAL_SERVER_URL` if you want to override it locally.
+- The frontend defaults to `wss://217.154.78.152:8765` (signalling) and `https://217.154.78.152:8000` (discovery).
+- Set `VITE_SIGNAL_SERVER_URL` and `VITE_DISCOVERY_SERVER_URL` to override locally.
+- **TLS is required** when the frontend is served over HTTPS (e.g. Cloudflare Pages). Browsers block mixed-content requests from HTTPS pages to plain `ws://` or `http://` URLs. Run the Python server behind a reverse proxy (e.g. nginx or Caddy) that terminates TLS and proxies to ports 8765 and 8000.
 
 ## What travels through the signalling server
 

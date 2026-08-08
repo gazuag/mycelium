@@ -214,13 +214,6 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
             logging.info('Client disconnected: %s', client_id)
             await broadcast_peer_list()
 
-async def handle_options(request: web.Request) -> web.Response:
-    response = web.Response(status=204)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
-
 async def websocket_handler(websocket: WebSocketServerProtocol, path: str) -> None:
     await handle_client(websocket)
 
