@@ -60,9 +60,29 @@ python3 server.py
 
 ## Signalling server configuration
 
-- The frontend defaults to `wss://217.154.78.152:8765` (signalling) and `https://217.154.78.152:8000` (discovery).
-- Set `VITE_SIGNAL_SERVER_URL` and `VITE_DISCOVERY_SERVER_URL` to override locally.
-- **TLS is required** when the frontend is served over HTTPS (e.g. Cloudflare Pages). Browsers block mixed-content requests from HTTPS pages to plain `ws://` or `http://` URLs. Run the Python server behind a reverse proxy (e.g. nginx or Caddy) that terminates TLS and proxies to ports 8765 and 8000.
+- The frontend defaults to `ws://217.154.78.152:8765` (signalling) and `http://217.154.78.152:8000` (discovery).
+- Override with `VITE_SIGNAL_SERVER_URL` and `VITE_DISCOVERY_SERVER_URL` environment variables.
+
+### Mixed-content and TLS
+
+When the frontend is served over **HTTPS** (e.g. Cloudflare Pages), browsers block plain `ws://` and `http://` requests (mixed-content policy). This causes `Load failed` errors on signalling and discovery, preventing peers from connecting. WebRTC data channel traffic (UDP) is unaffected once connected, but peers cannot reach the signalling stage.
+
+To fix this, run the Python server behind a TLS-terminating reverse proxy. Example with **Caddy** (auto-TLS via Let's Encrypt):
+
+```
+yourdomain.com {
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+    handle {
+        reverse_proxy localhost:8765
+    }
+}
+```
+
+Then set in your Cloudflare Pages environment variables:
+- `VITE_SIGNAL_SERVER_URL=wss://yourdomain.com`
+- `VITE_DISCOVERY_SERVER_URL=https://yourdomain.com`
 
 ## What travels through the signalling server
 

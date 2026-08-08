@@ -1,7 +1,7 @@
 import type { SignedPost } from '../types';
 import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 
-const DISCOVERY_SERVER = (import.meta as any).env?.VITE_DISCOVERY_SERVER_URL as string || 'https://217.154.78.152:8000';
+const DISCOVERY_SERVER = (import.meta as any).env?.VITE_DISCOVERY_SERVER_URL as string || 'http://217.154.78.152:8000';
 const MAX_BATCH_SIZE = 30;
 
 export async function publishPost(post: SignedPost) {
