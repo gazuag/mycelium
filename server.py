@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import websockets
-from aiohttp import web
 from websockets.server import WebSocketServerProtocol
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -77,7 +76,7 @@ async def prune_discovery_posts() -> None:
     logging.info('Pruned %d discovery posts, new count %d', delete_count, MAX_DISCOVERY_POSTS)
 
 
-def build_discovery_result_packet(posts, recipient: Optional[str] = None):
+def build_discovery_result_packet(posts, request_id: Optional[str] = None, recipient: Optional[str] = None):
     return {
         'protocol': 'mycelium',
         'version': 1,
@@ -87,6 +86,7 @@ def build_discovery_result_packet(posts, recipient: Optional[str] = None):
         'sender': 'discovery-server',
         'recipient': recipient,
         'payload': {
+            'requestId': request_id,
             'posts': posts,
         },
         'signature': 'server-unsigned-v1'
@@ -107,38 +107,31 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
     rows = cursor.fetchall()
     return [json.loads(row[0]) for row in rows]
 
-async def handle_discovery_post(request: web.Request) -> web.Response:
-    if request.content_length is None or request.content_length > MAX_POST_SIZE:
-        return web.Response(status=413, text='Post too large', headers={'Access-Control-Allow-Origin': '*'})
-    try:
-        payload = await request.json()
-    except json.JSONDecodeError:
-        return web.Response(status=400, text='Invalid JSON', headers={'Access-Control-Allow-Origin': '*'})
 
-    if not isinstance(payload, dict):
-        return web.Response(status=400, text='Invalid post payload', headers={'Access-Control-Allow-Origin': '*'})
+async def handle_discovery_get(message: dict, websocket: WebSocketServerProtocol) -> None:
+    query = message.get('payload', {}) if isinstance(message.get('payload'), dict) else {}
+    limit = min(int(query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
+    tag = query.get('tag')
+    posts = load_discovery_posts(limit, tag if isinstance(tag, str) else None)
+    result = build_discovery_result_packet(posts, request_id=message.get('id'), recipient=message.get('sender'))
+    await websocket.send(json.dumps(result))
+    logging.info('Sent %d discovery posts to %s', len(posts), message.get('sender', '<unknown>'))
 
-    if payload.get('protocol') == 'mycelium' and payload.get('version') == 1 and payload.get('type') == 'DISCOVERY_GET':
-        query = payload.get('payload', {}) if isinstance(payload.get('payload'), dict) else {}
-        limit = min(int(query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
-        tag = query.get('tag')
-        posts = load_discovery_posts(limit, tag if isinstance(tag, str) else None)
-        response = web.json_response(build_discovery_result_packet(posts, payload.get('sender')))
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
 
-    post_payload = payload
-    if payload.get('protocol') == 'mycelium' and payload.get('version') == 1 and payload.get('type') == 'DISCOVERY_PUBLISH':
-        inner_payload = payload.get('payload', {}) if isinstance(payload.get('payload'), dict) else {}
-        post_payload = inner_payload.get('post')
-
+async def handle_discovery_publish(message: dict) -> None:
+    raw_post_json = json.dumps(message)
+    if len(raw_post_json) > MAX_POST_SIZE:
+        logging.warning('DISCOVERY_PUBLISH payload too large, ignoring')
+        return
+    inner_payload = message.get('payload', {}) if isinstance(message.get('payload'), dict) else {}
+    post_payload = inner_payload.get('post')
     if not isinstance(post_payload, dict):
-        return web.Response(status=400, text='Invalid post payload', headers={'Access-Control-Allow-Origin': '*'})
-
+        logging.warning('DISCOVERY_PUBLISH missing post payload')
+        return
     required_keys = {'protocol', 'version', 'type', 'id', 'author', 'timestamp', 'content', 'tags', 'signature'}
     if not required_keys.issubset(post_payload.keys()):
-        return web.Response(status=400, text='Missing required fields', headers={'Access-Control-Allow-Origin': '*'})
-
+        logging.warning('DISCOVERY_PUBLISH missing required fields: %s', required_keys - post_payload.keys())
+        return
     post_id = post_payload['id']
     received_at = datetime.utcnow().isoformat() + 'Z'
     tags = ','.join(post_payload.get('tags', []))
@@ -148,23 +141,8 @@ async def handle_discovery_post(request: web.Request) -> web.Response:
     )
     DB_CONN.commit()
     await prune_discovery_posts()
-    logging.info('Stored public discovery post %s from %s tags=%s', post_id, post_payload['author'], tags)
-    return web.Response(status=201, text='Post accepted', headers={'Access-Control-Allow-Origin': '*'})
+    logging.info('Stored discovery post %s from %s tags=%s', post_id, post_payload['author'], tags)
 
-async def handle_discovery_get(request: web.Request) -> web.Response:
-    limit = min(int(request.query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
-    tag = request.query.get('tag')
-    posts = load_discovery_posts(limit, tag)
-    response = web.json_response(posts)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
-
-async def handle_options(request: web.Request) -> web.Response:
-    response = web.Response(status=204)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
 
 async def handle_client(websocket: WebSocketServerProtocol) -> None:
     client_id: Optional[str] = None
@@ -205,6 +183,15 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                     logging.info('Target %s not connected; ignoring %s', target, msg_type)
                 continue
 
+            # Mycelium protocol packets
+            if message.get('protocol') == 'mycelium' and message.get('version') == 1:
+                if msg_type == 'DISCOVERY_GET':
+                    await handle_discovery_get(message, websocket)
+                    continue
+                if msg_type == 'DISCOVERY_PUBLISH':
+                    await handle_discovery_publish(message)
+                    continue
+
             logging.warning('Unsupported message type: %s', msg_type)
     except websockets.ConnectionClosed:
         pass
@@ -220,16 +207,7 @@ async def websocket_handler(websocket: WebSocketServerProtocol, path: str) -> No
 async def main() -> None:
     logging.info('Starting discovery database at %s', DB_PATH)
     server = await websockets.serve(websocket_handler, '0.0.0.0', 8765)
-    app = web.Application()
-    app.router.add_route('OPTIONS', '/api/discovery', handle_options)
-    app.router.add_post('/api/discovery', handle_discovery_post)
-    app.router.add_get('/api/discovery', handle_discovery_get)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
-    await site.start()
-    logging.info('Signalling server started on ws://0.0.0.0:8765')
-    logging.info('Discovery API started on http://0.0.0.0:8000')
+    logging.info('Server started on ws://0.0.0.0:8765 (signalling + discovery)')
     await asyncio.Future()
 
 if __name__ == '__main__':
