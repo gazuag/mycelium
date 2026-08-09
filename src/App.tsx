@@ -49,6 +49,7 @@ function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
   const signallingSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const suppressReconnectRef = useRef(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
   const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
@@ -115,7 +116,7 @@ function App() {
   }, [connectionStatus]);
 
   const signalEndpoint = useMemo(() => resolveSignalServerUrl(), []);
-  const discoveryEndpoint = useMemo(() => resolveDiscoveryServerUrl(), []);
+  const discoveryEndpoint = signalEndpoint;
 
   const chatEnabled = selectedContactId !== null && selectedContact?.connected === true && dataChannelOpen;
   const pageContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
@@ -466,6 +467,7 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
 
+    suppressReconnectRef.current = false;
     const signalUrl = resolveSignalServerUrl();
     addLog(`Connecting to signalling endpoint: ${signalUrl}`);
 
@@ -492,7 +494,11 @@ function App() {
       (status) => {
         setSignallingStatus(status);
         addLog(`Signalling server status: ${status}`);
-        if ((status === 'error' || status === 'closed') && reconnectTimerRef.current === null) {
+        if (status === 'connected' && reconnectTimerRef.current !== null) {
+          window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        if (!suppressReconnectRef.current && (status === 'error' || status === 'closed') && reconnectTimerRef.current === null) {
           reconnectTimerRef.current = window.setTimeout(() => {
             reconnectTimerRef.current = null;
             setSignallingReconnectTick((prev) => prev + 1);
@@ -504,6 +510,7 @@ function App() {
 
     signallingSocketRef.current = socket;
     return () => {
+      suppressReconnectRef.current = true;
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -698,12 +705,7 @@ function App() {
   const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id));
 
   const discoverFeedPosts = useMemo(() => {
-    const shuffled = [...visibleDiscoveryPosts];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    return shuffled;
+    return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [visibleDiscoveryPosts]);
 
   const visibleHomePosts = useMemo(() => {
@@ -832,11 +834,11 @@ function App() {
           };
         }
       }));
-      setDiscoveryPosts(verifiedPosts);
+      setDiscoveryPosts(verifiedPosts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
       addLog(`Fetched ${verifiedPosts.length} discovery posts`);
     } catch (err: any) {
       const message = err?.message || String(err);
-      addLog(`Discovery fetch failed (${discoveryUrl}/api/discovery): ${message}`);
+      addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);
     }
   }
 
@@ -959,10 +961,16 @@ function App() {
     const trimmedMessage = message.trim();
     const manager = peerManagersRef.current[peerId];
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
+    const canSendImmediately = Boolean(
+      manager &&
+      targetContact?.connected &&
+      activePeerId === peerId &&
+      manager.isDataChannelOpen()
+    );
 
     saveDirectMessage(peerId, trimmedMessage, false);
 
-    if (manager && targetContact?.connected) {
+    if (canSendImmediately && manager) {
       manager.sendChatMessage(trimmedMessage);
       addLog(`Sent direct message to ${peerId}`);
     } else {
@@ -971,7 +979,7 @@ function App() {
       const lazyManager = manager ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && lazyManager) {
         lazyManager.createOffer(peerId, socket);
-        addLog(`Queued message and requested connection to ${peerId}`);
+        addLog(`Queued message and requested data channel to ${peerId}`);
       }
       addLog(`Queued direct message for ${peerId}`);
     }

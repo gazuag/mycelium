@@ -1,4 +1,4 @@
-import type { SignalMessage } from './signalling';
+import type { PeerSignalMessage, SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata, SignedPost } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
 
@@ -256,6 +256,10 @@ export class PeerConnectionManager {
     }
   }
 
+  public isDataChannelOpen() {
+    return this.dataChannel?.readyState === 'open';
+  }
+
   private async sendPacket(type: Parameters<typeof buildPacket>[2], payload: Record<string, unknown>) {
     if (!this.remoteId) return;
     const packet = await buildPacket(this.localId, this.remoteId, type, payload, this.packetSigner);
@@ -390,8 +394,7 @@ export class PeerConnectionManager {
     this.pendingIceCandidates = [];
   }
 
-  public async handleSignal(message: SignalMessage, signallingSocket: WebSocket) {
-    if (message.type === 'peer-list') return;
+  public async handleSignal(message: PeerSignalMessage, signallingSocket: WebSocket) {
     if (message.to !== this.localId) return;
 
     this.remoteId = message.from;

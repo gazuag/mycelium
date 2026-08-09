@@ -14,6 +14,8 @@ export type SignalMessage =
       packet: unknown;
     };
 
+export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
+
 function normalizeSignalUrl(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
@@ -35,11 +37,15 @@ export function resolveSignalServerUrl() {
   }
 
   if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return 'ws://217.154.78.152:8765';
+    }
     const pageProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${pageProtocol}//${window.location.hostname}:8765`;
+    return `${pageProtocol}//${hostname}:8765`;
   }
 
-  return 'ws://127.0.0.1:8765';
+  return 'ws://217.154.78.152:8765';
 }
 
 export function connectToSignalling(
