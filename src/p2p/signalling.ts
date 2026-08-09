@@ -14,33 +14,60 @@ export type SignalMessage =
       packet: unknown;
     };
 
-const SIGNAL_SERVER = ((import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string) || 'ws://217.154.78.152:8765';
+function normalizeSignalUrl(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'http:') {
+      url.protocol = 'ws:';
+    } else if (url.protocol === 'https:') {
+      url.protocol = 'wss:';
+    }
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+export function resolveSignalServerUrl() {
+  const explicit = (import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string | undefined;
+  if (explicit && explicit.trim()) {
+    return normalizeSignalUrl(explicit.trim());
+  }
+
+  if (typeof window !== 'undefined') {
+    const pageProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${pageProtocol}//${window.location.hostname}:8765`;
+  }
+
+  return 'ws://127.0.0.1:8765';
+}
 
 export function connectToSignalling(
   localId: string,
   onMessage: (message: SignalMessage) => void,
   onStatus?: (status: string) => void
 ) {
-  const socket = new WebSocket(SIGNAL_SERVER);
+  const signalServerUrl = resolveSignalServerUrl();
+  const socket = new WebSocket(signalServerUrl);
   const normalizedId = localId.trim();
 
   onStatus?.('connecting');
 
   socket.addEventListener('open', () => {
     onStatus?.('connected');
-    console.log('Signalling server connected');
+    console.log('Signalling server connected', signalServerUrl);
     const registerMessage = JSON.stringify({ type: 'register', id: normalizedId });
     socket.send(registerMessage);
   });
 
   socket.addEventListener('close', () => {
     onStatus?.('closed');
-    console.log('Signalling server disconnected');
+    console.log('Signalling server disconnected', signalServerUrl);
   });
 
   socket.addEventListener('error', (event) => {
     onStatus?.('error');
-    console.error('Signalling server error', event);
+    console.error('Signalling server error', signalServerUrl, event);
   });
 
   socket.addEventListener('message', (event) => {

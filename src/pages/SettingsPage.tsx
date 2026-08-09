@@ -2,14 +2,31 @@ interface SettingsPageProps {
   onResetApp: () => void;
   logs: string[];
   onClearLogs: () => void;
+  signalEndpoint: string;
+  discoveryEndpoint: string;
 }
 
-export function SettingsPage({ onResetApp, logs, onClearLogs }: SettingsPageProps) {
+export function SettingsPage({
+  onResetApp,
+  logs,
+  onClearLogs,
+  signalEndpoint,
+  discoveryEndpoint
+}: SettingsPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
         <h2>Settings</h2>
         <p className="note">App-level options and diagnostics.</p>
+      </div>
+
+      <div className="card">
+        <h3>Network Endpoints</h3>
+        <p className="note">Resolved runtime endpoints used by this client.</p>
+        <p><strong>Signalling</strong></p>
+        <p className="monospace break-word">{signalEndpoint}</p>
+        <p><strong>Discovery</strong></p>
+        <p className="monospace break-word">{discoveryEndpoint}/api/discovery</p>
       </div>
 
       <div className="card">

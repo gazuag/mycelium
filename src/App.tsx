@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
-import { connectToSignalling, SignalMessage } from './p2p/signalling';
+import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
 import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
@@ -48,8 +48,10 @@ const DEFAULT_FEED_MIX: FeedMixSettings = {
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
   const signallingSocketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
+  const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
   const [remoteId, setRemoteId] = useState('');
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<string[]>([]);
@@ -111,6 +113,9 @@ function App() {
         return 'Idle';
     }
   }, [connectionStatus]);
+
+  const signalEndpoint = useMemo(() => resolveSignalServerUrl(), []);
+  const discoveryEndpoint = useMemo(() => resolveDiscoveryServerUrl(), []);
 
   const chatEnabled = selectedContactId !== null && selectedContact?.connected === true && dataChannelOpen;
   const pageContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
@@ -461,6 +466,9 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
 
+    const signalUrl = resolveSignalServerUrl();
+    addLog(`Connecting to signalling endpoint: ${signalUrl}`);
+
     const socket = connectToSignalling(
       identity.id,
       async (message: SignalMessage) => {
@@ -484,14 +492,25 @@ function App() {
       (status) => {
         setSignallingStatus(status);
         addLog(`Signalling server status: ${status}`);
+        if ((status === 'error' || status === 'closed') && reconnectTimerRef.current === null) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            setSignallingReconnectTick((prev) => prev + 1);
+            addLog('Retrying signalling connection');
+          }, 3000);
+        }
       }
     );
 
     signallingSocketRef.current = socket;
     return () => {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       socket.close();
     };
-  }, [identity]);
+  }, [identity, signallingReconnectTick]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -816,7 +835,8 @@ function App() {
       setDiscoveryPosts(verifiedPosts);
       addLog(`Fetched ${verifiedPosts.length} discovery posts`);
     } catch (err: any) {
-      addLog(`Discovery fetch failed: ${err.message}`);
+      const message = err?.message || String(err);
+      addLog(`Discovery fetch failed (${discoveryUrl}/api/discovery): ${message}`);
     }
   }
 
@@ -1107,6 +1127,8 @@ function App() {
           <SettingsPage
             logs={logs}
             onClearLogs={() => setLogs([])}
+            signalEndpoint={signalEndpoint}
+            discoveryEndpoint={discoveryEndpoint}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());
