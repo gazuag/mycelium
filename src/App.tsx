@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -45,11 +45,45 @@ const DEFAULT_FEED_MIX: FeedMixSettings = {
   discoveryRandom: 10
 };
 
+function dedupeContactsByFingerprint(items: Contact[]) {
+  const mergedByFingerprint = new Map<string, Contact>();
+
+  for (const contact of items) {
+    const existing = mergedByFingerprint.get(contact.fingerprint);
+    if (!existing) {
+      mergedByFingerprint.set(contact.fingerprint, contact);
+      continue;
+    }
+
+    mergedByFingerprint.set(contact.fingerprint, {
+      ...existing,
+      ...contact,
+      displayName: contact.displayName ?? existing.displayName,
+      profile: contact.profile ?? existing.profile,
+      addedAt: existing.addedAt < contact.addedAt ? existing.addedAt : contact.addedAt,
+      unreadMessages: Math.max(existing.unreadMessages ?? 0, contact.unreadMessages ?? 0),
+      queuedMessages: Math.max(existing.queuedMessages ?? 0, contact.queuedMessages ?? 0),
+      online: contact.online ?? existing.online,
+      connected: contact.connected ?? existing.connected
+    });
+  }
+
+  return Array.from(mergedByFingerprint.values());
+}
+
+function isValidPeerFingerprint(value: string) {
+  return /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(value.trim());
+}
+
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
   const signallingSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const suppressReconnectRef = useRef(false);
+  const contactsRef = useRef<Contact[]>([]);
+  const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
+  const pageRef = useRef<PageKey>('home');
+  const chatContactIdRef = useRef<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
   const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
@@ -93,6 +127,22 @@ function App() {
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
   }, [selectedContactId]);
+
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
+    chatContactIdRef.current = chatContactId;
+  }, [chatContactId]);
+
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
+
+  useEffect(() => {
+    messageQueueRef.current = messageQueue;
+  }, [messageQueue]);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
@@ -194,6 +244,15 @@ function App() {
       isMine: !fromPeer,
       timestamp: new Date().toISOString()
     };
+
+    void saveDirectChatMessage({
+      id: `${peerId}-${chatEntry.timestamp}-${Math.random().toString(16).slice(2)}`,
+      peerId,
+      text: chatEntry.text,
+      timestamp: chatEntry.timestamp,
+      isMine: chatEntry.isMine
+    });
+
     setDirectChats((prev) => ({
       ...prev,
       [peerId]: [...(prev[peerId] || []), chatEntry]
@@ -202,7 +261,11 @@ function App() {
 
   const addKnownPeer = async (peerId: string) => {
     if (!peerId || peerId === identity?.id) return;
-    const existing = contacts.find((c) => c.fingerprint === peerId);
+    if (!isValidPeerFingerprint(peerId)) {
+      addLog(`Ignoring invalid peer id from network: ${peerId}`);
+      return;
+    }
+    const existing = contactsRef.current.find((c) => c.fingerprint === peerId);
     if (existing) return;
     const contact: Contact = {
       publicKey: peerId,
@@ -216,7 +279,7 @@ function App() {
       queuedMessages: 0
     };
     await saveContact(contact);
-    setContacts((prev) => [...prev, contact]);
+    setContacts((prev) => dedupeContactsByFingerprint([...prev, contact]));
   };
 
   const refreshMessageQueue = async () => {
@@ -248,17 +311,32 @@ function App() {
       [peerId]: [...(prev[peerId] || []), queuedMessage]
     }));
     updateContactState(peerId, { queuedMessages: (contacts.find((c) => c.fingerprint === peerId)?.queuedMessages || 0) + 1 });
+    addLog(`Queued direct message for ${peerId}: ${text.slice(0, 80)}`);
   };
 
   const flushQueuedMessages = async (peerId: string) => {
     const manager = peerManagersRef.current[peerId];
-    if (!manager || !messageQueue[peerId]?.length) return;
+    const queuedCount = messageQueue[peerId]?.length ?? 0;
+    if (!manager) {
+      addLog(`Queue flush skipped for ${peerId}: no peer manager`);
+      return;
+    }
+    if (!queuedCount) {
+      addLog(`Queue flush skipped for ${peerId}: no queued messages`);
+      return;
+    }
+    if (!manager.isDataChannelOpen()) {
+      addLog(`Queue flush skipped for ${peerId}: data channel state=${manager.getDataChannelState()}`);
+      return;
+    }
 
     const queued = messageQueue[peerId];
+    addLog(`Flushing ${queued.length} queued messages to ${peerId}`);
     for (const queuedMessage of queued) {
       manager.sendChatMessage(queuedMessage.text);
       await deleteMessageQueue(queuedMessage.id);
       saveDirectMessage(peerId, queuedMessage.text, false);
+      addLog(`Queued message sent to ${peerId}: ${queuedMessage.text.slice(0, 80)}`);
     }
 
     setMessageQueue((prev) => {
@@ -297,8 +375,15 @@ function App() {
         }
       },
       (peer, incoming) => {
+        if (!isValidPeerFingerprint(peer)) {
+          addLog(`Ignoring direct message from invalid peer id: ${peer}`);
+          return;
+        }
+
+        addLog(`Direct message received from ${peer}: ${incoming.slice(0, 80)}`);
         saveDirectMessage(peer, incoming, true);
-        if (peer !== selectedContactIdRef.current) {
+        const chatIsOpenForPeer = pageRef.current === 'chat' && chatContactIdRef.current === peer;
+        if (!chatIsOpenForPeer) {
           setContacts((prev) => prev.map((contact) => (
             contact.fingerprint === peer
               ? { ...contact, unreadMessages: (contact.unreadMessages || 0) + 1 }
@@ -325,6 +410,10 @@ function App() {
         addLog(`Received ${valid ? 'verified' : 'invalid'} post from ${peer}`);
       },
       (peer: string, metadata: PeerMetadata) => {
+        if (!isValidPeerFingerprint(peer)) {
+          addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
+          return;
+        }
         handlePeerMetadata(peer, metadata);
       },
       async (peer: string) => {
@@ -364,6 +453,7 @@ function App() {
         setDataChannelOpen(true);
         setActivePeerId(peer);
         updateContactState(peer, { connected: true });
+        addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
         if (manager) {
           manager.sendMetadata(buildPeerMetadata(peer));
@@ -389,27 +479,33 @@ function App() {
   };
 
   const handlePeerList = async (peers: string[]) => {
-    await Promise.all(peers.map((peerId) => addKnownPeer(peerId)));
+    const validPeers = peers.filter((peerId) => isValidPeerFingerprint(peerId));
+    const invalidPeers = peers.filter((peerId) => !isValidPeerFingerprint(peerId));
+    if (invalidPeers.length) {
+      addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
+    }
+
+    await Promise.all(validPeers.map((peerId) => addKnownPeer(peerId)));
 
     setContacts((prev) =>
-      prev.map((contact) => ({
+      dedupeContactsByFingerprint(prev).map((contact) => ({
         ...contact,
-        online: peers.includes(contact.fingerprint)
+        online: validPeers.includes(contact.fingerprint)
       }))
     );
 
     const socket = signallingSocketRef.current;
-    peers.forEach((peerId) => {
+    validPeers.forEach((peerId) => {
       if (!peerId || peerId === identity?.id) return;
-      const contact = contacts.find((c) => c.fingerprint === peerId);
+      const contact = contactsRef.current.find((c) => c.fingerprint === peerId);
       const manager = ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && manager && !contact?.connected) {
         manager.createOffer(peerId, socket);
       }
     });
 
-    for (const peerId of peers) {
-      if (messageQueue[peerId]?.length) {
+    for (const peerId of validPeers) {
+      if (messageQueueRef.current[peerId]?.length) {
         await flushQueuedMessages(peerId);
       }
     }
@@ -456,13 +552,63 @@ function App() {
   useEffect(() => {
     async function loadLocalData() {
       const cs = await loadContacts();
-      setContacts(cs || []);
+      setContacts(dedupeContactsByFingerprint(cs || []));
       const ps = await loadPosts();
       setPosts(ps || []);
+      const loadedDirectMessages = await loadDirectChatMessages();
+      const groupedDirectMessages = loadedDirectMessages.reduce((acc, message) => {
+        acc[message.peerId] = [
+          ...(acc[message.peerId] || []),
+          {
+            text: message.text,
+            timestamp: message.timestamp,
+            isMine: message.isMine
+          }
+        ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        return acc;
+      }, {} as Record<string, ChatEntry[]>);
+      setDirectChats(groupedDirectMessages);
       await refreshMessageQueue();
     }
     loadLocalData();
   }, []);
+
+  useEffect(() => {
+    const deduped = dedupeContactsByFingerprint(contacts);
+    if (deduped.length === contacts.length) return;
+
+    addLog(`Deduplicated ${contacts.length - deduped.length} duplicate contacts`);
+    setContacts(deduped);
+
+    void (async () => {
+      const seenFingerprints = new Set<string>();
+      for (const contact of contacts) {
+        if (seenFingerprints.has(contact.fingerprint)) {
+          await deleteContact(contact.publicKey);
+          continue;
+        }
+        seenFingerprints.add(contact.fingerprint);
+      }
+
+      for (const contact of deduped) {
+        await saveContact(contact);
+      }
+    })();
+  }, [contacts]);
+
+  useEffect(() => {
+    const invalidContacts = contacts.filter((contact) => !isValidPeerFingerprint(contact.fingerprint));
+    if (!invalidContacts.length) return;
+
+    addLog(`Removing ${invalidContacts.length} invalid contacts from local state`);
+    setContacts((prev) => prev.filter((contact) => isValidPeerFingerprint(contact.fingerprint)));
+
+    void (async () => {
+      for (const contact of invalidContacts) {
+        await deleteContact(contact.publicKey);
+      }
+    })();
+  }, [contacts]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -525,7 +671,7 @@ function App() {
       const socket = signallingSocketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-      contacts.forEach((contact) => {
+      dedupeContactsByFingerprint(contacts).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
 
         const manager = ensurePeerManager(contact.fingerprint);
@@ -604,7 +750,7 @@ function App() {
     await saveContact(contact);
     setContacts((prev) => {
       const filtered = prev.filter((entry) => entry.fingerprint !== fingerprint);
-      return [...filtered, contact];
+      return dedupeContactsByFingerprint([...filtered, contact]);
     });
 
     addLog(`Added peer address ${fingerprint}`);
@@ -620,11 +766,11 @@ function App() {
   }
 
   async function handleToggleFollow(publicKey: string) {
-    const existing = contacts.find((c) => c.publicKey === publicKey);
+    const existing = contactsRef.current.find((c) => c.publicKey === publicKey);
     if (!existing) return;
     const updated = { ...existing, followed: !existing.followed };
     await saveContact(updated);
-    setContacts((prev) => prev.map((c) => (c.publicKey === publicKey ? updated : c)));
+    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === publicKey ? updated : c))));
     addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint}`);
   }
 
@@ -910,6 +1056,7 @@ function App() {
     if (!confirmed) return;
 
     await deleteIdentity();
+    await clearDirectChatMessages();
     signallingSocketRef.current?.close();
     peerManagersRef.current = {};
     setIdentity(null);
@@ -956,16 +1103,29 @@ function App() {
   }
 
   async function handleSendDirectMessage() {
-    if (!chatContactId || !message.trim()) return;
+    addLog(`Direct message button pressed: chatContact=${chatContactId ?? 'none'} draftLength=${message.trim().length}`);
+    if (!chatContactId) {
+      addLog('Direct message aborted: no active chat contact');
+      return;
+    }
+    if (!message.trim()) {
+      addLog('Direct message aborted: empty draft');
+      return;
+    }
     const peerId = chatContactId;
     const trimmedMessage = message.trim();
     const manager = peerManagersRef.current[peerId];
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
+    const channelState = manager?.getDataChannelState() ?? 'missing';
     const canSendImmediately = Boolean(
       manager &&
       targetContact?.connected &&
       activePeerId === peerId &&
       manager.isDataChannelOpen()
+    );
+
+    addLog(
+      `Direct message send attempt to ${peerId}: connected=${targetContact?.connected ? 'yes' : 'no'} activePeer=${activePeerId ?? 'none'} channel=${channelState}`
     );
 
     saveDirectMessage(peerId, trimmedMessage, false);

@@ -260,6 +260,10 @@ export class PeerConnectionManager {
     return this.dataChannel?.readyState === 'open';
   }
 
+  public getDataChannelState() {
+    return this.dataChannel?.readyState ?? 'missing';
+  }
+
   private async sendPacket(type: Parameters<typeof buildPacket>[2], payload: Record<string, unknown>) {
     if (!this.remoteId) return;
     const packet = await buildPacket(this.localId, this.remoteId, type, payload, this.packetSigner);

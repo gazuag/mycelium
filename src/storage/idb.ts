@@ -1,13 +1,14 @@
 import { Contact, SignedPost, SignedProfile, StoredPost } from '../types';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
 const POST_STORE = 'posts';
 const DISCOVERY_STORE = 'discovery_interactions';
 const QUEUE_STORE = 'message_queue';
+const DIRECT_CHAT_STORE = 'direct_chat_messages';
 
 export async function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -35,6 +36,11 @@ export async function openDatabase() {
       if (!db.objectStoreNames.contains(QUEUE_STORE)) {
         const queueStore = db.createObjectStore(QUEUE_STORE, { keyPath: 'id' });
         queueStore.createIndex('recipient', 'recipient');
+      }
+      if (!db.objectStoreNames.contains(DIRECT_CHAT_STORE)) {
+        const directChatStore = db.createObjectStore(DIRECT_CHAT_STORE, { keyPath: 'id' });
+        directChatStore.createIndex('peerId', 'peerId');
+        directChatStore.createIndex('timestamp', 'timestamp');
       }
     };
 
@@ -203,6 +209,39 @@ export async function deleteMessageQueue(id: string) {
     const tx = db.transaction(QUEUE_STORE, 'readwrite');
     const store = tx.objectStore(QUEUE_STORE);
     store.delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function saveDirectChatMessage(message: { id: string; peerId: string; text: string; timestamp: string; isMine: boolean }) {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
+    const store = tx.objectStore(DIRECT_CHAT_STORE);
+    store.put(message);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function loadDirectChatMessages(): Promise<Array<{ id: string; peerId: string; text: string; timestamp: string; isMine: boolean }>> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DIRECT_CHAT_STORE, 'readonly');
+    const store = tx.objectStore(DIRECT_CHAT_STORE);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearDirectChatMessages() {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
+    const store = tx.objectStore(DIRECT_CHAT_STORE);
+    store.clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
