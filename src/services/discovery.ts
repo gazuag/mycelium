@@ -1,8 +1,37 @@
 import type { SignedPost } from '../types';
 import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 
-const DISCOVERY_SERVER = (import.meta as any).env?.VITE_DISCOVERY_SERVER_URL as string || 'http://217.154.78.152:8000';
 const MAX_BATCH_SIZE = 30;
+
+function normalizeDiscoveryUrl(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === 'ws:') {
+      url.protocol = 'http:';
+    } else if (url.protocol === 'wss:') {
+      url.protocol = 'https:';
+    }
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return rawUrl.replace(/\/$/, '');
+  }
+}
+
+export function resolveDiscoveryServerUrl() {
+  const explicit = (import.meta as any).env?.VITE_DISCOVERY_SERVER_URL as string | undefined;
+  if (explicit && explicit.trim()) {
+    return normalizeDiscoveryUrl(explicit.trim());
+  }
+
+  if (typeof window !== 'undefined') {
+    const pageProtocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    return `${pageProtocol}//${window.location.hostname}:8000`;
+  }
+
+  return 'http://127.0.0.1:8000';
+}
+
+const DISCOVERY_SERVER = resolveDiscoveryServerUrl();
 
 export async function publishPost(post: SignedPost) {
   const packet = await buildPacket(post.author, null, 'DISCOVERY_PUBLISH', { post });
@@ -19,7 +48,7 @@ export async function publishPost(post: SignedPost) {
     });
   }
   if (!response.ok) {
-    throw new Error(`Discovery publish failed: ${response.statusText}`);
+    throw new Error(`Discovery publish failed: ${response.status} ${response.statusText}`);
   }
   return response.text();
 }
@@ -45,7 +74,7 @@ export async function fetchDiscovery(limit = 20, tag?: string) {
     }
     response = await fetch(url.toString());
     if (!response.ok) {
-      throw new Error(`Discovery fetch failed: ${response.statusText}`);
+      throw new Error(`Discovery fetch failed: ${response.status} ${response.statusText}`);
     }
   }
 
