@@ -2,88 +2,57 @@ import type { SignedPost } from '../types';
 import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 
 const MAX_BATCH_SIZE = 30;
+const RESPONSE_TIMEOUT_MS = 15000;
 
-function normalizeDiscoveryUrl(rawUrl: string) {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol === 'ws:') {
-      url.protocol = 'http:';
-    } else if (url.protocol === 'wss:') {
-      url.protocol = 'https:';
-    }
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return rawUrl.replace(/\/$/, '');
+// Pending DISCOVERY_GET responses keyed by outgoing packet id.
+const pendingDiscoveryRequests = new Map<string, (posts: SignedPost[]) => void>();
+
+/**
+ * Called by the signalling message handler whenever a DISCOVERY_RESULT packet
+ * arrives over the WebSocket. Resolves the matching pending fetchDiscovery promise.
+ */
+export function handleDiscoveryResult(packet: unknown): boolean {
+  if (!isMyceliumPacket(packet) || packet.type !== 'DISCOVERY_RESULT') return false;
+  const requestId = typeof packet.payload?.requestId === 'string' ? packet.payload.requestId : null;
+  if (requestId && pendingDiscoveryRequests.has(requestId)) {
+    const resolve = pendingDiscoveryRequests.get(requestId)!;
+    pendingDiscoveryRequests.delete(requestId);
+    const posts = Array.isArray(packet.payload?.posts) ? (packet.payload.posts as SignedPost[]) : [];
+    resolve(posts);
+    return true;
   }
+  return false;
 }
 
-export function resolveDiscoveryServerUrl() {
-  const explicit = (import.meta as any).env?.VITE_DISCOVERY_SERVER_URL as string | undefined;
-  if (explicit && explicit.trim()) {
-    return normalizeDiscoveryUrl(explicit.trim());
+export async function publishPost(post: SignedPost, socket: WebSocket) {
+  if (socket.readyState !== WebSocket.OPEN) {
+    throw new Error('Discovery publish failed: WebSocket not open');
   }
-
-  if (typeof window !== 'undefined') {
-    const pageProtocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    return `${pageProtocol}//${window.location.hostname}:8000`;
-  }
-
-  return 'http://127.0.0.1:8000';
+  const packet = await buildPacket(post.author, 'discovery-server', 'DISCOVERY_PUBLISH', { post });
+  socket.send(JSON.stringify(packet));
 }
 
-const DISCOVERY_SERVER = resolveDiscoveryServerUrl();
-
-export async function publishPost(post: SignedPost) {
-  const packet = await buildPacket(post.author, null, 'DISCOVERY_PUBLISH', { post });
-  let response = await fetch(`${DISCOVERY_SERVER}/api/discovery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(packet)
-  });
-  if (!response.ok) {
-    response = await fetch(`${DISCOVERY_SERVER}/api/discovery`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(post)
-    });
+export async function fetchDiscovery(socket: WebSocket, limit = 20, tag?: string): Promise<SignedPost[]> {
+  if (socket.readyState !== WebSocket.OPEN) {
+    throw new Error('Discovery fetch failed: WebSocket not open');
   }
-  if (!response.ok) {
-    throw new Error(`Discovery publish failed: ${response.status} ${response.statusText}`);
-  }
-  return response.text();
-}
-
-export async function fetchDiscovery(limit = 20, tag?: string) {
   const sanitizedLimit = Math.min(limit, MAX_BATCH_SIZE);
-  const packet = await buildPacket('discovery-client', null, 'DISCOVERY_GET', {
+  const packet = await buildPacket('discovery-client', 'discovery-server', 'DISCOVERY_GET', {
     limit: sanitizedLimit,
     tag: tag ?? null
   });
 
-  let response = await fetch(`${DISCOVERY_SERVER}/api/discovery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(packet)
+  return new Promise<SignedPost[]>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDiscoveryRequests.delete(packet.id);
+      reject(new Error('Discovery fetch failed: timeout'));
+    }, RESPONSE_TIMEOUT_MS);
+
+    pendingDiscoveryRequests.set(packet.id, (posts) => {
+      clearTimeout(timer);
+      resolve(posts);
+    });
+
+    socket.send(JSON.stringify(packet));
   });
-
-  if (!response.ok) {
-    const url = new URL(`${DISCOVERY_SERVER}/api/discovery`);
-    url.searchParams.set('limit', sanitizedLimit.toString());
-    if (tag) {
-      url.searchParams.set('tag', tag);
-    }
-    response = await fetch(url.toString());
-    if (!response.ok) {
-      throw new Error(`Discovery fetch failed: ${response.status} ${response.statusText}`);
-    }
-  }
-
-  const body = await response.json();
-  if (Array.isArray(body)) {
-    return body as SignedPost[];
-  }
-  if (isMyceliumPacket(body) && body.type === 'DISCOVERY_RESULT' && Array.isArray(body.payload?.posts)) {
-    return body.payload.posts as SignedPost[];
-  }
-  throw new Error('Discovery fetch failed: malformed response packet');
 }

@@ -4,7 +4,7 @@ import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2
 import { PeerConnectionManager } from './p2p/webrtc';
 import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
-import { publishPost, fetchDiscovery, resolveDiscoveryServerUrl } from './services/discovery';
+import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
@@ -477,6 +477,11 @@ function App() {
           return;
         }
 
+        if (message.type === 'discovery-result') {
+          handleDiscoveryResult(message.packet);
+          return;
+        }
+
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
           const manager = ensurePeerManager(message.from);
           if (manager) {
@@ -676,11 +681,16 @@ function App() {
     });
 
     if (publishToDiscovery) {
-      try {
-        await publishPost(signed);
-        addLog('Published post to discovery');
-      } catch (err: any) {
-        addLog(`Discovery publish failed: ${err.message}`);
+      const socket = signallingSocketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          await publishPost(signed, socket);
+          addLog('Published post to discovery');
+        } catch (err: any) {
+          addLog(`Discovery publish failed: ${err.message}`);
+        }
+      } else {
+        addLog('Discovery publish skipped: not connected to signalling server');
       }
     }
   }
@@ -796,10 +806,14 @@ function App() {
   }, [page, pageScrollPositions]);
 
   async function handleFetchDiscovery() {
-    const discoveryUrl = resolveDiscoveryServerUrl();
-    addLog(`Refreshing discovery posts from ${discoveryUrl}/api/discovery`);
+    const socket = signallingSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      addLog('Discovery fetch skipped: not connected to signalling server');
+      return;
+    }
+    addLog('Refreshing discovery posts');
     try {
-      const items = await fetchDiscovery(20);
+      const items = await fetchDiscovery(socket, 20);
       const verifiedPosts = await Promise.all(items.map(async (post) => {
         try {
           const valid = await verifySignedPost(post);
