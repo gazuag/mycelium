@@ -1,7 +1,7 @@
 import { Contact, SignedPost, SignedProfile, StoredPost } from '../types';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
@@ -181,7 +181,7 @@ export async function loadDiscoveryInteractions() {
   });
 }
 
-export async function saveMessageQueue(message: { id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent' }) {
+export async function saveMessageQueue(message: { id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent'; chatMessageId?: string }) {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(QUEUE_STORE, 'readwrite');
@@ -192,7 +192,7 @@ export async function saveMessageQueue(message: { id: string; recipient: string;
   });
 }
 
-export async function loadMessageQueue(): Promise<Array<{ id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent' }>> {
+export async function loadMessageQueue(): Promise<Array<{ id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent'; chatMessageId?: string }>> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(QUEUE_STORE, 'readonly');
@@ -214,7 +214,7 @@ export async function deleteMessageQueue(id: string) {
   });
 }
 
-export async function saveDirectChatMessage(message: { id: string; peerId: string; text: string; timestamp: string; isMine: boolean }) {
+export async function saveDirectChatMessage(message: { id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' }) {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
@@ -225,13 +225,33 @@ export async function saveDirectChatMessage(message: { id: string; peerId: strin
   });
 }
 
-export async function loadDirectChatMessages(): Promise<Array<{ id: string; peerId: string; text: string; timestamp: string; isMine: boolean }>> {
+export async function loadDirectChatMessages(): Promise<Array<{ id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' }>> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(DIRECT_CHAT_STORE, 'readonly');
     const store = tx.objectStore(DIRECT_CHAT_STORE);
     const request = store.getAll();
     request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function updateDirectChatMessageStatus(id: string, deliveryStatus: 'queued' | 'sent') {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
+    const store = tx.objectStore(DIRECT_CHAT_STORE);
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const existing = request.result as { id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' } | undefined;
+      if (!existing) {
+        resolve();
+        return;
+      }
+      store.put({ ...existing, deliveryStatus });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
     request.onerror = () => reject(request.error);
   });
 }

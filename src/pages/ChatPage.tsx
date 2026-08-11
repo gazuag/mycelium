@@ -4,7 +4,7 @@ import { ChatBubble } from '../components/ChatBubble';
 
 interface ChatPageProps {
   contact: Contact;
-  messages: Array<{ text: string; timestamp: string; isMine: boolean }>;
+  messages: Array<{ text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' }>;
   messageDraft: string;
   onMessageChange: (value: string) => void;
   onSendMessage: () => void;
@@ -47,7 +47,13 @@ export function ChatPage({ contact, messages, messageDraft, onMessageChange, onS
           <p className="chat-empty">No messages yet. Say hello!</p>
         )}
         {messages.map((message, index) => (
-          <ChatBubble key={`${message.timestamp}-${index}`} text={message.text} timestamp={message.timestamp} isMine={message.isMine} />
+          <ChatBubble
+            key={`${message.timestamp}-${index}`}
+            text={message.text}
+            timestamp={message.timestamp}
+            isMine={message.isMine}
+            deliveryStatus={message.deliveryStatus}
+          />
         ))}
       </div>
 

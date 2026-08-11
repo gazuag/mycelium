@@ -69,7 +69,9 @@ export interface StoredPost extends SignedPost {
 
 export interface QueuedMessage {
   id: string;
+  recipient: string;
   text: string;
   timestamp: string;
   status: 'queued' | 'sent';
+  chatMessageId?: string;
 }

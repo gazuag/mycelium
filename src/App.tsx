@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages } from './storage/idb';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, updateDirectChatMessageStatus } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -28,9 +28,11 @@ interface IdentityRecord {
 type PageKey = 'home' | 'people' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
 
 interface ChatEntry {
+  id?: string;
   text: string;
   isMine: boolean;
   timestamp: string;
+  deliveryStatus?: 'queued' | 'sent';
 }
 
 interface FeedMixSettings {
@@ -252,24 +254,38 @@ function App() {
     addLog(`Received profile from ${peerId}: ${metadata.displayName} following=${metadata.following}`);
   };
 
-  const saveDirectMessage = (peerId: string, messageText: string, fromPeer = true) => {
+  const saveDirectMessage = (peerId: string, messageText: string, fromPeer = true, deliveryStatus?: 'queued' | 'sent', messageIdOverride?: string) => {
+    const timestamp = new Date().toISOString();
+    const messageId = messageIdOverride ?? `${peerId}-${timestamp}-${Math.random().toString(16).slice(2)}`;
     const chatEntry: ChatEntry = {
+      id: messageId,
       text: messageText,
       isMine: !fromPeer,
-      timestamp: new Date().toISOString()
+      timestamp,
+      deliveryStatus
     };
 
     void saveDirectChatMessage({
-      id: `${peerId}-${chatEntry.timestamp}-${Math.random().toString(16).slice(2)}`,
+      id: messageId,
       peerId,
       text: chatEntry.text,
-      timestamp: chatEntry.timestamp,
-      isMine: chatEntry.isMine
+      timestamp,
+      isMine: chatEntry.isMine,
+      deliveryStatus
     });
 
     setDirectChats((prev) => ({
       ...prev,
       [peerId]: [...(prev[peerId] || []), chatEntry]
+    }));
+
+    return messageId;
+  };
+
+  const markDirectMessageDelivered = (peerId: string, messageId: string, deliveryStatus: 'queued' | 'sent') => {
+    setDirectChats((prev) => ({
+      ...prev,
+      [peerId]: (prev[peerId] || []).map((entry) => (entry.id === messageId ? { ...entry, deliveryStatus } : entry))
     }));
   };
 
@@ -302,6 +318,7 @@ function App() {
       acc[message.recipient] = [...(acc[message.recipient] || []), message];
       return acc;
     }, {} as Record<string, QueuedMessage[]>);
+    messageQueueRef.current = queueMap;
     setMessageQueue(queueMap);
     setContacts((prev) => prev.map((contact) => ({
       ...contact,
@@ -309,23 +326,26 @@ function App() {
     })));
   };
 
-  const queuePeerMessage = async (peerId: string, text: string) => {
+  const queuePeerMessage = async (peerId: string, text: string, chatMessageId?: string) => {
+    const queuedMessageId = `${peerId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const queuedMessage: QueuedMessage = {
-      id: `${peerId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      id: queuedMessageId,
+      recipient: peerId,
       text,
       timestamp: new Date().toISOString(),
-      status: 'queued'
+      status: 'queued',
+      chatMessageId
     };
-    await saveMessageQueue({
-      ...queuedMessage,
-      recipient: peerId
-    });
-    setMessageQueue((prev) => ({
-      ...prev,
-      [peerId]: [...(prev[peerId] || []), queuedMessage]
-    }));
+    await saveMessageQueue(queuedMessage);
+    const nextQueue = {
+      ...(messageQueueRef.current ?? {}),
+      [peerId]: [...(messageQueueRef.current?.[peerId] || []), queuedMessage]
+    };
+    messageQueueRef.current = nextQueue;
+    setMessageQueue(nextQueue);
     updateContactState(peerId, { queuedMessages: (contacts.find((c) => c.fingerprint === peerId)?.queuedMessages || 0) + 1 });
     addLog(`Queued direct message for ${peerId}: ${text.slice(0, 80)}`);
+    return queuedMessageId;
   };
 
   const flushQueuedMessages = async (peerId: string) => {
@@ -348,15 +368,17 @@ function App() {
     for (const queuedMessage of queued) {
       manager.sendChatMessage(queuedMessage.text);
       await deleteMessageQueue(queuedMessage.id);
-      saveDirectMessage(peerId, queuedMessage.text, false);
+      if (queuedMessage.chatMessageId) {
+        await updateDirectChatMessageStatus(queuedMessage.chatMessageId, 'sent');
+        markDirectMessageDelivered(peerId, queuedMessage.chatMessageId, 'sent');
+      }
       addLog(`Queued message sent to ${peerId}: ${queuedMessage.text.slice(0, 80)}`);
     }
 
-    setMessageQueue((prev) => {
-      const next = { ...prev };
-      delete next[peerId];
-      return next;
-    });
+    const nextQueue = { ...(messageQueueRef.current ?? {}) };
+    delete nextQueue[peerId];
+    messageQueueRef.current = nextQueue;
+    setMessageQueue(nextQueue);
     updateContactState(peerId, { queuedMessages: 0 });
     addLog(`Delivered ${queued.length} queued messages to ${peerId}`);
   };
@@ -585,7 +607,8 @@ function App() {
           {
             text: message.text,
             timestamp: message.timestamp,
-            isMine: message.isMine
+            isMine: message.isMine,
+            deliveryStatus: message.deliveryStatus
           }
         ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
         return acc;
@@ -1147,13 +1170,23 @@ function App() {
       `Direct message send attempt to ${peerId}: connected=${targetContact?.connected ? 'yes' : 'no'} activePeer=${activePeerId ?? 'none'} channel=${channelState}`
     );
 
-    saveDirectMessage(peerId, trimmedMessage, false);
-
     if (canSendImmediately && manager) {
+      const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'sent');
       manager.sendChatMessage(trimmedMessage);
+      await updateDirectChatMessageStatus(messageId, 'sent');
+      markDirectMessageDelivered(peerId, messageId, 'sent');
       addLog(`Sent direct message to ${peerId}`);
     } else {
-      await queuePeerMessage(peerId, trimmedMessage);
+      const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'queued');
+      const queuedMessageId = await queuePeerMessage(peerId, trimmedMessage, messageId);
+      await saveMessageQueue({
+        id: queuedMessageId,
+        recipient: peerId,
+        text: trimmedMessage,
+        timestamp: new Date().toISOString(),
+        status: 'queued',
+        chatMessageId: messageId
+      });
       const socket = signallingSocketRef.current;
       const lazyManager = manager ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && lazyManager) {
