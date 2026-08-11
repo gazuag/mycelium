@@ -23,6 +23,7 @@ export class PeerConnectionManager {
   private onOpen: (peerId: string) => void;
   private onClose: (peerId: string) => void;
   private onEvent: (peerId: string, event: string) => void;
+  private onProfileRequest: (peerId: string) => void;
   private packetSigner?: PacketSigner;
   private helloSent = false;
   private remoteSupportsMyp = false;
@@ -43,6 +44,7 @@ export class PeerConnectionManager {
     onOpen: (peerId: string) => void,
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
+    onProfileRequest: (peerId: string) => void,
     packetSigner?: PacketSigner,
     capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1'],
     softwareVersion = 'mycelium-web/0.1'
@@ -58,6 +60,7 @@ export class PeerConnectionManager {
     this.onOpen = onOpen;
     this.onClose = onClose;
     this.onEvent = onEvent;
+    this.onProfileRequest = onProfileRequest;
     this.packetSigner = packetSigner;
     this.capabilities = capabilities;
     this.softwareVersion = softwareVersion;
@@ -116,6 +119,7 @@ export class PeerConnectionManager {
       this.onEvent(peerId, 'Data channel opened');
       this.onState(peerId, 'connected');
       this.sendHello();
+      void this.sendPacket('PROFILE_REQUEST', {});
       this.startPingLoop();
       this.onOpen(peerId);
     };
@@ -212,6 +216,7 @@ export class PeerConnectionManager {
         return;
       }
       case 'PROFILE_REQUEST': {
+        this.onProfileRequest(peerId);
         return;
       }
       case 'PROFILE_RESPONSE':
@@ -403,7 +408,10 @@ export class PeerConnectionManager {
 
     this.remoteId = message.from;
     this.polite = this.localId > message.from;
-    this.onState(message.from, 'signalling');
+    // Only transition to 'signalling' when not already connected; ICE candidates arrive continuously
+    if (this.peerConnection.connectionState !== 'connected') {
+      this.onState(message.from, 'signalling');
+    }
 
     if (message.type === 'offer') {
       const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';

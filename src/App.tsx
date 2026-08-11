@@ -123,6 +123,8 @@ function App() {
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
   const selectedContactIdRef = useRef<string | null>(null);
+  const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
+  const identityRef = useRef<IdentityRecord | null>(null);
 
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
@@ -143,6 +145,14 @@ function App() {
   useEffect(() => {
     messageQueueRef.current = messageQueue;
   }, [messageQueue]);
+
+  useEffect(() => {
+    myProfileRef.current = myProfile;
+  }, [myProfile]);
+
+  useEffect(() => {
+    identityRef.current = identity;
+  }, [identity]);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
@@ -199,14 +209,18 @@ function App() {
 
   const getLocalDisplayName = () => myProfile.displayName.trim() || identity?.id.slice(0, 12) || 'Me';
 
-  const buildPeerMetadata = (peerId: string) => ({
-    author: identity?.id ?? '',
-    displayName: getLocalDisplayName(),
-    following: contacts.find((c) => c.fingerprint === peerId)?.followed ?? false,
-    timestamp: new Date().toISOString(),
-    bio: myProfile.bio.trim() || `Peer ${identity?.id?.slice(0, 12) ?? 'unknown'}`,
-    tags: []
-  });
+  const buildPeerMetadata = (peerId: string) => {
+    const p = myProfileRef.current;
+    const id = identityRef.current;
+    return {
+      author: id?.id ?? '',
+      displayName: p.displayName.trim() || id?.id.slice(0, 12) || 'Me',
+      following: contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
+      timestamp: new Date().toISOString(),
+      bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
+      tags: []
+    };
+  };
 
   const handlePeerMetadata = (peerId: string, metadata: any) => {
     setContacts((prev) => {
@@ -316,12 +330,12 @@ function App() {
 
   const flushQueuedMessages = async (peerId: string) => {
     const manager = peerManagersRef.current[peerId];
-    const queuedCount = messageQueue[peerId]?.length ?? 0;
+    const queued = messageQueueRef.current[peerId] ?? [];
     if (!manager) {
       addLog(`Queue flush skipped for ${peerId}: no peer manager`);
       return;
     }
-    if (!queuedCount) {
+    if (!queued.length) {
       addLog(`Queue flush skipped for ${peerId}: no queued messages`);
       return;
     }
@@ -330,7 +344,6 @@ function App() {
       return;
     }
 
-    const queued = messageQueue[peerId];
     addLog(`Flushing ${queued.length} queued messages to ${peerId}`);
     for (const queuedMessage of queued) {
       manager.sendChatMessage(queuedMessage.text);
@@ -462,7 +475,9 @@ function App() {
         await flushQueuedMessages(peer);
       },
       (peer: string) => {
-        if (selectedContactId === peer) {
+        // Remove dead manager so reconnect creates a fresh RTCPeerConnection
+        delete peerManagersRef.current[peer];
+        if (selectedContactIdRef.current === peer) {
           setDataChannelOpen(false);
           setActivePeerId(null);
         }
@@ -470,6 +485,14 @@ function App() {
       },
       (peer: string, event: string) => {
         addLog(`Peer ${peer}: ${event}`);
+      },
+      (peer: string) => {
+        // Respond to PROFILE_REQUEST with our current profile
+        const manager = peerManagersRef.current[peer];
+        if (manager) {
+          manager.sendMetadata(buildPeerMetadata(peer));
+          addLog(`Sent profile to ${peer} (on request)`);
+        }
       },
       packetSigner
     );
@@ -671,24 +694,21 @@ function App() {
       const socket = signallingSocketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-      dedupeContactsByFingerprint(contacts).forEach((contact) => {
+      dedupeContactsByFingerprint(contactsRef.current).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
 
-        const manager = ensurePeerManager(contact.fingerprint);
         if (contact.online && !contact.connected && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
+          const manager = ensurePeerManager(contact.fingerprint);
           if (manager) {
+            addLog(`Reconnect attempt to ${contact.fingerprint}`);
             manager.createOffer(contact.fingerprint, socket);
           }
         }
-
-        if (contact.connected && manager) {
-          manager.sendMetadata(buildPeerMetadata(contact.fingerprint));
-        }
       });
-    }, 15000);
+    }, 30000);
 
     return () => window.clearInterval(interval);
-  }, [contacts, identity]);
+  }, [identity]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -1120,7 +1140,6 @@ function App() {
     const canSendImmediately = Boolean(
       manager &&
       targetContact?.connected &&
-      activePeerId === peerId &&
       manager.isDataChannelOpen()
     );
 
@@ -1184,7 +1203,7 @@ function App() {
         onOpenSettings={() => setPage('settings')}
       />
 
-      <main id="page-content" className="page-content">
+      <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
         {page === 'home' && (
           <HomePage
             posts={visibleHomePosts}
