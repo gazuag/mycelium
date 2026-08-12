@@ -31,6 +31,8 @@ function normalizeSignalUrl(rawUrl: string) {
 }
 
 export function resolveSignalServerUrl() {
+  
+  /* what the hell is this crap?
   const explicit = (import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string | undefined;
   if (explicit && explicit.trim()) {
     return normalizeSignalUrl(explicit.trim());
@@ -44,7 +46,7 @@ export function resolveSignalServerUrl() {
     const pageProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${pageProtocol}//${hostname}:8765`;
   }
-
+*/
   return 'ws://217.154.78.152:8765';
 }
 
