@@ -24,6 +24,7 @@ export class PeerConnectionManager {
   private onClose: (peerId: string) => void;
   private onEvent: (peerId: string, event: string) => void;
   private onProfileRequest: (peerId: string) => void;
+  private onMessageAck: (peerId: string, messageId: string) => void;
   private packetSigner?: PacketSigner;
   private helloSent = false;
   private remoteSupportsMyp = false;
@@ -45,6 +46,7 @@ export class PeerConnectionManager {
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
     onProfileRequest: (peerId: string) => void,
+    onMessageAck: (peerId: string, messageId: string) => void,
     packetSigner?: PacketSigner,
     capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1'],
     softwareVersion = 'mycelium-web/0.1'
@@ -61,6 +63,7 @@ export class PeerConnectionManager {
     this.onClose = onClose;
     this.onEvent = onEvent;
     this.onProfileRequest = onProfileRequest;
+    this.onMessageAck = onMessageAck;
     this.packetSigner = packetSigner;
     this.capabilities = capabilities;
     this.softwareVersion = softwareVersion;
@@ -212,6 +215,7 @@ export class PeerConnectionManager {
         if (messageId && this.pendingMessageAcks.has(messageId)) {
           this.pendingMessageAcks.delete(messageId);
           this.onEvent(peerId, `Message ${messageId} acknowledged`);
+          this.onMessageAck(peerId, messageId);
         }
         return;
       }
@@ -449,5 +453,15 @@ export class PeerConnectionManager {
 
   public sendMessage(text: string) {
     this.sendChatMessage(text);
+  }
+
+  public closeConnection() {
+    if (this.dataChannel && this.dataChannel.readyState !== 'closed') {
+      this.dataChannel.close();
+    }
+    if (this.peerConnection && this.peerConnection.connectionState !== 'closed') {
+      this.peerConnection.close();
+    }
+    this.stopPingLoop();
   }
 }

@@ -84,6 +84,7 @@ function App() {
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
+  const outboundAckTimersRef = useRef<Record<string, number>>({});
   const pageRef = useRef<PageKey>('home');
   const chatContactIdRef = useRef<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
@@ -384,8 +385,13 @@ function App() {
   };
 
   const ensurePeerManager = (peerId: string) => {
-    if (peerManagersRef.current[peerId]) {
-      return peerManagersRef.current[peerId];
+    const existing = peerManagersRef.current[peerId];
+    if (existing) {
+      const state = existing.getDataChannelState();
+      if (state === 'open' || state === 'connecting') {
+        return existing;
+      }
+      delete peerManagersRef.current[peerId];
     }
     if (!identity) return null;
 
@@ -516,11 +522,42 @@ function App() {
           addLog(`Sent profile to ${peer} (on request)`);
         }
       },
+      async (peer: string, messageId: string) => {
+        const timerId = outboundAckTimersRef.current[messageId];
+        if (timerId) {
+          window.clearTimeout(timerId);
+          delete outboundAckTimersRef.current[messageId];
+        }
+        await updateDirectChatMessageStatus(messageId, 'sent');
+        markDirectMessageDelivered(peer, messageId, 'sent');
+      },
       packetSigner
     );
 
     peerManagersRef.current[peerId] = manager;
     return manager;
+  };
+
+  const registerMessageAckTimeout = (peerId: string, messageId: string, text: string) => {
+    if (outboundAckTimersRef.current[messageId]) {
+      window.clearTimeout(outboundAckTimersRef.current[messageId]);
+    }
+
+    outboundAckTimersRef.current[messageId] = window.setTimeout(async () => {
+      const alreadyQueued = messageQueueRef.current[peerId]?.some((entry) => entry.chatMessageId === messageId);
+      if (alreadyQueued) {
+        return;
+      }
+
+      await queuePeerMessage(peerId, text, messageId);
+      await updateDirectChatMessageStatus(messageId, 'queued');
+      markDirectMessageDelivered(peerId, messageId, 'queued');
+      const socket = signallingSocketRef.current;
+      const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
+      if (socket && socket.readyState === WebSocket.OPEN && manager) {
+        manager.createOffer(peerId, socket);
+      }
+    }, 5000);
   };
 
   const handlePeerList = async (peers: string[]) => {
@@ -719,8 +756,9 @@ function App() {
 
       dedupeContactsByFingerprint(contactsRef.current).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
+        const hasQueuedMessages = (messageQueueRef.current[contact.fingerprint]?.length ?? 0) > 0;
 
-        if (contact.online && !contact.connected && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
+        if ((contact.online || hasQueuedMessages) && !contact.connected && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
           const manager = ensurePeerManager(contact.fingerprint);
           if (manager) {
             addLog(`Reconnect attempt to ${contact.fingerprint}`);
@@ -1145,6 +1183,23 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    const handleShutdown = () => {
+      Object.values(peerManagersRef.current).forEach((manager) => manager.closeConnection());
+      Object.values(outboundAckTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+      outboundAckTimersRef.current = {};
+    };
+
+    window.addEventListener('beforeunload', handleShutdown);
+    window.addEventListener('pagehide', handleShutdown);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleShutdown);
+      window.removeEventListener('pagehide', handleShutdown);
+      handleShutdown();
+    };
+  }, []);
+
   async function handleSendDirectMessage() {
     addLog(`Direct message button pressed: chatContact=${chatContactId ?? 'none'} draftLength=${message.trim().length}`);
     if (!chatContactId) {
@@ -1173,8 +1228,7 @@ function App() {
     if (canSendImmediately && manager) {
       const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'sent');
       manager.sendChatMessage(trimmedMessage);
-      await updateDirectChatMessageStatus(messageId, 'sent');
-      markDirectMessageDelivered(peerId, messageId, 'sent');
+      registerMessageAckTimeout(peerId, messageId, trimmedMessage);
       addLog(`Sent direct message to ${peerId}`);
     } else {
       const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'queued');
