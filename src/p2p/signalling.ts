@@ -16,6 +16,8 @@ export type SignalMessage =
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
 
+const SIGNAL_SERVER_URL = 'ws://217.154.78.152:8765';
+
 function normalizeSignalUrl(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
@@ -31,23 +33,9 @@ function normalizeSignalUrl(rawUrl: string) {
 }
 
 export function resolveSignalServerUrl() {
-  
-
-  const explicit = (import.meta as any).env?.VITE_SIGNAL_SERVER_URL as string | undefined;
-  if (explicit && explicit.trim()) {
-    return normalizeSignalUrl(explicit.trim());
-  }
-
-  if (typeof window !== 'undefined') {
-    const hostname = window.location.hostname;
-    if (hostname === 'localhost' || hostname === '127.0.0.1') {
-      return 'ws://217.154.78.152:8765';
-    }
-    const pageProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${pageProtocol}//${hostname}:8765`;
-  }
-
-  return 'ws://217.154.78.152:8765';
+  // Force all builds to use the fixed signalling IP for this deployment.
+  // Cloudflare Pages/dev hostnames must never override the real peer signalling server.
+  return SIGNAL_SERVER_URL;
 }
 
 export function connectToSignalling(

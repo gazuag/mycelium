@@ -266,3 +266,28 @@ export async function clearDirectChatMessages() {
     tx.onerror = () => reject(tx.error);
   });
 }
+
+export async function clearAllLocalData() {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(
+      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, POST_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE],
+      'readwrite'
+    );
+
+    const stores = [
+      tx.objectStore(IDENTITY_STORE),
+      tx.objectStore(CONTACT_STORE),
+      tx.objectStore(PROFILE_STORE),
+      tx.objectStore(POST_STORE),
+      tx.objectStore(DISCOVERY_STORE),
+      tx.objectStore(QUEUE_STORE),
+      tx.objectStore(DIRECT_CHAT_STORE)
+    ];
+
+    stores.forEach((store) => store.clear());
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}

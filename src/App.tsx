@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, updateDirectChatMessageStatus } from './storage/idb';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -581,8 +581,15 @@ function App() {
       if (!peerId || peerId === identity?.id) return;
       const contact = contactsRef.current.find((c) => c.fingerprint === peerId);
       const manager = ensurePeerManager(peerId);
-      if (socket && socket.readyState === WebSocket.OPEN && manager && !contact?.connected) {
-        manager.createOffer(peerId, socket);
+      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) return;
+
+      const channelState = manager.getDataChannelState();
+      const shouldReconnect = !contact?.connected || channelState === 'closed' || channelState === 'missing' || channelState === 'connecting';
+      if (shouldReconnect) {
+        const freshManager = ensurePeerManager(peerId);
+        if (freshManager) {
+          freshManager.createOffer(peerId, socket);
+        }
       }
     });
 
@@ -757,13 +764,20 @@ function App() {
       dedupeContactsByFingerprint(contactsRef.current).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
         const hasQueuedMessages = (messageQueueRef.current[contact.fingerprint]?.length ?? 0) > 0;
+        const manager = ensurePeerManager(contact.fingerprint);
+        if (!manager) return;
 
-        if ((contact.online || hasQueuedMessages) && !contact.connected && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
-          const manager = ensurePeerManager(contact.fingerprint);
-          if (manager) {
-            addLog(`Reconnect attempt to ${contact.fingerprint}`);
-            manager.createOffer(contact.fingerprint, socket);
-          }
+        const channelState = manager.getDataChannelState();
+        const shouldReconnect = (contact.online || hasQueuedMessages) && (
+          !contact.connected ||
+          channelState === 'closed' ||
+          channelState === 'missing' ||
+          channelState === 'connecting'
+        );
+
+        if (shouldReconnect && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
+          addLog(`Reconnect attempt to ${contact.fingerprint}`);
+          manager.createOffer(contact.fingerprint, socket);
         }
       });
     }, 30000);
@@ -1136,10 +1150,20 @@ function App() {
     );
     if (!confirmed) return;
 
-    await deleteIdentity();
-    await clearDirectChatMessages();
+    // Close any live sockets/managers first so stale RTC sessions disappear immediately.
     signallingSocketRef.current?.close();
+    Object.values(peerManagersRef.current).forEach((manager) => manager.closeConnection());
     peerManagersRef.current = {};
+    signallingSocketRef.current = null;
+
+    // Remove every persisted app record tied to this identity/browser session.
+    await deleteIdentity();
+    await clearAllLocalData();
+    localStorage.removeItem('myProfile');
+    localStorage.removeItem('hiddenPosts');
+    localStorage.removeItem('hiddenDiscovery');
+    localStorage.removeItem('myceliumHeaderCollapsed');
+
     setIdentity(null);
     setContacts([]);
     setPosts([]);
