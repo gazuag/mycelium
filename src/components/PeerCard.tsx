@@ -1,4 +1,5 @@
 import type { Contact } from '../types';
+import { IdentityAvatar } from './IdentityAvatar';
 
 interface PeerCardProps {
   contact: Contact;
@@ -8,12 +9,17 @@ interface PeerCardProps {
 }
 
 export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow }: PeerCardProps) {
+  const displayName = contact.displayName || contact.fingerprint;
+
   return (
     <article className="peer-card">
       <div className="peer-card-main">
         <button className="ghost-link" onClick={() => onViewProfile(contact.fingerprint)} type="button">
-          <strong>{contact.displayName ?? contact.fingerprint.slice(0, 16)}</strong>
-          <span className="note">{contact.fingerprint.slice(0, 16)}</span>
+          <IdentityAvatar seed={contact.fingerprint} size={36} alt={displayName} />
+          <div className="peer-label-block">
+            <strong>{displayName}</strong>
+            <span className="note">{contact.fingerprint}</span>
+          </div>
         </button>
         <div className="peer-badges">
           <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>

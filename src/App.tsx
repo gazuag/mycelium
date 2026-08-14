@@ -43,8 +43,8 @@ interface FeedMixSettings {
 
 const DEFAULT_FEED_MIX: FeedMixSettings = {
   followedAuthors: 60,
-  followedLikes: 30,
-  discoveryRandom: 10
+  followedLikes: 40,
+  discoveryRandom: 0
 };
 
 function dedupeContactsByFingerprint(items: Contact[]) {
@@ -982,29 +982,19 @@ function App() {
       .filter((post) => followedSet.has(post.author))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-    const likeEventsByFollowed = posts
+    const likedByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
-      .filter((post) => followedSet.has(post.author) && post.reaction === 'like')
+      .filter((post) => post.reaction === 'like')
+      .filter((post) => {
+        const author = post.author;
+        return author && author !== 'local' && followedSet.has(author);
+      })
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-    const allKnownPosts = [...posts, ...visibleDiscoveryPosts];
-    const likedByFollowed = likeEventsByFollowed.map((likeEvent) => {
-      if (!likeEvent.repostOf) return likeEvent;
-      return allKnownPosts.find((candidate) => candidate.id === likeEvent.repostOf) ?? likeEvent;
-    });
-
-    const randomDiscovery = [...visibleDiscoveryPosts];
-    for (let i = randomDiscovery.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [randomDiscovery[i], randomDiscovery[j]] = [randomDiscovery[j], randomDiscovery[i]];
-    }
-
-    const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes + myProfile.feedMix.discoveryRandom);
+    const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes);
     const totalItems = 30;
-
     const authoredQuota = Math.floor((totalItems * myProfile.feedMix.followedAuthors) / totalRatio);
-    const likedQuota = Math.floor((totalItems * myProfile.feedMix.followedLikes) / totalRatio);
-    const discoveryQuota = Math.max(0, totalItems - authoredQuota - likedQuota);
+    const likedQuota = Math.max(0, totalItems - authoredQuota);
 
     const selected: StoredPost[] = [];
     const seen = new Set<string>();
@@ -1022,9 +1012,8 @@ function App() {
 
     take(authoredByFollowed, authoredQuota);
     take(likedByFollowed, likedQuota);
-    take(randomDiscovery, discoveryQuota);
 
-    const fallback = [...authoredByFollowed, ...likedByFollowed, ...randomDiscovery]
+    const fallback = [...authoredByFollowed, ...likedByFollowed]
       .filter((item) => !seen.has(item.id))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
@@ -1035,7 +1024,7 @@ function App() {
     }
 
     return selected.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [posts, visibleDiscoveryPosts, hiddenPostIds, contacts, myProfile.feedMix]);
+  }, [posts, hiddenPostIds, contacts, myProfile.feedMix]);
 
   const profilePosts = profileContactId
     ? posts.filter((post) => post.author === profileContactId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -1336,8 +1325,10 @@ function App() {
         connectedPeers={connectedPeersCount}
         syncStatus={syncStatus}
         myFingerprint={identity?.id}
-        onOpenMyProfile={() => setPage('myProfile')}
-        onOpenSettings={() => setPage('settings')}
+unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
+            onOpenMyProfile={() => setPage('myProfile')}
+            onOpenSettings={() => setPage('settings')}
+            onOpenPeopleInbox={() => setPage('people')}
       />
 
       <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -1406,20 +1397,15 @@ function App() {
             bio={myProfile.bio}
             followedAuthorsRatio={myProfile.feedMix.followedAuthors}
             followedLikesRatio={myProfile.feedMix.followedLikes}
-            discoveryRatio={myProfile.feedMix.discoveryRandom}
             onNicknameChange={(value) => setMyProfile((prev) => ({ ...prev, displayName: value }))}
             onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
             onFollowedAuthorsRatioChange={(value) => setMyProfile((prev) => ({
               ...prev,
-              feedMix: { ...prev.feedMix, followedAuthors: Math.max(0, value) }
+              feedMix: { ...prev.feedMix, followedAuthors: Math.max(0, Math.min(100, value)) }
             }))}
             onFollowedLikesRatioChange={(value) => setMyProfile((prev) => ({
               ...prev,
-              feedMix: { ...prev.feedMix, followedLikes: Math.max(0, value) }
-            }))}
-            onDiscoveryRatioChange={(value) => setMyProfile((prev) => ({
-              ...prev,
-              feedMix: { ...prev.feedMix, discoveryRandom: Math.max(0, value) }
+              feedMix: { ...prev.feedMix, followedLikes: Math.max(0, Math.min(100, value)) }
             }))}
             onSaveProfile={() => {
               localStorage.setItem('myProfile', JSON.stringify(myProfile));

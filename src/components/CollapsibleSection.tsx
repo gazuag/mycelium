@@ -12,7 +12,7 @@ export function CollapsibleSection({ title, summary, isOpen, onToggle, children 
       <button className="collapsible-toggle" onClick={onToggle} type="button">
         <div>
           <strong>{title}</strong>
-          {summary ? <span className="note">{summary}</span> : null}
+          {summary ? <span className="note"> - {summary}</span> : null}
         </div>
         <span>{isOpen ? '▾' : '▸'}</span>
       </button>

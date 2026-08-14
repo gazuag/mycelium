@@ -22,9 +22,9 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow,
   const [newPeerAddress, setNewPeerAddress] = useState('');
 
   const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
-  const friends = contacts.filter((c) => c.followed && c.follower);
-  const following = contacts.filter((c) => c.followed && !c.follower);
-  const followers = contacts.filter((c) => !c.followed && c.follower);
+  const friends = contacts.filter((c) => c.followed && c.follower && (c.unreadMessages || 0) === 0);
+  const following = contacts.filter((c) => c.followed && !c.follower && (c.unreadMessages || 0) === 0);
+  const followers = contacts.filter((c) => !c.followed && c.follower && (c.unreadMessages || 0) === 0);
   const everyoneElse = contacts.filter((c) => !c.followed && !c.follower && (c.unreadMessages || 0) === 0);
 
   const toggleGroup = (group: keyof typeof openGroups) => {

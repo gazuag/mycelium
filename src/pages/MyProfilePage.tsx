@@ -9,12 +9,10 @@ interface MyProfilePageProps {
   bio: string;
   followedAuthorsRatio: number;
   followedLikesRatio: number;
-  discoveryRatio: number;
   onNicknameChange: (value: string) => void;
   onBioChange: (value: string) => void;
   onFollowedAuthorsRatioChange: (value: number) => void;
   onFollowedLikesRatioChange: (value: number) => void;
-  onDiscoveryRatioChange: (value: number) => void;
   onSaveProfile: () => void;
   onExportIdentity: () => void;
   onImportIdentity: () => void;
@@ -31,12 +29,10 @@ export function MyProfilePage({
   bio,
   followedAuthorsRatio,
   followedLikesRatio,
-  discoveryRatio,
   onNicknameChange,
   onBioChange,
   onFollowedAuthorsRatioChange,
   onFollowedLikesRatioChange,
-  onDiscoveryRatioChange,
   onSaveProfile,
   onExportIdentity,
   onImportIdentity,
@@ -60,32 +56,25 @@ export function MyProfilePage({
           <textarea value={bio} onChange={(e) => onBioChange(e.target.value)} placeholder="Write a short bio" />
         </label>
         <h3>Home Feed Mix</h3>
-        <p className="note">These values are weighted ratios for Home feed composition.</p>
+        <p className="note">Balance the two main home feed sources.</p>
         <label>
-          From people you follow
+          From people you follow: {followedAuthorsRatio}%
           <input
-            type="number"
+            type="range"
             min={0}
+            max={100}
             value={followedAuthorsRatio}
             onChange={(e) => onFollowedAuthorsRatioChange(Number(e.target.value) || 0)}
           />
         </label>
         <label>
-          From what people you follow like
+          From what people you follow like: {followedLikesRatio}%
           <input
-            type="number"
+            type="range"
             min={0}
+            max={100}
             value={followedLikesRatio}
             onChange={(e) => onFollowedLikesRatioChange(Number(e.target.value) || 0)}
-          />
-        </label>
-        <label>
-          Random discovery content
-          <input
-            type="number"
-            min={0}
-            value={discoveryRatio}
-            onChange={(e) => onDiscoveryRatioChange(Number(e.target.value) || 0)}
           />
         </label>
         <div className="row">

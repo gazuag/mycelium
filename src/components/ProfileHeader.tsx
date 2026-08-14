@@ -1,4 +1,5 @@
 import type { Contact } from '../types';
+import { IdentityAvatar } from './IdentityAvatar';
 
 interface ProfileHeaderProps {
   contact: Contact;
@@ -8,12 +9,17 @@ interface ProfileHeaderProps {
 }
 
 export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: ProfileHeaderProps) {
+  const displayName = contact.displayName || contact.fingerprint;
+
   return (
     <section className="profile-header card">
       <div className="profile-title">
-        <div>
-          <strong>{contact.displayName ?? contact.fingerprint.slice(0, 16)}</strong>
-          <p className="note">{contact.fingerprint}</p>
+        <div className="profile-title-main">
+          <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} />
+          <div>
+            <strong>{displayName}</strong>
+            <p className="note">{contact.fingerprint}</p>
+          </div>
         </div>
         <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
       </div>

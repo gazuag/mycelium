@@ -21,9 +21,12 @@ export function ChatPage({ contact, messages, messageDraft, onMessageChange, onS
       return;
     }
 
-    window.requestAnimationFrame(() => {
-      element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
-    });
+    const scrollToBottom = () => {
+      element.scrollTop = element.scrollHeight;
+    };
+
+    requestAnimationFrame(scrollToBottom);
+    setTimeout(scrollToBottom, 0);
   }, [messages]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

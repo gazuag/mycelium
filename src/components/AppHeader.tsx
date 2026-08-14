@@ -8,8 +8,10 @@ interface AppHeaderProps {
   connectedPeers: number;
   syncStatus: string;
   myFingerprint?: string;
+  unreadCount?: number;
   onOpenMyProfile: () => void;
   onOpenSettings: () => void;
+  onOpenPeopleInbox: () => void;
 }
 
 export function AppHeader({
@@ -20,8 +22,10 @@ export function AppHeader({
   connectedPeers,
   syncStatus,
   myFingerprint,
+  unreadCount = 0,
   onOpenMyProfile,
-  onOpenSettings
+  onOpenSettings,
+  onOpenPeopleInbox
 }: AppHeaderProps) {
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
@@ -57,12 +61,15 @@ export function AppHeader({
 
         {myFingerprint && (
           <div className="identity-line">
-            <span>Me</span>
+            <span>My identity key:</span>
             <strong>{myFingerprint}</strong>
           </div>
         )}
 
         <div className="app-header-actions">
+          {unreadCount > 0 ? (
+            <button className="btn secondary" onClick={onOpenPeopleInbox}>Unread inbox ({unreadCount})</button>
+          ) : null}
           <button className="btn" onClick={onOpenMyProfile}>My profile</button>
           <button className="btn secondary" onClick={onOpenSettings}>Settings</button>
         </div>
