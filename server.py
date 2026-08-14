@@ -27,7 +27,6 @@ MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
 DB_PATH = Path(os.environ.get('DISCOVERY_DB_PATH', 'discovery.db'))
 SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
 SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8765'))
-SIGNAL_SECURE_PORT = int(os.environ.get('SIGNAL_SECURE_PORT', '8766'))
 TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 
@@ -213,18 +212,15 @@ async def websocket_handler(websocket: WebSocketServerProtocol, path: str) -> No
 async def main() -> None:
     logging.info('Starting discovery database at %s', DB_PATH)
 
-    ssl_context = None
-    if TLS_CERT_PATH and TLS_KEY_PATH:
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
-        logging.info('Loaded TLS certificate for secure signalling at %s and %s', TLS_CERT_PATH, TLS_KEY_PATH)
+    if not TLS_CERT_PATH or not TLS_KEY_PATH:
+        raise RuntimeError('TLS_CERT_PATH and TLS_KEY_PATH must be set before starting the secure signalling server.')
 
-    ws_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_PORT)
-    logging.info('Server started on ws://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_PORT)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
+    logging.info('Loaded TLS certificate for secure signalling at %s and %s', TLS_CERT_PATH, TLS_KEY_PATH)
 
-    if ssl_context:
-        wss_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_SECURE_PORT, ssl=ssl_context)
-        logging.info('Secure server started on wss://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_SECURE_PORT)
+    wss_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_PORT, ssl=ssl_context)
+    logging.info('Secure server started on wss://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_PORT)
 
     await asyncio.Future()
 

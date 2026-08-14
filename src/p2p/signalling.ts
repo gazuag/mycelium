@@ -23,19 +23,18 @@ function normalizeSignalUrl(rawUrl: string) {
   try {
     const url = new URL(rawUrl);
     if (url.protocol === 'http:') {
-      url.protocol = 'ws:';
+      url.protocol = 'wss:';
     } else if (url.protocol === 'https:') {
       url.protocol = 'wss:';
     }
     return url.toString();
   } catch {
-    return rawUrl;
+    return `wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`;
   }
 }
 
 export function resolveSignalServerUrl() {
-  const protocol = (typeof window !== 'undefined' && window.location.protocol === 'https:') ? 'wss:' : 'ws:';
-  return normalizeSignalUrl(`${protocol}//${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`);
+  return normalizeSignalUrl(`wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`);
 }
 
 export function connectToSignalling(
