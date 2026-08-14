@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import ssl
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,11 @@ MAX_DISCOVERY_POSTS = int(os.environ.get('MAX_DISCOVERY_POSTS', '10000'))
 MAX_POST_SIZE = int(os.environ.get('MAX_POST_SIZE', '4096'))
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
 DB_PATH = Path(os.environ.get('DISCOVERY_DB_PATH', 'discovery.db'))
+SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
+SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8765'))
+SIGNAL_SECURE_PORT = int(os.environ.get('SIGNAL_SECURE_PORT', '8766'))
+TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
+TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 
 clients: Dict[str, WebSocketServerProtocol] = {}
 
@@ -206,8 +212,20 @@ async def websocket_handler(websocket: WebSocketServerProtocol, path: str) -> No
 
 async def main() -> None:
     logging.info('Starting discovery database at %s', DB_PATH)
-    server = await websockets.serve(websocket_handler, '0.0.0.0', 8765)
-    logging.info('Server started on ws://0.0.0.0:8765 (signalling + discovery)')
+
+    ssl_context = None
+    if TLS_CERT_PATH and TLS_KEY_PATH:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
+        logging.info('Loaded TLS certificate for secure signalling at %s and %s', TLS_CERT_PATH, TLS_KEY_PATH)
+
+    ws_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_PORT)
+    logging.info('Server started on ws://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_PORT)
+
+    if ssl_context:
+        wss_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_SECURE_PORT, ssl=ssl_context)
+        logging.info('Secure server started on wss://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_SECURE_PORT)
+
     await asyncio.Future()
 
 if __name__ == '__main__':

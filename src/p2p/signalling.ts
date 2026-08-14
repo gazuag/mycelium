@@ -16,7 +16,8 @@ export type SignalMessage =
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
 
-const SIGNAL_SERVER_URL = 'ws://217.154.78.152:8765';
+const SIGNAL_SERVER_HOST = 'mycelium.my.to';
+const SIGNAL_SERVER_PORT = 8765;
 
 function normalizeSignalUrl(rawUrl: string) {
   try {
@@ -33,9 +34,8 @@ function normalizeSignalUrl(rawUrl: string) {
 }
 
 export function resolveSignalServerUrl() {
-  // Force all builds to use the fixed signalling IP for this deployment.
-  // Cloudflare Pages/dev hostnames must never override the real peer signalling server.
-  return SIGNAL_SERVER_URL;
+  const protocol = (typeof window !== 'undefined' && window.location.protocol === 'https:') ? 'wss:' : 'ws:';
+  return normalizeSignalUrl(`${protocol}//${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`);
 }
 
 export function connectToSignalling(

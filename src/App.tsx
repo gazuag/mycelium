@@ -85,6 +85,7 @@ function App() {
   const contactsRef = useRef<Contact[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
   const outboundAckTimersRef = useRef<Record<string, number>>({});
+  const recentOutboundMessageKeysRef = useRef<Record<string, Set<string>>>({});
   const pageRef = useRef<PageKey>('home');
   const chatContactIdRef = useRef<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
@@ -327,6 +328,26 @@ function App() {
     })));
   };
 
+  const isDuplicateOutboundMessage = (peerId: string, text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return true;
+    const key = trimmed.toLowerCase();
+    const peerMessages = recentOutboundMessageKeysRef.current[peerId] ?? new Set<string>();
+    if (peerMessages.has(key)) {
+      return true;
+    }
+    peerMessages.add(key);
+    recentOutboundMessageKeysRef.current[peerId] = peerMessages;
+    window.setTimeout(() => {
+      const currentSet = recentOutboundMessageKeysRef.current[peerId];
+      currentSet?.delete(key);
+      if (currentSet && currentSet.size === 0) {
+        delete recentOutboundMessageKeysRef.current[peerId];
+      }
+    }, 20000);
+    return false;
+  };
+
   const queuePeerMessage = async (peerId: string, text: string, chatMessageId?: string) => {
     const queuedMessageId = `${peerId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const queuedMessage: QueuedMessage = {
@@ -545,7 +566,7 @@ function App() {
 
     outboundAckTimersRef.current[messageId] = window.setTimeout(async () => {
       const alreadyQueued = messageQueueRef.current[peerId]?.some((entry) => entry.chatMessageId === messageId);
-      if (alreadyQueued) {
+      if (alreadyQueued || isDuplicateOutboundMessage(peerId, text)) {
         return;
       }
 
@@ -1236,6 +1257,11 @@ function App() {
     }
     const peerId = chatContactId;
     const trimmedMessage = message.trim();
+    if (isDuplicateOutboundMessage(peerId, trimmedMessage)) {
+      addLog(`Duplicate message suppressed for ${peerId}: ${trimmedMessage.slice(0, 80)}`);
+      setMessage('');
+      return;
+    }
     const manager = peerManagersRef.current[peerId];
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
     const channelState = manager?.getDataChannelState() ?? 'missing';

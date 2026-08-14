@@ -145,7 +145,14 @@ export class PeerConnectionManager {
             return;
           }
           if (parsed?.type === 'chat' && typeof parsed.text === 'string') {
+            if (typeof parsed.id === 'string') {
+              this.sendData({ type: 'chat-ack', messageId: parsed.id });
+            }
             this.onData(peerId, parsed.text);
+            return;
+          }
+          if (parsed?.type === 'chat-ack' && typeof parsed.messageId === 'string') {
+            this.onMessageAck(peerId, parsed.messageId);
             return;
           }
           if (parsed?.type === 'signed-post' && parsed.post) {
@@ -332,7 +339,13 @@ export class PeerConnectionManager {
       });
       return;
     }
-    this.sendLegacyPayload('chat', { text });
+
+    const messageId = createPacketId();
+    this.pendingMessageAcks.set(messageId, {
+      text,
+      sentAt: new Date().toISOString()
+    });
+    this.sendData({ type: 'chat', id: messageId, text });
   }
 
   public sendSignedPost(post: SignedPost) {
