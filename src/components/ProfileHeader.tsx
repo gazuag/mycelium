@@ -5,10 +5,11 @@ interface ProfileHeaderProps {
   contact: Contact;
   onFollowToggle: () => void;
   onBlock: () => void;
+  onHide: () => void;
   onMessage: () => void;
 }
 
-export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: ProfileHeaderProps) {
+export function ProfileHeader({ contact, onFollowToggle, onBlock, onHide, onMessage }: ProfileHeaderProps) {
   const displayName = contact.displayName || contact.fingerprint;
 
   return (
@@ -26,8 +27,9 @@ export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: P
       <p className="note">{contact.profile?.bio ?? 'No bio yet.'}</p>
       <div className="profile-actions">
         <button className="btn" onClick={onFollowToggle}>{contact.followed ? 'Unfollow' : 'Follow'}</button>
-        <button className="btn secondary" onClick={onBlock}>Block</button>
         <button className="btn secondary" onClick={onMessage}>Message</button>
+        <button className="btn secondary" onClick={onHide}>Hide</button>
+        <button className="btn secondary" onClick={onBlock}>Block</button>
       </div>
     </section>
   );

@@ -112,7 +112,9 @@ function App() {
   const [myProfile, setMyProfile] = useState({
     displayName: '',
     bio: '',
-    feedMix: DEFAULT_FEED_MIX
+    feedMix: DEFAULT_FEED_MIX,
+    blockedPeers: [] as string[],
+    hiddenPeers: [] as string[]
   });
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
@@ -641,6 +643,12 @@ function App() {
                   discoveryRandom: Number(parsed.feedMix.discoveryRandom ?? DEFAULT_FEED_MIX.discoveryRandom)
                 }
               : DEFAULT_FEED_MIX;
+            const blockedPeers = Array.isArray(parsed.blockedPeers)
+              ? parsed.blockedPeers.filter((value: unknown): value is string => typeof value === 'string')
+              : [];
+            const hiddenPeers = Array.isArray(parsed.hiddenPeers)
+              ? parsed.hiddenPeers.filter((value: unknown): value is string => typeof value === 'string')
+              : [];
             setMyProfile({
               displayName: typeof parsed.displayName === 'string' ? parsed.displayName : '',
               bio: typeof parsed.bio === 'string' ? parsed.bio : '',
@@ -648,7 +656,9 @@ function App() {
                 followedAuthors: Math.max(0, parsedFeedMix.followedAuthors),
                 followedLikes: Math.max(0, parsedFeedMix.followedLikes),
                 discoveryRandom: Math.max(0, parsedFeedMix.discoveryRandom)
-              }
+              },
+              blockedPeers,
+              hiddenPeers
             });
           }
         } catch {
@@ -1051,6 +1061,39 @@ function App() {
     });
   };
 
+  const handleHidePeer = (peerId: string) => {
+    if (!peerId) return;
+    setMyProfile((prev) => {
+      const nextHidden = Array.from(new Set([...prev.hiddenPeers, peerId]));
+      const nextProfile = { ...prev, hiddenPeers: nextHidden };
+      localStorage.setItem('myProfile', JSON.stringify(nextProfile));
+      return nextProfile;
+    });
+  };
+
+  const handleBlockPeer = (peerId: string) => {
+    if (!peerId) return;
+    setMyProfile((prev) => {
+      const nextBlocked = Array.from(new Set([...prev.blockedPeers, peerId]));
+      const nextHidden = Array.from(new Set([...prev.hiddenPeers, peerId]));
+      const nextProfile = { ...prev, blockedPeers: nextBlocked, hiddenPeers: nextHidden };
+      localStorage.setItem('myProfile', JSON.stringify(nextProfile));
+      return nextProfile;
+    });
+  };
+
+  const handleUnblockPeer = (peerId: string) => {
+    if (!peerId) return;
+    setMyProfile((prev) => {
+      const nextProfile = {
+        ...prev,
+        blockedPeers: prev.blockedPeers.filter((id) => id !== peerId)
+      };
+      localStorage.setItem('myProfile', JSON.stringify(nextProfile));
+      return nextProfile;
+    });
+  };
+
   useEffect(() => {
     const pageContainer = document.getElementById('page-content');
     if (pageContainer) {
@@ -1355,6 +1398,8 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
+            onHidePeer={handleHidePeer}
+            onBlockPeer={handleBlockPeer}
             onAddPeerAddress={handleAddPeerByAddress}
           />
         )}
@@ -1379,7 +1424,8 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             posts={profilePosts}
             likedPosts={likedProfilePosts}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
-            onBlock={() => undefined}
+            onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}
+            onHide={() => handleHidePeer(activeProfileContact.fingerprint)}
             onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
@@ -1395,6 +1441,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             posts={posts}
             nickname={myProfile.displayName}
             bio={myProfile.bio}
+            blockedPeers={myProfile.blockedPeers}
             followedAuthorsRatio={myProfile.feedMix.followedAuthors}
             followedLikesRatio={myProfile.feedMix.followedLikes}
             onNicknameChange={(value) => setMyProfile((prev) => ({ ...prev, displayName: value }))}
@@ -1415,6 +1462,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
                 peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
               });
             }}
+            onUnblockPeer={handleUnblockPeer}
             onExportIdentity={handleExportIdentity}
             onImportIdentity={handleImportIdentity}
             onCreateIdentity={handleCreateIdentity}

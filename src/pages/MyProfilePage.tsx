@@ -7,6 +7,7 @@ interface MyProfilePageProps {
   posts: StoredPost[];
   nickname: string;
   bio: string;
+  blockedPeers: string[];
   followedAuthorsRatio: number;
   followedLikesRatio: number;
   onNicknameChange: (value: string) => void;
@@ -18,6 +19,7 @@ interface MyProfilePageProps {
   onImportIdentity: () => void;
   onCreateIdentity: () => void;
   onClearIdentity: () => void;
+  onUnblockPeer: (peerId: string) => void;
 }
 
 export function MyProfilePage({
@@ -27,6 +29,7 @@ export function MyProfilePage({
   posts,
   nickname,
   bio,
+  blockedPeers,
   followedAuthorsRatio,
   followedLikesRatio,
   onNicknameChange,
@@ -37,7 +40,8 @@ export function MyProfilePage({
   onExportIdentity,
   onImportIdentity,
   onCreateIdentity,
-  onClearIdentity
+  onClearIdentity,
+  onUnblockPeer
 }: MyProfilePageProps) {
   return (
     <section className="page-view">
@@ -94,6 +98,22 @@ export function MyProfilePage({
         <p className="note monospace">{identityId}</p>
         <p><strong>Public key</strong></p>
         <p className="note monospace break-word">{publicKey}</p>
+      </div>
+
+      <div className="card">
+        <h3>Blocked Peers</h3>
+        {blockedPeers.length === 0 ? (
+          <p className="note">No blocked peers yet.</p>
+        ) : (
+          <div className="blocked-peer-list">
+            {blockedPeers.map((peerId) => (
+              <div key={peerId} className="blocked-peer-item">
+                <span className="monospace break-word">{peerId}</span>
+                <button className="chip secondary" type="button" onClick={() => onUnblockPeer(peerId)}>Unblock</button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card">
