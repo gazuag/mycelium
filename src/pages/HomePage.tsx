@@ -85,13 +85,17 @@ export function HomePage({
       ) : (
         <div className="feed-list">
           {visiblePosts.map((post) => {
-            const matchingContact = contacts.find((c) => c.fingerprint === post.author);
+            const matchingContact = contacts.find((contact) =>
+              contact.fingerprint === post.author || contact.publicKey === post.author
+            );
             const authorName = matchingContact
-              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint)
-              : displayNameOrFallback(undefined, post.author);
+              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.author)
+              : post.authorDisplayName?.trim() || 'Unknown peer';
             const recommendationLabel = post.isRecommendation && post.recommendedBy
               ? `Recommended by ${displayNameOrFallback(
-                  contacts.find((contact) => contact.fingerprint === post.recommendedBy)?.displayName,
+                  contacts.find((contact) =>
+                    contact.fingerprint === post.recommendedBy || contact.publicKey === post.recommendedBy
+                  )?.displayName,
                   post.recommendedBy
                 )}`
               : post.isRecommendation

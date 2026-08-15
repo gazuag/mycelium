@@ -1217,6 +1217,19 @@ function App() {
     }
   }, [page, pageScrollPositions]);
 
+  const resolveAuthorDisplayName = (authorId: string, fallbackContact?: Contact) => {
+    const trimmedName = fallbackContact?.displayName?.trim();
+    if (trimmedName) {
+      return trimmedName;
+    }
+
+    if (isValidPeerFingerprint(authorId)) {
+      return fingerprintToHumanName(authorId);
+    }
+
+    return undefined;
+  };
+
   async function handleRefreshHomeFeed() {
     if (!identity) return;
     setHomeSyncBusy(true);
@@ -1256,18 +1269,30 @@ function App() {
       const verifiedPosts = await Promise.all(items.map(async (post) => {
         try {
           const valid = await verifySignedPost(post);
+          const knownContact = contactsRef.current.find((contact) =>
+            contact.fingerprint === post.author || contact.publicKey === post.author
+          );
+          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
+          const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return {
             ...post,
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
-            valid
+            valid,
+            authorDisplayName: authorDisplayName || undefined
           };
         } catch {
+          const knownContact = contactsRef.current.find((contact) =>
+            contact.fingerprint === post.author || contact.publicKey === post.author
+          );
+          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : post.author);
+          const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return {
             ...post,
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
-            valid: false
+            valid: false,
+            authorDisplayName: authorDisplayName || undefined
           };
         }
       }));
@@ -1285,11 +1310,16 @@ function App() {
       return;
     }
     const valid = await verifySignedPost(post);
+    const knownContact = contactsRef.current.find((contact) =>
+      contact.fingerprint === post.author || contact.publicKey === post.author
+    );
+    const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
     const stored: StoredPost = {
       ...post,
       source: 'discovery',
       receivedAt: new Date().toISOString(),
-      valid
+      valid,
+      authorDisplayName: resolveAuthorDisplayName(authorFingerprint, knownContact) || undefined
     };
     await addKnownPeer(post.author);
     await savePost(stored);

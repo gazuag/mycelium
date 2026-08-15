@@ -33,10 +33,12 @@ export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onA
       ) : (
         <div className="feed-list">
           {discoveryPosts.map((post) => {
-            const matchedContact = contacts.find((contact) => contact.fingerprint === post.author);
+            const matchedContact = contacts.find((contact) =>
+              contact.fingerprint === post.author || contact.publicKey === post.author
+            );
             const authorName = matchedContact
-              ? displayNameOrFallback(matchedContact.displayName, matchedContact.fingerprint)
-              : displayNameOrFallback(undefined, post.author);
+              ? displayNameOrFallback(matchedContact.displayName, matchedContact.fingerprint || matchedContact.publicKey || post.author)
+              : post.authorDisplayName?.trim() || 'Unknown peer';
 
             return (
               <PostCard
