@@ -453,10 +453,43 @@ body, html, #root {
   padding: 0.65rem 0.9rem;
   background: rgba(255,255,255,0.08);
   color: #f6f7f1;
+  transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 0 0 rgba(0,0,0,0);
+}
+
+.chip:hover,
+.chip:focus-visible,
+.btn:hover,
+.btn:focus-visible,
+.ghost-link:hover,
+.ghost-link:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(31, 127, 89, 0.25);
+}
+
+.chip:active,
+.btn:active {
+  transform: translateY(0);
+  opacity: 0.9;
 }
 
 .chip.secondary {
   background: rgba(255,255,255,0.04);
+}
+
+.reply-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 16px;
+}
+
+.reply-composer textarea {
+  min-height: 90px;
 }
 
 .peer-card {

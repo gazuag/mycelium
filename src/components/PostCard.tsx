@@ -7,9 +7,10 @@ interface PostCardProps {
   onAuthorClick: (peerId: string) => void;
   onLike: () => void;
   onDislike: () => void;
-  onReply: () => void;
+  onReply: (content?: string, publishToDiscovery?: boolean) => void;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
+  replyComposer?: React.ReactNode;
 }
 
 export function PostCard({
@@ -21,7 +22,8 @@ export function PostCard({
   onDislike,
   onReply,
   footerActions,
-  recommendationLabel
+  recommendationLabel,
+  replyComposer
 }: PostCardProps) {
   return (
     <article className={`post-card ${post.isRecommendation ? 'recommended' : ''}`}>
@@ -45,9 +47,11 @@ export function PostCard({
 
       <div className="post-actions">
         <button className="chip" onClick={onLike} type="button">Like</button>
-        <button className="chip" onClick={onDislike} type="button">Dislike</button>
-        <button className="chip" onClick={onReply} type="button">Reply</button>
+        <button className="chip" onClick={onDislike} type="button">Hide</button>
+        <button className="chip" onClick={() => onReply()} type="button">Reply</button>
       </div>
+
+      {replyComposer ? <div className="reply-composer-wrap">{replyComposer}</div> : null}
 
       {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}
     </article>

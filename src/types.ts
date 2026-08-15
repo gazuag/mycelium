@@ -39,6 +39,7 @@ export interface SignedPost {
   reaction?: 'like' | 'dislike';
   repostOf?: string;
   originalAuthor?: string;
+  replyTo?: string;
   signature: string;
 }
 
@@ -67,6 +68,7 @@ export interface StoredPost extends SignedPost {
   authorDisplayName?: string;
   isRecommendation?: boolean;
   recommendedBy?: string;
+  replyCount?: number;
 }
 
 export interface QueuedMessage {

@@ -54,7 +54,6 @@ export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onA
                   <div className="discover-actions">
                     <button className="chip" type="button" onClick={() => onAddContact(post.author)}>Add contact</button>
                     <button className="chip" type="button" onClick={() => onFollow(post.author)}>Follow</button>
-                    <button className="chip" type="button" onClick={() => onSave(post)}>Save</button>
                     <button className="chip secondary" type="button" onClick={() => onHide(post.id)}>Hide</button>
                   </div>
                 }

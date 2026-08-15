@@ -1011,31 +1011,56 @@ function App() {
   };
 
   const handleLikePost = async (postId: string) => {
-    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'like' } : post)));
+    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'like', isRecommendation: true, recommendedBy: identity?.id ?? post.recommendedBy ?? post.author } : post)));
+    const target = posts.find((post) => post.id === postId);
+    if (target && identity) {
+      const next = { ...target, reaction: 'like', isRecommendation: true, recommendedBy: identity.id } as StoredPost;
+      await savePost(next);
+      addLog(`Liked post ${postId}`);
+    }
   };
 
   const handleDislikePost = async (postId: string) => {
-    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'dislike' } : post)));
+    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'dislike', notInterested: true } : post)));
+    const target = posts.find((post) => post.id === postId);
+    if (target) {
+      const next = { ...target, reaction: 'dislike', notInterested: true } as StoredPost;
+      await savePost(next);
+      addLog(`Disliked post ${postId}`);
+    }
   };
 
-  async function handleCreatePost(publishToDiscovery = false) {
+  async function handleCreatePost(publishToDiscovery = false, replyTo?: string) {
     if (!identity) return;
     const content = newPostContent.trim();
     if (!content) return;
     const id = await sha256(identity.publicKey + Date.now().toString());
     const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
-    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, content, tags);
+    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, content, tags, { replyTo });
     const stored: StoredPost = {
       ...signed,
       source: 'local',
       receivedAt: new Date().toISOString(),
-      valid: true
+      valid: true,
+      replyCount: 0
     };
     await savePost(stored);
     setPosts((prev) => [stored, ...prev]);
     addLog('Created local post');
     setNewPostContent('');
     setNewPostTags('');
+
+    if (replyTo) {
+      const targetPost = posts.find((post) => post.id === replyTo);
+      const targetPeer = targetPost?.author;
+      if (targetPeer) {
+        const targetManager = peerManagersRef.current[targetPeer];
+        if (targetManager && targetManager.isDataChannelOpen()) {
+          targetManager.sendSignedPost(stored);
+          addLog(`Pushed reply ${stored.id} to ${targetPeer}`);
+        }
+      }
+    }
 
     Object.entries(peerManagersRef.current).forEach(([peerId, manager]) => {
       const contact = contacts.find((c) => c.fingerprint === peerId);
@@ -1664,7 +1689,12 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
-            onReply={() => {}}
+            onReply={(postId, content, publishToDiscovery) => {
+              if (content && content.trim()) {
+                void handleCreatePost(Boolean(publishToDiscovery), postId);
+                setNewPostContent(content);
+              }
+            }}
             onHide={handleHidePost}
             isRefreshing={homeSyncBusy}
           />
