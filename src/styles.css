@@ -183,18 +183,9 @@ body, html, #root {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 1rem;
-  padding-bottom: calc(1rem + 88px);
+  padding-bottom: calc(1rem + 72px);
   display: flex;
   flex-direction: column;
-}
-
-.page-content::after,
-.chat-page::after {
-  content: '';
-  display: block;
-  height: clamp(72px, 12vh, 96px);
-  flex-shrink: 0;
-  background: transparent;
 }
 
 .app-header {
@@ -623,6 +614,7 @@ body, html, #root {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 1rem;
+  padding-bottom: calc(1rem + 72px);
   display: flex;
   flex-direction: column;
   scrollbar-gutter: stable;
