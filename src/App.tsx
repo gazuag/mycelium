@@ -678,8 +678,13 @@ function App() {
             const hiddenPeers = Array.isArray(parsed.hiddenPeers)
               ? parsed.hiddenPeers.filter((value: unknown): value is string => typeof value === 'string')
               : [];
+            const rawDisplayName = typeof parsed.displayName === 'string' ? parsed.displayName.trim() : '';
+            const sanitizedDisplayName = rawDisplayName && /^([0-9a-fA-F]{16,})$/.test(rawDisplayName)
+              ? fingerprintToHumanName(identity?.id ?? rawDisplayName)
+              : rawDisplayName;
+
             setMyProfile({
-              displayName: typeof parsed.displayName === 'string' ? parsed.displayName : '',
+              displayName: sanitizedDisplayName,
               bio: typeof parsed.bio === 'string' ? parsed.bio : '',
               feedMix: {
                 followedAuthors: Math.max(0, parsedFeedMix.followedAuthors),
@@ -1632,9 +1637,14 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
               }
             }))}
             onSaveProfile={() => {
+              const rawDisplayName = myProfile.displayName.trim();
+              const nextDisplayName = rawDisplayName && /^([0-9a-fA-F]{16,})$/.test(rawDisplayName)
+                ? fingerprintToHumanName(identity?.id ?? rawDisplayName)
+                : (rawDisplayName || fingerprintToHumanName(identity?.id ?? ''));
+
               const persistedProfile = {
                 ...myProfile,
-                displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity?.id ?? ''),
+                displayName: nextDisplayName,
                 bio: myProfile.bio.trim(),
                 blockedPeers: myProfile.blockedPeers,
                 hiddenPeers: myProfile.hiddenPeers

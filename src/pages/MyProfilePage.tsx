@@ -1,3 +1,4 @@
+import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import type { Contact, StoredPost } from '../types';
 
 interface MyProfilePageProps {
@@ -43,7 +44,7 @@ export function MyProfilePage({
   onClearIdentity,
   onUnblockPeer
 }: MyProfilePageProps) {
-  const generatedNickname = identityId ? identityId.replace(/:/g, '').slice(0, 16) : 'Peer';
+  const generatedNickname = identityId ? fingerprintToHumanName(identityId) : 'Peer';
 
   return (
     <section className="page-view">
