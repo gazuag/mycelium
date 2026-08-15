@@ -8,12 +8,11 @@ interface PeoplePageProps {
   onViewProfile: (peerId: string) => void;
   onMessage: (peerId: string) => void;
   onToggleFollow: (peerId: string) => void;
-  onHidePeer?: (peerId: string) => void;
   onBlockPeer?: (peerId: string) => void;
   onAddPeerAddress: (address: string) => Promise<void>;
 }
 
-export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow, onHidePeer, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
+export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
   const [openGroups, setOpenGroups] = useState({
     inbox: true,
     friends: true,
@@ -52,7 +51,6 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow,
               onViewProfile={onViewProfile}
               onMessage={onMessage}
               onToggleFollow={onToggleFollow}
-              onHide={onHidePeer}
               onBlock={onBlockPeer}
             />
           ))}

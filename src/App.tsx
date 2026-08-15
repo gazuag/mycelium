@@ -109,6 +109,7 @@ function App() {
   const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
+  const blockedPeersRef = useRef<Set<string>>(new Set());
   const [myProfile, setMyProfile] = useState({
     displayName: '',
     bio: '',
@@ -155,6 +156,10 @@ function App() {
   useEffect(() => {
     myProfileRef.current = myProfile;
   }, [myProfile]);
+
+  useEffect(() => {
+    blockedPeersRef.current = new Set(myProfile.blockedPeers);
+  }, [myProfile.blockedPeers]);
 
   useEffect(() => {
     identityRef.current = identity;
@@ -443,6 +448,10 @@ function App() {
           addLog(`Ignoring direct message from invalid peer id: ${peer}`);
           return;
         }
+        if (blockedPeersRef.current.has(peer)) {
+          addLog(`Blocked peer ${peer} message ignored`);
+          return;
+        }
 
         addLog(`Direct message received from ${peer}: ${incoming.slice(0, 80)}`);
         saveDirectMessage(peer, incoming, true);
@@ -476,6 +485,10 @@ function App() {
       (peer: string, metadata: PeerMetadata) => {
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
+          return;
+        }
+        if (blockedPeersRef.current.has(peer)) {
+          addLog(`Blocked peer ${peer} metadata ignored`);
           return;
         }
         handlePeerMetadata(peer, metadata);
@@ -584,8 +597,8 @@ function App() {
   };
 
   const handlePeerList = async (peers: string[]) => {
-    const validPeers = peers.filter((peerId) => isValidPeerFingerprint(peerId));
-    const invalidPeers = peers.filter((peerId) => !isValidPeerFingerprint(peerId));
+    const validPeers = peers.filter((peerId) => isValidPeerFingerprint(peerId) && !blockedPeersRef.current.has(peerId));
+    const invalidPeers = peers.filter((peerId) => !isValidPeerFingerprint(peerId) || blockedPeersRef.current.has(peerId));
     if (invalidPeers.length) {
       addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
     }
@@ -742,7 +755,7 @@ function App() {
       identity.id,
       async (message: SignalMessage) => {
         if (message.type === 'peer-list') {
-          handlePeerList(message.peers);
+          handlePeerList(message.peers.filter((peerId) => !blockedPeersRef.current.has(peerId)));
           return;
         }
 
@@ -974,7 +987,8 @@ function App() {
     }
   }
 
-  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id));
+  const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !blockedPeerSet.has(post.author));
 
   const discoverFeedPosts = useMemo(() => {
     return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -989,11 +1003,13 @@ function App() {
 
     const authoredByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
+      .filter((post) => !blockedPeerSet.has(post.author))
       .filter((post) => followedSet.has(post.author))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     const likedByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
+      .filter((post) => !blockedPeerSet.has(post.author))
       .filter((post) => post.reaction === 'like')
       .filter((post) => {
         const author = post.author;
@@ -1037,14 +1053,14 @@ function App() {
   }, [posts, hiddenPostIds, contacts, myProfile.feedMix]);
 
   const profilePosts = profileContactId
-    ? posts.filter((post) => post.author === profileContactId).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => post.author === profileContactId && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
-    ? posts.filter((post) => post.author === profileContactId && post.reaction === 'like').sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => post.author === profileContactId && post.reaction === 'like' && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
-  const currentChatMessages = chatContactId ? directChats[chatContactId] || [] : [];
+  const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
 
   function handlePageChange(nextPage: PageKey) {
     const pageContainer = document.getElementById('page-content');
@@ -1079,6 +1095,13 @@ function App() {
       const nextProfile = { ...prev, blockedPeers: nextBlocked, hiddenPeers: nextHidden };
       localStorage.setItem('myProfile', JSON.stringify(nextProfile));
       return nextProfile;
+    });
+    setContacts((prev) => prev.filter((contact) => contact.fingerprint !== peerId));
+    setPosts((prev) => prev.filter((post) => post.author !== peerId));
+    setDirectChats((prev) => {
+      const next = { ...prev };
+      delete next[peerId];
+      return next;
     });
   };
 
@@ -1398,7 +1421,6 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
-            onHidePeer={handleHidePeer}
             onBlockPeer={handleBlockPeer}
             onAddPeerAddress={handleAddPeerByAddress}
           />
@@ -1425,7 +1447,6 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             likedPosts={likedProfilePosts}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
             onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}
-            onHide={() => handleHidePeer(activeProfileContact.fingerprint)}
             onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
@@ -1448,11 +1469,19 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
             onFollowedAuthorsRatioChange={(value) => setMyProfile((prev) => ({
               ...prev,
-              feedMix: { ...prev.feedMix, followedAuthors: Math.max(0, Math.min(100, value)) }
+              feedMix: {
+                ...prev.feedMix,
+                followedAuthors: Math.max(0, Math.min(100, value)),
+                followedLikes: Math.max(0, 100 - Math.max(0, Math.min(100, value)))
+              }
             }))}
             onFollowedLikesRatioChange={(value) => setMyProfile((prev) => ({
               ...prev,
-              feedMix: { ...prev.feedMix, followedLikes: Math.max(0, Math.min(100, value)) }
+              feedMix: {
+                ...prev.feedMix,
+                followedLikes: Math.max(0, Math.min(100, value)),
+                followedAuthors: Math.max(0, 100 - Math.max(0, Math.min(100, value)))
+              }
             }))}
             onSaveProfile={() => {
               localStorage.setItem('myProfile', JSON.stringify(myProfile));

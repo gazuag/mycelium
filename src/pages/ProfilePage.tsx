@@ -9,14 +9,13 @@ interface ProfilePageProps {
   likedPosts: StoredPost[];
   onFollowToggle: () => void;
   onBlock: () => void;
-  onHide: () => void;
   onMessage: () => void;
   onAuthorClick: (peerId: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
 }
 
-export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBlock, onHide, onMessage, onAuthorClick, onLike, onDislike }: ProfilePageProps) {
+export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBlock, onMessage, onAuthorClick, onLike, onDislike }: ProfilePageProps) {
   const [activeTab, setActiveTab] = useState<'posts' | 'liked'>('posts');
 
   const visiblePosts = activeTab === 'posts' ? posts : likedPosts;
@@ -32,7 +31,6 @@ export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBloc
         contact={contact}
         onFollowToggle={onFollowToggle}
         onBlock={onBlock}
-        onHide={onHide}
         onMessage={onMessage}
       />
 

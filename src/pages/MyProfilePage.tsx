@@ -60,7 +60,7 @@ export function MyProfilePage({
           <textarea value={bio} onChange={(e) => onBioChange(e.target.value)} placeholder="Write a short bio" />
         </label>
         <h3>Home Feed Mix</h3>
-        <p className="note">Balance the two main home feed sources.</p>
+        <p className="note">Set how much of your home feed should come from people you follow; the rest comes from their recommendations.</p>
         <label>
           From people you follow: {followedAuthorsRatio}%
           <input
@@ -69,16 +69,6 @@ export function MyProfilePage({
             max={100}
             value={followedAuthorsRatio}
             onChange={(e) => onFollowedAuthorsRatioChange(Number(e.target.value) || 0)}
-          />
-        </label>
-        <label>
-          From what people you follow like: {followedLikesRatio}%
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={followedLikesRatio}
-            onChange={(e) => onFollowedLikesRatioChange(Number(e.target.value) || 0)}
           />
         </label>
         <div className="row">

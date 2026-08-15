@@ -6,11 +6,10 @@ interface PeerCardProps {
   onViewProfile: (peerId: string) => void;
   onMessage: (peerId: string) => void;
   onToggleFollow: (peerId: string) => void;
-  onHide?: (peerId: string) => void;
   onBlock?: (peerId: string) => void;
 }
 
-export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, onHide, onBlock }: PeerCardProps) {
+export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, onBlock }: PeerCardProps) {
   const displayName = contact.displayName || contact.fingerprint;
 
   return (
@@ -33,7 +32,6 @@ export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, on
         <button className="chip" onClick={() => onToggleFollow(contact.publicKey)} type="button">
           {contact.followed ? 'Unfollow' : 'Follow'}
         </button>
-        {onHide ? <button className="chip secondary" onClick={() => onHide(contact.fingerprint)} type="button">Hide</button> : null}
         {onBlock ? <button className="chip secondary" onClick={() => onBlock(contact.fingerprint)} type="button">Block</button> : null}
       </div>
     </article>
