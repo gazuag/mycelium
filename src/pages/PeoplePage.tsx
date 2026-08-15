@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Contact } from '../types';
 import { PeerCard } from '../components/PeerCard';
 import { CollapsibleSection } from '../components/CollapsibleSection';
@@ -13,13 +13,6 @@ interface PeoplePageProps {
 }
 
 export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
-  const [openGroups, setOpenGroups] = useState({
-    inbox: true,
-    friends: true,
-    following: true,
-    followers: true,
-    everyone: true
-  });
   const [newPeerAddress, setNewPeerAddress] = useState('');
 
   const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
@@ -27,6 +20,24 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow,
   const following = contacts.filter((c) => c.followed && !c.follower && (c.unreadMessages || 0) === 0);
   const followers = contacts.filter((c) => !c.followed && c.follower && (c.unreadMessages || 0) === 0);
   const everyoneElse = contacts.filter((c) => !c.followed && !c.follower && (c.unreadMessages || 0) === 0);
+
+  const [openGroups, setOpenGroups] = useState({
+    inbox: unreadInbox.length > 0,
+    friends: friends.length > 0,
+    following: following.length > 0,
+    followers: followers.length > 0,
+    everyone: everyoneElse.length > 0
+  });
+
+  useEffect(() => {
+    setOpenGroups((prev) => ({
+      inbox: unreadInbox.length > 0 ? true : false,
+      friends: friends.length > 0 ? true : false,
+      following: following.length > 0 ? true : false,
+      followers: followers.length > 0 ? true : false,
+      everyone: everyoneElse.length > 0 ? true : false
+    }));
+  }, [unreadInbox.length, friends.length, following.length, followers.length, everyoneElse.length]);
 
   const toggleGroup = (group: keyof typeof openGroups) => {
     setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }));

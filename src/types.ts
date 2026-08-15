@@ -65,6 +65,8 @@ export interface StoredPost extends SignedPost {
   notInterested?: boolean;
   seen?: boolean;
   authorDisplayName?: string;
+  isRecommendation?: boolean;
+  recommendedBy?: string;
 }
 
 export interface QueuedMessage {

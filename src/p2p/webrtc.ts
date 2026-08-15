@@ -17,8 +17,8 @@ export class PeerConnectionManager {
   private onData: (peerId: string, message: string) => void;
   private onPost: (peerId: string, post: SignedPost) => void;
   private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
-  private onRequestPosts: (peerId: string) => void;
-  private onPostsBatch: (peerId: string, posts: SignedPost[]) => void;
+  private onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void;
+  private onPostsBatch: (peerId: string, posts: SignedPost[], recommendations?: SignedPost[]) => void;
   private onSignal: (message: SignalMessage) => void;
   private onOpen: (peerId: string) => void;
   private onClose: (peerId: string) => void;
@@ -40,8 +40,8 @@ export class PeerConnectionManager {
     onSignal: (message: SignalMessage) => void,
     onPost: (peerId: string, post: SignedPost) => void,
     onMetadata: (peerId: string, metadata: PeerMetadata) => void,
-    onRequestPosts: (peerId: string) => void,
-    onPostsBatch: (peerId: string, posts: SignedPost[]) => void,
+    onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void,
+    onPostsBatch: (peerId: string, posts: SignedPost[], recommendations?: SignedPost[]) => void,
     onOpen: (peerId: string) => void,
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
@@ -164,11 +164,11 @@ export class PeerConnectionManager {
             return;
           }
           if (parsed?.type === 'request-posts') {
-            this.onRequestPosts(peerId);
+            this.onRequestPosts(peerId, typeof parsed.since === 'string' ? parsed.since : null, Number(parsed.limit ?? 100));
             return;
           }
           if (parsed?.type === 'posts-batch' && Array.isArray(parsed.posts)) {
-            this.onPostsBatch(peerId, parsed.posts);
+            this.onPostsBatch(peerId, parsed.posts, Array.isArray(parsed.recommendations) ? parsed.recommendations : undefined);
             return;
           }
         } catch {
@@ -239,13 +239,18 @@ export class PeerConnectionManager {
         return;
       }
       case 'POST_REQUEST': {
-        this.onRequestPosts(peerId);
+        this.onRequestPosts(
+          peerId,
+          typeof packet.payload?.since === 'string' ? packet.payload.since : null,
+          Number(packet.payload?.limit ?? 100)
+        );
         return;
       }
       case 'POST_BATCH': {
         const posts = packet.payload?.posts;
+        const recommendations = packet.payload?.recommendations;
         if (Array.isArray(posts)) {
-          this.onPostsBatch(peerId, posts as SignedPost[]);
+          this.onPostsBatch(peerId, posts as SignedPost[], Array.isArray(recommendations) ? recommendations as SignedPost[] : undefined);
         }
         return;
       }
@@ -364,23 +369,23 @@ export class PeerConnectionManager {
     this.sendLegacyPayload('metadata', { metadata });
   }
 
-  public sendRequestPosts() {
+  public sendRequestPosts(since: string | null = null, limit = 100) {
     if (this.remoteSupportsMyp) {
       void this.sendPacket('POST_REQUEST', {
-        since: null,
-        limit: 100
+        since,
+        limit
       });
       return;
     }
-    this.sendLegacyPayload('request-posts', {});
+    this.sendLegacyPayload('request-posts', { since, limit });
   }
 
-  public sendPostsBatch(posts: SignedPost[]) {
+  public sendPostsBatch(posts: SignedPost[], recommendations: SignedPost[] = []) {
     if (this.remoteSupportsMyp) {
-      void this.sendPacket('POST_BATCH', { posts });
+      void this.sendPacket('POST_BATCH', { posts, recommendations });
       return;
     }
-    this.sendLegacyPayload('posts-batch', { posts });
+    this.sendLegacyPayload('posts-batch', { posts, recommendations });
   }
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {

@@ -9,6 +9,7 @@ interface PostCardProps {
   onDislike: () => void;
   onReply: () => void;
   footerActions?: React.ReactNode;
+  recommendationLabel?: string;
 }
 
 export function PostCard({
@@ -19,10 +20,11 @@ export function PostCard({
   onLike,
   onDislike,
   onReply,
-  footerActions
+  footerActions,
+  recommendationLabel
 }: PostCardProps) {
   return (
-    <article className="post-card">
+    <article className={`post-card ${post.isRecommendation ? 'recommended' : ''}`}>
       <div className="post-card-header">
         <button className="ghost-link" onClick={() => onAuthorClick(authorId)} type="button">
           <strong>{authorName}</strong>
@@ -30,6 +32,10 @@ export function PostCard({
         </button>
         <span className="note">{new Date(post.timestamp).toLocaleString()}</span>
       </div>
+
+      {recommendationLabel ? (
+        <div className="recommendation-badge">{recommendationLabel}</div>
+      ) : null}
 
       <p className="post-content">{post.content}</p>
 

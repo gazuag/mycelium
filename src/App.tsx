@@ -128,6 +128,7 @@ function App() {
     settings: 0
   });
   const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
+  const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
   const selectedContactIdRef = useRef<string | null>(null);
@@ -505,42 +506,68 @@ function App() {
         }
         handlePeerMetadata(peer, metadata);
       },
-      async (peer: string) => {
-        const outgoingPosts = posts.map((stored) => ({
-          protocol: stored.protocol,
-          version: stored.version,
-          type: stored.type,
-          id: stored.id,
-          author: stored.author,
-          timestamp: stored.timestamp,
-          content: stored.content,
-          tags: stored.tags,
-          reaction: stored.reaction,
-          repostOf: stored.repostOf,
-          originalAuthor: stored.originalAuthor,
-          signature: stored.signature
-        }));
-        peerManagersRef.current[peer]?.sendPostsBatch(outgoingPosts);
+      async (peer: string, since: string | null = null, limit = 100) => {
+        if (blockedPeersRef.current.has(peer)) {
+          addLog(`Blocked peer ${peer} requested feed ignored`);
+          return;
+        }
+
+        const sinceMs = since ? Date.parse(since) : 0;
+        const feedPosts = posts
+          .filter((post) => !blockedPeerSet.has(post.author))
+          .filter((post) => post.author === identity?.id || contactsRef.current.some((contact) => contact.fingerprint === post.author && contact.followed))
+          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, Math.max(1, limit));
+
+        const recommendations = posts
+          .filter((post) => post.isRecommendation && post.recommendedBy)
+          .filter((post) => !blockedPeerSet.has(post.author))
+          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
+          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+          .slice(0, Math.max(1, limit));
+
+        const manager = peerManagersRef.current[peer];
+        if (manager) {
+          manager.sendPostsBatch(feedPosts, recommendations);
+          addLog(`Sent ${feedPosts.length} posts and ${recommendations.length} recommendations to ${peer}`);
+          localStorage.setItem(`myceliumHomeSync:${peer}`, new Date().toISOString());
+        }
       },
-      async (peer: string, posts: SignedPost[]) => {
-        const newStoredPosts: StoredPost[] = [];
-        for (const post of posts) {
+      async (peer: string, posts: SignedPost[], recommendations: SignedPost[] = []) => {
+        const uniqueById = new Map<string, StoredPost>();
+        const allPosts = [...posts, ...recommendations];
+
+        for (const post of allPosts) {
           const valid = await verifySignedPost(post);
           const stored: StoredPost = {
             ...post,
             source: 'peer',
             receivedAt: new Date().toISOString(),
-            valid
+            valid,
+            isRecommendation: recommendations.some((recommendation) => recommendation.id === post.id),
+            recommendedBy: recommendations.some((recommendation) => recommendation.id === post.id) ? peer : undefined
           };
-          await savePost(stored);
-          newStoredPosts.push(stored);
+          uniqueById.set(stored.id, stored);
         }
+
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} batch ignored`);
           return;
         }
-        setPosts((prev) => [...newStoredPosts, ...prev.filter((existing) => !newStoredPosts.some((p) => p.id === existing.id))]);
-        addLog(`Synchronized ${posts.length} posts from ${peer}`);
+
+        setPosts((prev) => {
+          const merged = new Map<string, StoredPost>();
+          for (const existing of prev) {
+            merged.set(existing.id, existing);
+          }
+          for (const next of uniqueById.values()) {
+            merged.set(next.id, next);
+          }
+          return [...merged.values()].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        });
+        localStorage.setItem(`myceliumHomeSync:${peer}`, new Date().toISOString());
+        addLog(`Received ${allPosts.length} posts and recommendations from ${peer}`);
       },
       async (peer: string) => {
         setDataChannelOpen(true);
@@ -852,6 +879,7 @@ function App() {
 
   useEffect(() => {
     if (!identity?.id) return;
+    void handleRefreshHomeFeed();
     void handleFetchDiscovery();
   }, [identity?.id]);
 
@@ -859,6 +887,22 @@ function App() {
     if (page !== 'discover' || discoveryPosts.length > 0) return;
     void handleFetchDiscovery();
   }, [page, discoveryPosts.length]);
+
+  useEffect(() => {
+    if (!identity?.id) return;
+    const interval = window.setInterval(() => {
+      const lastSync = localStorage.getItem('myceliumLastHomeSync');
+      if (!lastSync) {
+        void handleRefreshHomeFeed();
+        return;
+      }
+      const elapsedMs = Date.now() - new Date(lastSync).getTime();
+      if (elapsedMs >= 10 * 60 * 1000) {
+        void handleRefreshHomeFeed();
+      }
+    }, 60000);
+    return () => window.clearInterval(interval);
+  }, [identity?.id]);
 
   async function handleAddContactFromKey(publicKey: string, displayName?: string) {
     if (blockedPeersRef.current.has(publicKey)) {
@@ -1172,6 +1216,33 @@ function App() {
       pageContainer.scrollTop = pageScrollPositions[page] || 0;
     }
   }, [page, pageScrollPositions]);
+
+  async function handleRefreshHomeFeed() {
+    if (!identity) return;
+    setHomeSyncBusy(true);
+
+    try {
+      const socket = signallingSocketRef.current;
+      const followedPeers = contactsRef.current.filter((contact) => contact.followed && contact.fingerprint !== identity.id);
+
+      if (!socket || socket.readyState !== WebSocket.OPEN || followedPeers.length === 0) {
+        return;
+      }
+
+      for (const contact of followedPeers) {
+        const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
+        const since = localStorage.getItem(`myceliumHomeSync:${contact.fingerprint}`);
+        if (manager && socket.readyState === WebSocket.OPEN) {
+          manager.sendRequestPosts(since, 100);
+          addLog(`Requested home updates from ${contact.fingerprint}${since ? ` since ${since}` : ' (last 100)'}`);
+        }
+      }
+
+      localStorage.setItem('myceliumLastHomeSync', new Date().toISOString());
+    } finally {
+      setHomeSyncBusy(false);
+    }
+  }
 
   async function handleFetchDiscovery() {
     const socket = signallingSocketRef.current;
@@ -1558,13 +1629,14 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={handleCreatePost}
-            onRefreshPosts={handleFetchDiscovery}
+            onRefreshPosts={handleRefreshHomeFeed}
             canCreatePost={Boolean(identity)}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onReply={() => {}}
             onHide={handleHidePost}
+            isRefreshing={homeSyncBusy}
           />
         )}
 
@@ -1582,6 +1654,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
         {page === 'discover' && (
           <DiscoverPage
             discoveryPosts={discoverFeedPosts}
+            contacts={contacts}
             onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onAddContact={handleAddContactFromKey}

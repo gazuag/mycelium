@@ -9,13 +9,14 @@ interface HomePageProps {
   postText: string;
   onPostTextChange: (value: string) => void;
   onSubmitPost: (publish: boolean) => void;
-  onRefreshPosts: () => void;
+  onRefreshPosts: () => Promise<void> | void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
   onReply: (postId: string) => void;
   onHide: (postId: string) => void;
+  isRefreshing?: boolean;
 }
 
 export function HomePage({
@@ -30,7 +31,8 @@ export function HomePage({
   onLike,
   onDislike,
   onReply,
-  onHide
+  onHide,
+  isRefreshing = false
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
   const [publishToDiscovery, setPublishToDiscovery] = useState(true);
@@ -43,7 +45,9 @@ export function HomePage({
         <h2>Home</h2>
         <p className="note">New posts from people you follow.</p>
         <div className="page-header-actions">
-          <button className="btn secondary" type="button" onClick={onRefreshPosts}>Refresh posts</button>
+          <button className="btn secondary" type="button" onClick={() => void onRefreshPosts()} disabled={isRefreshing}>
+            {isRefreshing ? 'Refreshing…' : 'Refresh posts'}
+          </button>
         </div>
       </div>
 
@@ -85,6 +89,14 @@ export function HomePage({
             const authorName = matchingContact
               ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint)
               : displayNameOrFallback(undefined, post.author);
+            const recommendationLabel = post.isRecommendation && post.recommendedBy
+              ? `Recommended by ${displayNameOrFallback(
+                  contacts.find((contact) => contact.fingerprint === post.recommendedBy)?.displayName,
+                  post.recommendedBy
+                )}`
+              : post.isRecommendation
+                ? 'Recommended'
+                : undefined;
 
             return (
               <PostCard
@@ -96,6 +108,7 @@ export function HomePage({
                 onLike={() => onLike(post.id)}
                 onDislike={() => { onDislike(post.id); onHide(post.id); }}
                 onReply={() => onReply(post.id)}
+                recommendationLabel={recommendationLabel}
               />
             );
           })}

@@ -1,8 +1,10 @@
-import type { StoredPost } from '../types';
+import type { Contact, StoredPost } from '../types';
 import { PostCard } from '../components/PostCard';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface DiscoverPageProps {
   discoveryPosts: StoredPost[];
+  contacts: Contact[];
   onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
   onAddContact: (publicKey: string) => void;
@@ -13,7 +15,7 @@ interface DiscoverPageProps {
   onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, onRefreshDiscovery, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -30,26 +32,33 @@ export function DiscoverPage({ discoveryPosts, onRefreshDiscovery, onAuthorClick
         </div>
       ) : (
         <div className="feed-list">
-          {discoveryPosts.map((post) => (
-            <PostCard
-              key={post.id}
-              post={post}
-              authorName={post.author.slice(0, 16)}
-              authorId={post.author}
-              onAuthorClick={onAuthorClick}
-              onLike={() => onLike(post.id)}
-              onDislike={() => onDislike(post.id)}
-              onReply={() => {} }
-              footerActions={
-                <div className="discover-actions">
-                  <button className="chip" type="button" onClick={() => onAddContact(post.author)}>Add contact</button>
-                  <button className="chip" type="button" onClick={() => onFollow(post.author)}>Follow</button>
-                  <button className="chip" type="button" onClick={() => onSave(post)}>Save</button>
-                  <button className="chip secondary" type="button" onClick={() => onHide(post.id)}>Hide</button>
-                </div>
-              }
-            />
-          ))}
+          {discoveryPosts.map((post) => {
+            const matchedContact = contacts.find((contact) => contact.fingerprint === post.author);
+            const authorName = matchedContact
+              ? displayNameOrFallback(matchedContact.displayName, matchedContact.fingerprint)
+              : displayNameOrFallback(undefined, post.author);
+
+            return (
+              <PostCard
+                key={post.id}
+                post={post}
+                authorName={authorName}
+                authorId={post.author}
+                onAuthorClick={onAuthorClick}
+                onLike={() => onLike(post.id)}
+                onDislike={() => onDislike(post.id)}
+                onReply={() => {} }
+                footerActions={
+                  <div className="discover-actions">
+                    <button className="chip" type="button" onClick={() => onAddContact(post.author)}>Add contact</button>
+                    <button className="chip" type="button" onClick={() => onFollow(post.author)}>Follow</button>
+                    <button className="chip" type="button" onClick={() => onSave(post)}>Save</button>
+                    <button className="chip secondary" type="button" onClick={() => onHide(post.id)}>Hide</button>
+                  </div>
+                }
+              />
+            );
+          })}
         </div>
       )}
     </section>

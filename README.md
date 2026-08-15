@@ -294,6 +294,7 @@ Returns multiple posts.
 
 Payload:
 - posts[]
+- recommendations[]
 
 ⸻
 
