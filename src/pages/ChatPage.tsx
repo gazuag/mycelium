@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { Contact } from '../types';
 import { ChatBubble } from '../components/ChatBubble';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface ChatPageProps {
   contact: Contact;
@@ -36,7 +37,7 @@ export function ChatPage({ contact, messages, messageDraft, onMessageChange, onS
     }
   };
 
-  const displayName = contact.displayName ?? contact.fingerprint.slice(0, 16);
+  const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
     <section className="chat-page">

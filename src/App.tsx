@@ -300,6 +300,10 @@ function App() {
 
   const addKnownPeer = async (peerId: string) => {
     if (!peerId || peerId === identity?.id) return;
+    if (blockedPeersRef.current.has(peerId)) {
+      addLog(`Ignoring blocked peer from network: ${peerId}`);
+      return;
+    }
     if (!isValidPeerFingerprint(peerId)) {
       addLog(`Ignoring invalid peer id from network: ${peerId}`);
       return;
@@ -471,6 +475,10 @@ function App() {
         }
       },
       async (peer: string, post: SignedPost) => {
+        if (blockedPeersRef.current.has(peer)) {
+          addLog(`Blocked peer ${peer} post ignored`);
+          return;
+        }
         const valid = await verifySignedPost(post);
         const stored: StoredPost = {
           ...post,
@@ -522,6 +530,10 @@ function App() {
           };
           await savePost(stored);
           newStoredPosts.push(stored);
+        }
+        if (blockedPeersRef.current.has(peer)) {
+          addLog(`Blocked peer ${peer} batch ignored`);
+          return;
         }
         setPosts((prev) => [...newStoredPosts, ...prev.filter((existing) => !newStoredPosts.some((p) => p.id === existing.id))]);
         addLog(`Synchronized ${posts.length} posts from ${peer}`);
@@ -840,6 +852,10 @@ function App() {
   }, [page, discoveryPosts.length]);
 
   async function handleAddContactFromKey(publicKey: string, displayName?: string) {
+    if (blockedPeersRef.current.has(publicKey)) {
+      addLog(`Refusing to add blocked peer: ${publicKey}`);
+      return;
+    }
     const fingerprint = await deriveFingerprint(publicKey);
     const contact: Contact = {
       publicKey,
@@ -857,6 +873,10 @@ function App() {
     if (!identity) return;
     const normalized = address.trim();
     if (!normalized) return;
+    if (blockedPeersRef.current.has(normalized)) {
+      addLog(`Refusing to add blocked peer address: ${normalized}`);
+      return;
+    }
 
     let fingerprint = normalized;
     let publicKey = normalized;
@@ -990,6 +1010,11 @@ function App() {
   const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
   const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !blockedPeerSet.has(post.author));
 
+  const visibleContacts = useMemo(
+    () => contacts.filter((contact) => !blockedPeerSet.has(contact.fingerprint)),
+    [contacts, blockedPeerSet]
+  );
+
   const discoverFeedPosts = useMemo(() => {
     return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [visibleDiscoveryPosts]);
@@ -1089,6 +1114,11 @@ function App() {
 
   const handleBlockPeer = (peerId: string) => {
     if (!peerId) return;
+    const manager = peerManagersRef.current[peerId];
+    if (manager) {
+      manager.closeConnection();
+      delete peerManagersRef.current[peerId];
+    }
     setMyProfile((prev) => {
       const nextBlocked = Array.from(new Set([...prev.blockedPeers, peerId]));
       const nextHidden = Array.from(new Set([...prev.hiddenPeers, peerId]));
@@ -1098,11 +1128,20 @@ function App() {
     });
     setContacts((prev) => prev.filter((contact) => contact.fingerprint !== peerId));
     setPosts((prev) => prev.filter((post) => post.author !== peerId));
+    setDiscoveryPosts((prev) => prev.filter((post) => post.author !== peerId));
     setDirectChats((prev) => {
       const next = { ...prev };
       delete next[peerId];
       return next;
     });
+    setMessageQueue((prev) => {
+      const next = { ...prev };
+      delete next[peerId];
+      return next;
+    });
+    setSelectedContactId((current) => (current === peerId ? null : current));
+    setChatContactId((current) => (current === peerId ? null : current));
+    setProfileContactId((current) => (current === peerId ? null : current));
   };
 
   const handleUnblockPeer = (peerId: string) => {
@@ -1110,7 +1149,8 @@ function App() {
     setMyProfile((prev) => {
       const nextProfile = {
         ...prev,
-        blockedPeers: prev.blockedPeers.filter((id) => id !== peerId)
+        blockedPeers: prev.blockedPeers.filter((id) => id !== peerId),
+        hiddenPeers: prev.hiddenPeers.filter((id) => id !== peerId)
       };
       localStorage.setItem('myProfile', JSON.stringify(nextProfile));
       return nextProfile;
@@ -1160,6 +1200,10 @@ function App() {
   }
 
   async function handleSaveDiscoveryPost(post: SignedPost) {
+    if (blockedPeersRef.current.has(post.author)) {
+      addLog(`Blocked peer ${post.author} discovery post ignored`);
+      return;
+    }
     const valid = await verifySignedPost(post);
     const stored: StoredPost = {
       ...post,
@@ -1417,7 +1461,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
 
         {page === 'people' && (
           <PeoplePage
-            contacts={contacts}
+            contacts={visibleContacts}
             onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}

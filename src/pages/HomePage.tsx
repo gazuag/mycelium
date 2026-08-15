@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Contact, StoredPost } from '../types';
 import { PostCard } from '../components/PostCard';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface HomePageProps {
   posts: StoredPost[];
@@ -80,17 +81,16 @@ export function HomePage({
       ) : (
         <div className="feed-list">
           {visiblePosts.map((post) => {
-            const author = post.author === 'local' || post.author === contacts.find((c) => c.fingerprint === post.author)?.fingerprint ?
-              (contacts.find((c) => c.fingerprint === post.author)?.displayName ?? post.author.slice(0, 16)) :
-              post.author.slice(0, 16);
+            const matchingContact = contacts.find((c) => c.fingerprint === post.author);
+            const authorName = matchingContact
+              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint)
+              : displayNameOrFallback(undefined, post.author);
 
             return (
               <PostCard
                 key={post.id}
                 post={post}
-                authorName={post.author === (contacts.find((c) => c.fingerprint === post.author)?.fingerprint) ?
-                  contacts.find((c) => c.fingerprint === post.author)?.displayName ?? 'Unknown' :
-                  post.author === post.author ? author : author}
+                authorName={authorName}
                 authorId={post.author}
                 onAuthorClick={onAuthorClick}
                 onLike={() => onLike(post.id)}

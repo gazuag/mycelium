@@ -1,4 +1,5 @@
 import type { Contact } from '../types';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
 
 interface ProfileHeaderProps {
@@ -9,7 +10,7 @@ interface ProfileHeaderProps {
 }
 
 export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: ProfileHeaderProps) {
-  const displayName = contact.displayName || contact.fingerprint;
+  const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
     <section className="profile-header card">

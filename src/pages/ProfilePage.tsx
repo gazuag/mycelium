@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Contact, StoredPost } from '../types';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface ProfilePageProps {
   contact: Contact;
@@ -24,7 +25,7 @@ export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBloc
     <section className="page-view profile-page">
       <div className="page-header">
         <h2>Profile</h2>
-        <p className="note">{contact.displayName ?? contact.fingerprint.slice(0, 16)}</p>
+        <p className="note">{displayNameOrFallback(contact.displayName, contact.fingerprint)}</p>
       </div>
 
       <ProfileHeader
@@ -47,7 +48,7 @@ export function ProfilePage({ contact, posts, likedPosts, onFollowToggle, onBloc
             <PostCard
               key={post.id}
               post={post}
-              authorName={contact.displayName ?? contact.fingerprint.slice(0, 16)}
+              authorName={displayNameOrFallback(contact.displayName, contact.fingerprint)}
               authorId={contact.fingerprint}
               onAuthorClick={onAuthorClick}
               onLike={() => onLike(post.id)}

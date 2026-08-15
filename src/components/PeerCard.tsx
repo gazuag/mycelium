@@ -1,4 +1,5 @@
 import type { Contact } from '../types';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
 
 interface PeerCardProps {
@@ -10,7 +11,7 @@ interface PeerCardProps {
 }
 
 export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, onBlock }: PeerCardProps) {
-  const displayName = contact.displayName || contact.fingerprint;
+  const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
     <article className="peer-card">
