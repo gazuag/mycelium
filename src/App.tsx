@@ -16,6 +16,7 @@ import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { canonicalize } from './p2p/protocol';
+import { fingerprintToHumanName } from './utils/fingerprintNames';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -218,14 +219,17 @@ function App() {
     });
   };
 
-  const getLocalDisplayName = () => myProfile.displayName.trim() || identity?.id.slice(0, 12) || 'Me';
+  const generatedDisplayName = useMemo(() => identity ? fingerprintToHumanName(identity.id) : 'Me', [identity]);
+
+  const getLocalDisplayName = () => myProfile.displayName.trim() || generatedDisplayName || 'Me';
 
   const buildPeerMetadata = (peerId: string) => {
     const p = myProfileRef.current;
     const id = identityRef.current;
+    const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
     return {
       author: id?.id ?? '',
-      displayName: p.displayName.trim() || id?.id.slice(0, 12) || 'Me',
+      displayName: p.displayName.trim() || fallbackName || 'Me',
       following: contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
       bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
@@ -1229,7 +1233,47 @@ function App() {
 
   async function handleExportIdentity() {
     if (!identity) return;
-    const blob = new Blob([JSON.stringify(identity)], { type: 'application/json' });
+
+    const exportPayload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      identity: {
+        key: identity.key,
+        publicKey: identity.publicKey,
+        privateKey: identity.privateKey,
+        id: identity.id
+      },
+      profile: {
+        displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity.id),
+        bio: myProfile.bio.trim(),
+        feedMix: myProfile.feedMix,
+        blockedPeers: myProfile.blockedPeers,
+        hiddenPeers: myProfile.hiddenPeers
+      },
+      contacts: contacts.map((contact) => ({
+        publicKey: contact.publicKey,
+        fingerprint: contact.fingerprint,
+        displayName: contact.displayName?.trim() || undefined,
+        followed: Boolean(contact.followed),
+        follower: Boolean(contact.follower),
+        online: Boolean(contact.online),
+        connected: Boolean(contact.connected),
+        addedAt: contact.addedAt,
+        lastConnectionStatus: contact.lastConnectionStatus,
+        lastSeen: contact.lastSeen,
+        unreadMessages: contact.unreadMessages ?? 0,
+        queuedMessages: contact.queuedMessages ?? 0,
+        profile: contact.profile
+          ? {
+              ...contact.profile,
+              displayName: contact.profile.displayName?.trim() || undefined,
+              bio: contact.profile.bio?.trim() || undefined
+            }
+          : undefined
+      }))
+    };
+
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
@@ -1250,9 +1294,69 @@ function App() {
       const text = await file.text();
       try {
         const imported = JSON.parse(text);
-        if (imported?.publicKey && imported?.privateKey && imported?.id) {
-          await saveIdentity(imported);
-          setIdentity(imported);
+        const importedIdentity = imported?.identity ?? imported;
+
+        if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
+          const nextIdentity = {
+            key: importedIdentity.key ?? 'local',
+            publicKey: importedIdentity.publicKey,
+            privateKey: importedIdentity.privateKey,
+            id: importedIdentity.id
+          };
+
+          await saveIdentity(nextIdentity);
+          setIdentity(nextIdentity);
+
+          const profileData = imported?.profile ?? {};
+          const safeFeedMix = typeof profileData.feedMix === 'object' && profileData.feedMix !== null
+            ? {
+                followedAuthors: Number(profileData.feedMix.followedAuthors ?? DEFAULT_FEED_MIX.followedAuthors),
+                followedLikes: Number(profileData.feedMix.followedLikes ?? DEFAULT_FEED_MIX.followedLikes),
+                discoveryRandom: Number(profileData.feedMix.discoveryRandom ?? DEFAULT_FEED_MIX.discoveryRandom)
+              }
+            : { ...DEFAULT_FEED_MIX };
+
+          const nextProfile = {
+            displayName: typeof profileData.displayName === 'string' ? profileData.displayName : '',
+            bio: typeof profileData.bio === 'string' ? profileData.bio : '',
+            feedMix: {
+              followedAuthors: Math.max(0, Math.min(100, Number(safeFeedMix.followedAuthors) || DEFAULT_FEED_MIX.followedAuthors)),
+              followedLikes: Math.max(0, Math.min(100, Number(safeFeedMix.followedLikes) || DEFAULT_FEED_MIX.followedLikes)),
+              discoveryRandom: Math.max(0, Math.min(100, Number(safeFeedMix.discoveryRandom) || DEFAULT_FEED_MIX.discoveryRandom))
+            },
+            blockedPeers: Array.isArray(profileData.blockedPeers)
+              ? profileData.blockedPeers.filter((value: unknown): value is string => typeof value === 'string')
+              : [],
+            hiddenPeers: Array.isArray(profileData.hiddenPeers)
+              ? profileData.hiddenPeers.filter((value: unknown): value is string => typeof value === 'string')
+              : []
+          };
+
+          setMyProfile(nextProfile);
+          localStorage.setItem('myProfile', JSON.stringify(nextProfile));
+
+          const importedContacts: Contact[] = Array.isArray(imported?.contacts)
+            ? imported.contacts.map((contact: any): Contact => ({
+                publicKey: contact.publicKey ?? contact.fingerprint ?? '',
+                fingerprint: contact.fingerprint ?? contact.publicKey ?? '',
+                displayName: typeof contact.displayName === 'string' ? contact.displayName : undefined,
+                profile: contact.profile ?? undefined,
+                addedAt: typeof contact.addedAt === 'string' ? contact.addedAt : new Date().toISOString(),
+                followed: Boolean(contact.followed),
+                follower: Boolean(contact.follower),
+                online: Boolean(contact.online),
+                connected: Boolean(contact.connected),
+                lastConnectionStatus: typeof contact.lastConnectionStatus === 'string' ? contact.lastConnectionStatus : undefined,
+                lastSeen: typeof contact.lastSeen === 'string' ? contact.lastSeen : undefined,
+                unreadMessages: Number(contact.unreadMessages ?? 0),
+                queuedMessages: Number(contact.queuedMessages ?? 0)
+              })).filter((contact: Contact) => Boolean(contact.fingerprint && contact.publicKey))
+            : [];
+
+          const restoredContacts = dedupeContactsByFingerprint(importedContacts);
+          setContacts(restoredContacts);
+          await Promise.all(restoredContacts.map(async (contact) => saveContact(contact)));
+
           addLog('Identity imported successfully');
         } else {
           addLog('Identity import failed: invalid file format');
@@ -1528,7 +1632,15 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
               }
             }))}
             onSaveProfile={() => {
-              localStorage.setItem('myProfile', JSON.stringify(myProfile));
+              const persistedProfile = {
+                ...myProfile,
+                displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity?.id ?? ''),
+                bio: myProfile.bio.trim(),
+                blockedPeers: myProfile.blockedPeers,
+                hiddenPeers: myProfile.hiddenPeers
+              };
+              setMyProfile(persistedProfile);
+              localStorage.setItem('myProfile', JSON.stringify(persistedProfile));
               addLog('Profile saved locally');
               contacts.forEach((contact) => {
                 if (!contact.connected) return;
@@ -1560,6 +1672,10 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onClearLogs={() => setLogs([])}
             signalEndpoint={signalEndpoint}
             discoveryEndpoint={discoveryEndpoint}
+            connectionStatus={connectionStatus}
+            signallingStatus={signallingStatus}
+            connectedPeers={connectedPeersCount}
+            syncStatus={syncStatus}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());

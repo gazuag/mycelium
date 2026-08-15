@@ -106,6 +106,44 @@ input {
   flex-wrap: wrap;
 }
 
+.network-status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.8rem 0.95rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.05);
+  font-size: 0.95rem;
+}
+
+.network-status.good {
+  background: rgba(39, 180, 115, 0.12);
+  border-color: rgba(39, 180, 115, 0.3);
+}
+
+.network-status.warn {
+  background: rgba(240, 180, 60, 0.12);
+  border-color: rgba(240, 180, 60, 0.3);
+}
+
+.network-status.bad {
+  background: rgba(220, 85, 85, 0.12);
+  border-color: rgba(220, 85, 85, 0.3);
+}
+
+.status-light {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0.15rem rgba(255,255,255,0.08);
+}
+
+.network-status.good .status-light { color: #42d392; }
+.network-status.warn .status-light { color: #f4c95d; }
+.network-status.bad .status-light { color: #e15d5d; }
+
 .log-box {
   max-height: 220px;
   overflow-y: auto;
@@ -148,6 +186,15 @@ body, html, #root {
   padding-bottom: calc(1rem + 88px);
   display: flex;
   flex-direction: column;
+}
+
+.page-content::after,
+.chat-page::after {
+  content: '';
+  display: block;
+  height: clamp(72px, 12vh, 96px);
+  flex-shrink: 0;
+  background: transparent;
 }
 
 .app-header {

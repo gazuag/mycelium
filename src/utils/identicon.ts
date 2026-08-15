@@ -1,29 +1,41 @@
 export function createIdenticonDataUrl(seed: string, size = 48) {
   const normalizedSeed = (seed || 'mycelium').trim() || 'mycelium';
-  const hash = Array.from(normalizedSeed).reduce((total, char) => total + char.charCodeAt(0), 0);
-  const colors = ['#1f7f59', '#4ecdc4', '#f4d35e', '#ee6c4d', '#7c6ef5', '#9ad0c2'];
-  const background = '#0d1b15';
-  const color = colors[hash % colors.length];
 
-  const cells = Array.from({ length: 25 }, (_, index) => {
-    const value = (hash + index * 17) % 7;
-    return value > 3;
-  });
+  let hash = 14695981039346656037n;
+  for (let i = 0; i < normalizedSeed.length; i += 1) {
+    hash ^= BigInt(normalizedSeed.charCodeAt(i));
+    hash *= 1099511628211n;
+  }
 
-  const squares = cells
-    .map((filled, index) => {
-      if (!filled) return '';
-      const row = Math.floor(index / 5);
-      const col = index % 5;
-      const x = col * 10 + 1;
-      const y = row * 10 + 1;
-      return `<rect x="${x}" y="${y}" width="8" height="8" rx="1.5" fill="${color}" />`;
-    })
-    .join('');
+  const binary = hash.toString(2).padStart(64, '0');
+  const colorTable: Record<string, { dark: string; light: string }> = {
+    '000': { dark: '#000000', light: '#aaaaaa' },
+    '001': { dark: '#000088', light: '#aaaaff' },
+    '010': { dark: '#008800', light: '#aaffaa' },
+    '100': { dark: '#880000', light: '#ffaaaa' },
+    '011': { dark: '#008888', light: '#aaffff' },
+    '101': { dark: '#880088', light: '#ffaaff' },
+    '110': { dark: '#888800', light: '#ffffaa' },
+    '111': { dark: '#888888', light: '#ffffff' }
+  };
+
+  const squares = Array.from({ length: 16 }, (_, index) => {
+    const chunk = binary.slice(index * 4, index * 4 + 4);
+    const variantBit = chunk[0];
+    const familyBits = chunk.slice(1);
+    const palette = colorTable[familyBits] ?? colorTable['000'];
+    const fill = variantBit === '0' ? palette.dark : palette.light;
+
+    const row = Math.floor(index / 4);
+    const column = index % 4;
+    const x = 5 + column * 10;
+    const y = 5 + row * 10;
+    return `<rect x="${x}" y="${y}" width="8" height="8" rx="1.5" fill="${fill}" />`;
+  }).join('');
 
   const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 50 50" role="img" aria-label="Identity icon">
-      <rect width="50" height="50" rx="8" fill="${background}" />
+    <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 48 48" role="img" aria-label="Identity icon">
+      <rect width="48" height="48" rx="8" fill="#0b1020" />
       ${squares}
     </svg>
   `;

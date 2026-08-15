@@ -4,6 +4,10 @@ interface SettingsPageProps {
   onClearLogs: () => void;
   signalEndpoint: string;
   discoveryEndpoint: string;
+  connectionStatus: string;
+  signallingStatus: string;
+  connectedPeers: number;
+  syncStatus: string;
 }
 
 export function SettingsPage({
@@ -11,13 +15,36 @@ export function SettingsPage({
   logs,
   onClearLogs,
   signalEndpoint,
-  discoveryEndpoint
+  discoveryEndpoint,
+  connectionStatus,
+  signallingStatus,
+  connectedPeers,
+  syncStatus
 }: SettingsPageProps) {
+  const isGood = connectionStatus === 'connected' && signallingStatus === 'connected';
+  const isWarning = connectionStatus === 'signalling' || connectionStatus === 'connecting' || signallingStatus === 'connecting' || signallingStatus === 'reconnecting';
+  const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
+  const summary = isGood
+    ? `Connected to server and ${connectedPeers} peers`
+    : 'Disconnected. See diagnostics';
+
   return (
     <section className="page-view">
       <div className="page-header">
-        <h2>Settings</h2>
-        <p className="note">App-level options and diagnostics.</p>
+        <h2>Diagnostics</h2>
+        <p className="note">Runtime status, endpoints, and app diagnostics.</p>
+      </div>
+
+      <div className="card">
+        <h3>Connection status</h3>
+        <div className={`network-status ${tone}`}>
+          <span className="status-light" aria-hidden="true" />
+          <strong>{summary}</strong>
+        </div>
+        <p className="note">Network: {connectionStatus}</p>
+        <p className="note">Signal: {signallingStatus}</p>
+        <p className="note">Peers: {connectedPeers}</p>
+        <p className="note">Sync: {syncStatus}</p>
       </div>
 
       <div className="card">

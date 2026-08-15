@@ -43,6 +43,8 @@ export function MyProfilePage({
   onClearIdentity,
   onUnblockPeer
 }: MyProfilePageProps) {
+  const generatedNickname = identityId ? identityId.replace(/:/g, '').slice(0, 16) : 'Peer';
+
   return (
     <section className="page-view">
       <div className="page-header">
@@ -53,7 +55,11 @@ export function MyProfilePage({
       <div className="card profile-edit-card">
         <label>
           Nickname
-          <input value={nickname} onChange={(e) => onNicknameChange(e.target.value)} placeholder="Your display name" />
+          <input
+            value={nickname || generatedNickname}
+            onChange={(e) => onNicknameChange(e.target.value)}
+            placeholder="Your display name"
+          />
         </label>
         <label>
           Bio

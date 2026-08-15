@@ -27,6 +27,13 @@ export function AppHeader({
   onOpenSettings,
   onOpenPeopleInbox
 }: AppHeaderProps) {
+  const isGood = connectionStatus === 'connected' && signallingStatus === 'connected';
+  const isWarning = connectionStatus === 'signalling' || connectionStatus === 'connecting' || signallingStatus === 'connecting' || signallingStatus === 'reconnecting';
+  const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
+  const summary = isGood
+    ? `Connected to server and ${connectedPeers} peers`
+    : 'Disconnected. See diagnostics';
+
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
       <div className="app-header-top">
@@ -40,23 +47,9 @@ export function AppHeader({
       </div>
 
       <div className={`app-header-body ${collapsed ? 'collapsed' : ''}`}>
-        <div className="status-row">
-          <div className="status-pill">
-            <span>Net</span>
-            <strong>{connectionStatus}</strong>
-          </div>
-          <div className="status-pill secondary">
-            <span>Signal</span>
-            <strong>{signallingStatus}</strong>
-          </div>
-          <div className="status-pill secondary">
-            <span>Peers</span>
-            <strong>{connectedPeers}</strong>
-          </div>
-          <div className="status-pill secondary">
-            <span>Sync</span>
-            <strong>{syncStatus}</strong>
-          </div>
+        <div className={`network-status ${tone}`}>
+          <span className="status-light" aria-hidden="true" />
+          <strong>{summary}</strong>
         </div>
 
         {myFingerprint && (
@@ -71,7 +64,7 @@ export function AppHeader({
             <button className="btn secondary" onClick={onOpenPeopleInbox}>Unread inbox ({unreadCount})</button>
           ) : null}
           <button className="btn" onClick={onOpenMyProfile}>My profile</button>
-          <button className="btn secondary" onClick={onOpenSettings}>Settings</button>
+          <button className="btn secondary" onClick={onOpenSettings}>Diagnostics</button>
         </div>
       </div>
     </header>
