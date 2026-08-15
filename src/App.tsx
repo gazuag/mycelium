@@ -139,24 +139,6 @@ function App() {
   }, [selectedContactId]);
 
   useEffect(() => {
-    const updateAppViewportHeight = () => {
-      const viewportHeight = window.visualViewport?.height ?? window.innerHeight ?? 0;
-      document.documentElement.style.setProperty('--app-height', `${viewportHeight}px`);
-    };
-
-    updateAppViewportHeight();
-    window.addEventListener('resize', updateAppViewportHeight);
-    window.visualViewport?.addEventListener('resize', updateAppViewportHeight);
-    window.visualViewport?.addEventListener('scroll', updateAppViewportHeight);
-
-    return () => {
-      window.removeEventListener('resize', updateAppViewportHeight);
-      window.visualViewport?.removeEventListener('resize', updateAppViewportHeight);
-      window.visualViewport?.removeEventListener('scroll', updateAppViewportHeight);
-    };
-  }, []);
-
-  useEffect(() => {
     pageRef.current = page;
   }, [page]);
 

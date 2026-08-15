@@ -1,5 +1,5 @@
 :root {
-  --app-height: 100vh;
+  --app-height: 100dvh;
   color-scheme: dark;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: #07120d;
@@ -7,13 +7,19 @@
   line-height: 1.6;
 }
 
+@supports (height: 100svh) {
+  :root {
+    --app-height: 100svh;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
 
-body, html, #root {
-  height: 100%;
-  min-height: 100%;
+html, body, #root {
+  height: var(--app-height);
+  min-height: var(--app-height);
   margin: 0;
   overflow: hidden;
 }
@@ -177,9 +183,11 @@ body, html, #root {
 }
 
 .app-shell {
-  min-height: 100vh;
   display: flex;
   flex-direction: column;
+  height: var(--app-height);
+  min-height: var(--app-height);
+  width: 100%;
   background: #07120d;
 }
 
