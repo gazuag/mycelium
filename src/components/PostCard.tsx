@@ -1,4 +1,5 @@
 import type { StoredPost } from '../types';
+import { IdentityAvatar } from './IdentityAvatar';
 
 interface PostCardProps {
   post: StoredPost;
@@ -27,13 +28,19 @@ export function PostCard({
   replyComposer,
   showDislikeButton = true
 }: PostCardProps) {
+  const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
+  const keyLabel = fingerprintLike ? authorId : undefined;
+
   return (
     <article className={`post-card ${post.isRecommendation ? 'recommended' : ''}`}>
       <div className="post-card-header">
-        <button className="ghost-link" onClick={() => onAuthorClick(authorId)} type="button">
-          <strong>{authorName}</strong>
-          <span className="note">{authorId.slice(0, 16)}</span>
-        </button>
+        <div className="post-author-line">
+          <IdentityAvatar seed={authorId} size={36} alt={authorName} />
+          <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
+            <strong>{authorName}</strong>
+            {keyLabel ? <span className="note">{keyLabel}</span> : null}
+          </button>
+        </div>
         <span className="note">{new Date(post.timestamp).toLocaleString()}</span>
       </div>
 

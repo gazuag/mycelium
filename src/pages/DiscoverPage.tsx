@@ -6,6 +6,7 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 interface DiscoverPageProps {
   discoveryPosts: StoredPost[];
   contacts: Contact[];
+  myPeerId?: string;
   onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
   onFollow: (publicKey: string) => void;
@@ -14,7 +15,7 @@ interface DiscoverPageProps {
   onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, myPeerId, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onSave }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -55,6 +56,7 @@ export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onA
                     <FollowButton
                       peerId={post.author}
                       contacts={contacts}
+                      myPeerId={myPeerId}
                       onToggleFollow={async (peerId) => { await onFollow(peerId); }}
                     />
                   </div>

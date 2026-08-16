@@ -5,6 +5,7 @@ import { CollapsibleSection } from '../components/CollapsibleSection';
 
 interface PeoplePageProps {
   contacts: Contact[];
+  myPeerId?: string;
   onViewProfile: (peerId: string) => void;
   onMessage: (peerId: string) => void;
   onToggleFollow: (peerId: string) => void;
@@ -12,7 +13,7 @@ interface PeoplePageProps {
   onAddPeerAddress: (address: string) => Promise<void>;
 }
 
-export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
+export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
   const [newPeerAddress, setNewPeerAddress] = useState('');
 
   const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
@@ -59,6 +60,7 @@ export function PeoplePage({ contacts, onViewProfile, onMessage, onToggleFollow,
             <PeerCard
               key={contact.fingerprint}
               contact={contact}
+              myPeerId={myPeerId}
               onViewProfile={onViewProfile}
               onMessage={onMessage}
               onToggleFollow={onToggleFollow}

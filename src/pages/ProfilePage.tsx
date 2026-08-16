@@ -11,6 +11,7 @@ interface ProfilePageProps {
   contact: Contact;
   posts: StoredPost[];
   likedPosts: StoredPost[];
+  myPeerId?: string;
   onFollowToggle?: () => void;
   onBlock?: () => void;
   onMessage?: () => void;
@@ -28,6 +29,7 @@ export function ProfilePage({
   contact,
   posts,
   likedPosts,
+  myPeerId,
   onFollowToggle,
   onBlock,
   onMessage,
@@ -77,6 +79,7 @@ export function ProfilePage({
 
       <ProfileHeader
         contact={contact}
+        myPeerId={myPeerId}
         onFollowToggle={onFollowToggle}
         onBlock={onBlock}
         onMessage={onMessage}

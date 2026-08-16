@@ -12,6 +12,7 @@ interface AppHeaderProps {
   onOpenMyProfile: () => void;
   onOpenSettings: () => void;
   onOpenPeopleInbox: () => void;
+  onRefresh?: () => void;
 }
 
 export function AppHeader({
@@ -25,8 +26,9 @@ export function AppHeader({
   unreadCount = 0,
   onOpenMyProfile,
   onOpenSettings,
-  onOpenPeopleInbox
-}: AppHeaderProps) {
+  onOpenPeopleInbox,
+  onRefresh
+}: AppHeaderProps & { onRefresh?: () => void }) {
   const isGood = connectionStatus === 'connected' && signallingStatus === 'connected';
   const isWarning = connectionStatus === 'signalling' || connectionStatus === 'connecting' || signallingStatus === 'connecting' || signallingStatus === 'reconnecting';
   const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
@@ -56,6 +58,7 @@ export function AppHeader({
             <button className="btn secondary" onClick={onOpenPeopleInbox}>Unread inbox ({unreadCount})</button>
           ) : null}
           <button className="btn" onClick={onOpenMyProfile}>My profile</button>
+          {onRefresh ? <button className="btn secondary" onClick={onRefresh}>Refresh</button> : null}
           <button className="btn secondary" onClick={onOpenSettings}>Diagnostics</button>
         </div>
       </div>

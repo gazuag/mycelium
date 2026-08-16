@@ -5,13 +5,14 @@ import { IdentityAvatar } from './IdentityAvatar';
 
 interface PeerCardProps {
   contact: Contact;
+  myPeerId?: string;
   onViewProfile: (peerId: string) => void;
   onMessage: (peerId: string) => void;
   onToggleFollow: (peerId: string) => void;
   onBlock?: (peerId: string) => void;
 }
 
-export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, onBlock }: PeerCardProps) {
+export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlock }: PeerCardProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
@@ -34,6 +35,7 @@ export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, on
         <FollowButton
           peerId={contact.fingerprint || contact.publicKey}
           contacts={[contact]}
+          myPeerId={myPeerId}
           onToggleFollow={async (peerId) => { await onToggleFollow(peerId); }}
         />
         {onBlock ? <button className="chip secondary" onClick={() => onBlock(contact.fingerprint)} type="button">Block</button> : null}

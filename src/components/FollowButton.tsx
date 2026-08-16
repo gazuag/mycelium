@@ -7,9 +7,10 @@ interface FollowButtonProps {
   contacts: Contact[];
   onToggleFollow: (peerId: string) => Promise<void> | void;
   className?: string;
+  myPeerId?: string;
 }
 
-export function FollowButton({ peerId, contacts, onToggleFollow, className = 'chip' }: FollowButtonProps) {
+export function FollowButton({ peerId, contacts, onToggleFollow, className = 'chip', myPeerId }: FollowButtonProps) {
   const match = useMemo(
     () => contacts.find((contact) => contact.publicKey === peerId || contact.fingerprint === peerId),
     [contacts, peerId]
@@ -29,6 +30,19 @@ export function FollowButton({ peerId, contacts, onToggleFollow, className = 'ch
     const nextState = !isFollowing;
     setStatusMessage(nextState ? `Followed ${displayName}` : `Unfollowed ${displayName}`);
   };
+
+  const isOwnPeer = Boolean(
+    myPeerId && (
+      peerId === myPeerId
+      || peerId === myPeerId.toLowerCase()
+      || match?.publicKey === myPeerId
+      || match?.fingerprint === myPeerId
+    )
+  );
+
+  if (isOwnPeer) {
+    return null;
+  }
 
   return (
     <div className="follow-button-wrap">

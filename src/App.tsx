@@ -1858,10 +1858,14 @@ function App() {
         connectedPeers={connectedPeersCount}
         syncStatus={syncStatus}
         myFingerprint={identity?.id}
-unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
-            onOpenMyProfile={() => setPage('myProfile')}
-            onOpenSettings={() => setPage('settings')}
-            onOpenPeopleInbox={() => setPage('people')}
+        unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
+        onOpenMyProfile={() => setPage('myProfile')}
+        onOpenSettings={() => setPage('settings')}
+        onOpenPeopleInbox={() => setPage('people')}
+        onRefresh={() => {
+          void handleRefreshHomeFeed();
+          void handleFetchDiscovery();
+        }}
       />
 
       <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -1891,6 +1895,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
         {page === 'people' && (
           <PeoplePage
             contacts={visibleContacts}
+            myPeerId={identity.id}
             onViewProfile={handleOpenPeerProfile}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
@@ -1903,6 +1908,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
           <DiscoverPage
             discoveryPosts={discoverFeedPosts}
             contacts={contacts}
+            myPeerId={identity.id}
             onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={handleOpenPeerProfile}
             onFollow={handleToggleFollow}
@@ -1917,6 +1923,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             contact={activeProfileContact}
             posts={profilePosts}
             likedPosts={likedProfilePosts}
+            myPeerId={identity.id}
             notice={profileNotice}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
             onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}

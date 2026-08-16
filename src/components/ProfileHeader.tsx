@@ -10,6 +10,7 @@ interface ProfileHeaderProps {
   onMessage?: () => void;
   showOnlineIndicator?: boolean;
   showActions?: boolean;
+  myPeerId?: string;
 }
 
 export function ProfileHeader({
@@ -18,7 +19,8 @@ export function ProfileHeader({
   onBlock,
   onMessage,
   showOnlineIndicator = true,
-  showActions = true
+  showActions = true,
+  myPeerId
 }: ProfileHeaderProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
@@ -39,7 +41,12 @@ export function ProfileHeader({
       <p className="note">{contact.profile?.bio ?? 'No bio yet.'}</p>
       {showActions && onFollowToggle && onMessage && onBlock ? (
         <div className="profile-actions">
-          <button className="btn" onClick={onFollowToggle}>{contact.followed ? 'Unfollow' : 'Follow'}</button>
+          <FollowButton
+            peerId={contact.fingerprint || contact.publicKey}
+            contacts={[contact]}
+            onToggleFollow={async () => { await onFollowToggle(); }}
+            myPeerId={myPeerId}
+          />
           <button className="btn secondary" onClick={onMessage}>Message</button>
           <button className="btn secondary" onClick={onBlock}>Block</button>
         </div>
