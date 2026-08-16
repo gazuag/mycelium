@@ -148,6 +148,17 @@ export async function savePost(post: StoredPost) {
   });
 }
 
+export async function deletePost(postId: string) {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(POST_STORE, 'readwrite');
+    const store = tx.objectStore(POST_STORE);
+    store.delete(postId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export async function loadPosts(): Promise<StoredPost[]> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
@@ -220,6 +231,17 @@ export async function saveDirectChatMessage(message: { id: string; peerId: strin
     const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
     const store = tx.objectStore(DIRECT_CHAT_STORE);
     store.put(message);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function deleteDirectChatMessage(id: string) {
+  const db = await openDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
+    const store = tx.objectStore(DIRECT_CHAT_STORE);
+    store.delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

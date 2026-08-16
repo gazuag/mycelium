@@ -50,7 +50,6 @@ export function MyProfilePage({
     <section className="page-view">
       <div className="page-header">
         <h2>My Profile</h2>
-        <p className="note">Manage your identity and export/import data safely.</p>
       </div>
 
       <div className="card profile-edit-card">

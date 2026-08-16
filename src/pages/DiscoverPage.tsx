@@ -1,4 +1,5 @@
 import type { Contact, StoredPost } from '../types';
+import { FollowButton } from '../components/FollowButton';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
@@ -7,20 +8,18 @@ interface DiscoverPageProps {
   contacts: Contact[];
   onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
-  onAddContact: (publicKey: string) => void;
   onFollow: (publicKey: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
-  onHide: (postId: string) => void;
   onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onAuthorClick, onAddContact, onFollow, onLike, onDislike, onHide, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onSave }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
         <h2>Discover</h2>
-        <p className="note">Explore public posts from the wider network.</p>
+        <p className="note">Discover - Explore public posts from the wider network.</p>
         <div className="page-header-actions">
           <button className="btn secondary" type="button" onClick={onRefreshDiscovery}>Refresh discovery</button>
         </div>
@@ -50,11 +49,14 @@ export function DiscoverPage({ discoveryPosts, contacts, onRefreshDiscovery, onA
                 onLike={() => onLike(post.id)}
                 onDislike={() => onDislike(post.id)}
                 onReply={() => {} }
+                showDislikeButton={false}
                 footerActions={
                   <div className="discover-actions">
-                    <button className="chip" type="button" onClick={() => onAddContact(post.author)}>Add contact</button>
-                    <button className="chip" type="button" onClick={() => onFollow(post.author)}>Follow</button>
-                    <button className="chip secondary" type="button" onClick={() => onHide(post.id)}>Hide</button>
+                    <FollowButton
+                      peerId={post.author}
+                      contacts={contacts}
+                      onToggleFollow={async (peerId) => { await onFollow(peerId); }}
+                    />
                   </div>
                 }
               />

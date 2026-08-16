@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus } from './storage/idb';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deletePost, deleteDirectChatMessage } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -11,7 +11,6 @@ import { HomePage } from './pages/HomePage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { PeoplePage } from './pages/PeoplePage';
 import { ProfilePage } from './pages/ProfilePage';
-import { MyProfilePage } from './pages/MyProfilePage';
 import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
@@ -110,6 +109,8 @@ function App() {
   const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const blockedPeersRef = useRef<Set<string>>(new Set());
   const [myProfile, setMyProfile] = useState({
     displayName: '',
@@ -239,31 +240,47 @@ function App() {
   };
 
   const handlePeerMetadata = (peerId: string, metadata: any) => {
+    const normalizedProfile: Contact['profile'] = {
+      protocol: 'mycelium',
+      version: 1,
+      type: 'profile',
+      id: peerId,
+      author: peerId,
+      timestamp: typeof metadata?.timestamp === 'string' ? metadata.timestamp : new Date().toISOString(),
+      displayName: typeof metadata?.displayName === 'string' ? metadata.displayName : undefined,
+      bio: typeof metadata?.bio === 'string' ? metadata.bio : undefined,
+      tags: Array.isArray(metadata?.tags) ? metadata.tags.filter((item: unknown): item is string => typeof item === 'string') : [],
+      signature: ''
+    };
+
     setContacts((prev) => {
       const existing = prev.find((contact) => contact.fingerprint === peerId);
-      if (existing) {
-        const updated = {
-          ...existing,
-          displayName: metadata.displayName,
-          follower: metadata.following
-        };
-        saveContact(updated);
-        return prev.map((contact) => (contact.fingerprint === peerId ? updated : contact));
-      }
-      const newContact: Contact = {
-        publicKey: peerId,
-        fingerprint: peerId,
-        displayName: metadata.displayName,
-        addedAt: new Date().toISOString(),
-        followed: false,
-        follower: metadata.following,
-        online: true,
-        connected: true,
-        unreadMessages: 0,
-        queuedMessages: 0
-      };
-      saveContact(newContact);
-      return [...prev, newContact];
+      const updatedContact: Contact = existing
+        ? {
+            ...existing,
+            displayName: metadata.displayName,
+            profile: normalizedProfile,
+            follower: metadata.following,
+            online: true,
+            connected: true
+          }
+        : {
+            publicKey: peerId,
+            fingerprint: peerId,
+            displayName: metadata.displayName,
+            profile: normalizedProfile,
+            addedAt: new Date().toISOString(),
+            followed: false,
+            follower: metadata.following,
+            online: true,
+            connected: true,
+            unreadMessages: 0,
+            queuedMessages: 0
+          };
+
+      void saveContact(updatedContact);
+      void saveProfile(normalizedProfile);
+      return existing ? prev.map((contact) => (contact.fingerprint === peerId ? updatedContact : contact)) : [...prev, updatedContact];
     });
     addLog(`Received profile from ${peerId}: ${metadata.displayName} following=${metadata.following}`);
   };
@@ -977,13 +994,21 @@ function App() {
     }
   }
 
-  async function handleToggleFollow(publicKey: string) {
-    const existing = contactsRef.current.find((c) => c.publicKey === publicKey);
-    if (!existing) return;
-    const updated = { ...existing, followed: !existing.followed };
+  async function handleToggleFollow(peerId: string) {
+    const existing = contactsRef.current.find((c) => c.publicKey === peerId || c.fingerprint === peerId);
+    const normalizedId = existing?.publicKey || existing?.fingerprint || peerId;
+    const baseContact: Contact = existing ?? {
+      publicKey: normalizedId,
+      fingerprint: peerId,
+      displayName: undefined,
+      addedAt: new Date().toISOString(),
+      followed: false
+    };
+    const updated = { ...baseContact, publicKey: normalizedId, fingerprint: baseContact.fingerprint || peerId, followed: !baseContact.followed };
+
     await saveContact(updated);
-    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === publicKey ? updated : c))));
-    addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint}`);
+    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === normalizedId || c.fingerprint === peerId ? updated : c)).concat(existing ? [] : [updated])));
+    addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint || updated.publicKey}`);
   }
 
   async function handleRemoveContact(publicKey: string) {
@@ -1160,7 +1185,7 @@ function App() {
     : [];
 
   const likedProfilePosts = profileContactId
-    ? posts.filter((post) => post.author === profileContactId && post.reaction === 'like' && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => post.recommendedBy === profileContactId && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
@@ -1499,6 +1524,79 @@ function App() {
     input.click();
   }
 
+  async function handleClearOldPeerCache() {
+    const confirmed = window.confirm('Clear cached peer posts and messages older than one week? This keeps your identity, contacts, and local posts.');
+    if (!confirmed) return;
+
+    const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const remotePosts = await loadPosts();
+    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local' && new Date(post.receivedAt).getTime() <= cutoff);
+    for (const post of stalePeerPosts) {
+      await deletePost(post.id);
+    }
+
+    const chatEntries = await loadDirectChatMessages();
+    const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine && new Date(entry.timestamp).getTime() <= cutoff);
+    for (const entry of stalePeerMessages) {
+      await deleteDirectChatMessage(entry.id);
+    }
+
+    const refreshedPosts = await loadPosts();
+    setPosts(refreshedPosts);
+    const refreshedChats = await loadDirectChatMessages();
+    const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
+      acc[message.peerId] = [
+        ...(acc[message.peerId] || []),
+        {
+          text: message.text,
+          timestamp: message.timestamp,
+          isMine: message.isMine,
+          deliveryStatus: message.deliveryStatus
+        }
+      ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      return acc;
+    }, {} as Record<string, ChatEntry[]>);
+    setDirectChats(groupedDirectMessages);
+
+    addLog(`Cleared peer cache older than 7 days (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+  }
+
+  async function handleClearAllPeerCache() {
+    const confirmed = window.confirm('Clear all cached peer messages and posts? This will not delete your identity, contacts, or your own posts.');
+    if (!confirmed) return;
+
+    const remotePosts = await loadPosts();
+    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local');
+    for (const post of stalePeerPosts) {
+      await deletePost(post.id);
+    }
+
+    const chatEntries = await loadDirectChatMessages();
+    const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine);
+    for (const entry of stalePeerMessages) {
+      await deleteDirectChatMessage(entry.id);
+    }
+
+    const refreshedPosts = await loadPosts();
+    setPosts(refreshedPosts);
+    const refreshedChats = await loadDirectChatMessages();
+    const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
+      acc[message.peerId] = [
+        ...(acc[message.peerId] || []),
+        {
+          text: message.text,
+          timestamp: message.timestamp,
+          isMine: message.isMine,
+          deliveryStatus: message.deliveryStatus
+        }
+      ].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      return acc;
+    }, {} as Record<string, ChatEntry[]>);
+    setDirectChats(groupedDirectMessages);
+
+    addLog(`Cleared all peer cache entries (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+  }
+
   async function handleClearIdentity() {
     const confirmed = window.confirm(
       'Warning: clearing this identity logs you out on this browser. Export your identity backup first, or you may lose access permanently. Continue?'
@@ -1546,7 +1644,7 @@ function App() {
     manager.createOffer(normalizedRemoteId, socket);
   }
 
-  function handleSelectContact(peerId: string) {
+  async function handleSelectContact(peerId: string) {
     setSelectedContactId(peerId);
     setChatContactId(peerId);
     setPage('chat');
@@ -1560,6 +1658,71 @@ function App() {
       manager.createOffer(peerId, socket);
       addLog(`Opening chat and connecting to ${peerId}`);
     }
+  }
+
+  async function handleOpenPeerProfile(peerId: string) {
+    if (!peerId) return;
+
+    if (peerId === identity?.id) {
+      setProfileContactId(null);
+      setPage('myProfile');
+      setProfileNotice(null);
+      return;
+    }
+
+    let contact = contactsRef.current.find((candidate) => candidate.fingerprint === peerId || candidate.publicKey === peerId);
+    let resolvedContact = contact;
+    if (!resolvedContact) {
+      resolvedContact = {
+        publicKey: peerId,
+        fingerprint: peerId,
+        addedAt: new Date().toISOString(),
+        followed: false,
+        online: false,
+        connected: false,
+        unreadMessages: 0,
+        queuedMessages: 0
+      };
+      await saveContact(resolvedContact);
+      setContacts((prev) => dedupeContactsByFingerprint([...prev, resolvedContact!]));
+    }
+
+    const cachedProfile = await loadProfile(peerId);
+    if (cachedProfile && !resolvedContact.profile) {
+      resolvedContact = { ...resolvedContact, displayName: cachedProfile.displayName ?? resolvedContact.displayName, profile: cachedProfile };
+      await saveContact(resolvedContact);
+      setContacts((prev) => prev.map((item) => (item.fingerprint === peerId ? resolvedContact! : item)));
+    }
+
+    setProfileContactId(peerId);
+    setPage('profile');
+    setProfileNotice(null);
+
+    const socket = signallingSocketRef.current;
+    const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
+    const canRequestProfile = Boolean(
+      socket &&
+      socket.readyState === WebSocket.OPEN &&
+      manager &&
+      (resolvedContact.online || resolvedContact.connected || manager.getDataChannelState() === 'connecting' || manager.getDataChannelState() === 'open')
+    );
+
+    if (canRequestProfile) {
+      if (!resolvedContact.connected && !manager.isDataChannelOpen() && socket) {
+        manager.createOffer(peerId, socket);
+      }
+      manager.requestProfile();
+      manager.sendRequestPosts(null, 200);
+      return;
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN && manager && !resolvedContact.connected) {
+      manager.createOffer(peerId, socket);
+      setProfileNotice(`Profile information for ${peerId.slice(0, 12)} is unavailable at the moment.`);
+      return;
+    }
+
+    setProfileNotice(`Profile information for ${peerId.slice(0, 12)} is unavailable at the moment.`);
   }
 
   useEffect(() => {
@@ -1649,6 +1812,31 @@ function App() {
   const connectedPeersCount = contacts.filter((contact) => contact.connected).length;
   const syncStatus = signallingStatus === 'connected' ? 'synced' : signallingStatus;
   const activeProfileContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
+  const myProfileContact = useMemo<Contact | undefined>(() => {
+    if (!identity) return undefined;
+    const displayName = myProfile.displayName.trim() || fingerprintToHumanName(identity.id);
+    return {
+      publicKey: identity.publicKey,
+      fingerprint: identity.id,
+      displayName,
+      addedAt: new Date().toISOString(),
+      followed: false,
+      online: false,
+      connected: false,
+      profile: {
+        protocol: 'mycelium',
+        version: 1,
+        type: 'profile',
+        id: identity.id,
+        author: identity.id,
+        timestamp: new Date().toISOString(),
+        displayName,
+        bio: myProfile.bio.trim(),
+        tags: [],
+        signature: ''
+      } as any
+    };
+  }, [identity, myProfile.displayName, myProfile.bio]);
   const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
 
   if (!identity) {
@@ -1686,7 +1874,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             onSubmitPost={handleCreatePost}
             onRefreshPosts={handleRefreshHomeFeed}
             canCreatePost={Boolean(identity)}
-            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onReply={(postId, content, publishToDiscovery) => {
@@ -1703,7 +1891,7 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
         {page === 'people' && (
           <PeoplePage
             contacts={visibleContacts}
-            onViewProfile={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onViewProfile={handleOpenPeerProfile}
             onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
             onBlockPeer={handleBlockPeer}
@@ -1716,12 +1904,10 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             discoveryPosts={discoverFeedPosts}
             contacts={contacts}
             onRefreshDiscovery={handleFetchDiscovery}
-            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
-            onAddContact={handleAddContactFromKey}
+            onAuthorClick={handleOpenPeerProfile}
             onFollow={handleToggleFollow}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
-            onHide={handleHideDiscoveryPost}
             onSave={handleSaveDiscoveryPost}
           />
         )}
@@ -1731,70 +1917,91 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
             contact={activeProfileContact}
             posts={profilePosts}
             likedPosts={likedProfilePosts}
+            notice={profileNotice}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
             onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}
             onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}
-            onAuthorClick={(peerId) => { setProfileContactId(peerId); setPage('profile'); }}
+            onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
           />
         )}
 
-        {page === 'myProfile' && (
-          <MyProfilePage
-            identityId={identity?.id ?? ''}
-            publicKey={identity?.publicKey ?? ''}
-            contacts={contacts}
-            posts={posts}
-            nickname={myProfile.displayName}
-            bio={myProfile.bio}
-            blockedPeers={myProfile.blockedPeers}
-            followedAuthorsRatio={myProfile.feedMix.followedAuthors}
-            followedLikesRatio={myProfile.feedMix.followedLikes}
-            onNicknameChange={(value) => setMyProfile((prev) => ({ ...prev, displayName: value }))}
-            onBioChange={(value) => setMyProfile((prev) => ({ ...prev, bio: value }))}
-            onFollowedAuthorsRatioChange={(value) => setMyProfile((prev) => ({
-              ...prev,
-              feedMix: {
-                ...prev.feedMix,
-                followedAuthors: Math.max(0, Math.min(100, value)),
-                followedLikes: Math.max(0, 100 - Math.max(0, Math.min(100, value)))
-              }
-            }))}
-            onFollowedLikesRatioChange={(value) => setMyProfile((prev) => ({
-              ...prev,
-              feedMix: {
-                ...prev.feedMix,
-                followedLikes: Math.max(0, Math.min(100, value)),
-                followedAuthors: Math.max(0, 100 - Math.max(0, Math.min(100, value)))
-              }
-            }))}
-            onSaveProfile={() => {
-              const rawDisplayName = myProfile.displayName.trim();
-              const nextDisplayName = rawDisplayName && /^([0-9a-fA-F]{16,})$/.test(rawDisplayName)
-                ? fingerprintToHumanName(identity?.id ?? rawDisplayName)
-                : (rawDisplayName || fingerprintToHumanName(identity?.id ?? ''));
+        {page === 'myProfile' && myProfileContact && (
+          <ProfilePage
+            contact={myProfileContact}
+            posts={posts.filter((post) => post.author === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            likedPosts={posts.filter((post) => post.recommendedBy === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            onAuthorClick={handleOpenPeerProfile}
+            onLike={handleLikePost}
+            onDislike={handleDislikePost}
+            isOwnProfile
+            profileSettingsOpen={profileSettingsOpen}
+            onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}
+            profileSettings={
+              <div className="card profile-edit-card">
+                <label>
+                  Nickname
+                  <input
+                    value={myProfile.displayName || fingerprintToHumanName(identity?.id ?? '')}
+                    onChange={(e) => setMyProfile((prev) => ({ ...prev, displayName: e.target.value }))}
+                    placeholder="Your display name"
+                  />
+                </label>
+                <label>
+                  Bio
+                  <textarea value={myProfile.bio} onChange={(e) => setMyProfile((prev) => ({ ...prev, bio: e.target.value }))} placeholder="Write a short bio" />
+                </label>
+                <h3>Home Feed Mix</h3>
+                <p className="note">Set how much of your home feed should come from people you follow; the rest comes from their recommendations.</p>
+                <label>
+                  From people you follow: {myProfile.feedMix.followedAuthors}%
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={myProfile.feedMix.followedAuthors}
+                    onChange={(e) => setMyProfile((prev) => ({
+                      ...prev,
+                      feedMix: {
+                        ...prev.feedMix,
+                        followedAuthors: Math.max(0, Math.min(100, Number(e.target.value) || 0)),
+                        followedLikes: Math.max(0, 100 - Math.max(0, Math.min(100, Number(e.target.value) || 0)))
+                      }
+                    }))}
+                  />
+                </label>
+                <div className="row">
+                  <button className="btn" onClick={() => {
+                    const rawDisplayName = myProfile.displayName.trim();
+                    const nextDisplayName = rawDisplayName && /^([0-9a-fA-F]{16,})$/.test(rawDisplayName)
+                      ? fingerprintToHumanName(identity?.id ?? rawDisplayName)
+                      : (rawDisplayName || fingerprintToHumanName(identity?.id ?? ''));
 
-              const persistedProfile = {
-                ...myProfile,
-                displayName: nextDisplayName,
-                bio: myProfile.bio.trim(),
-                blockedPeers: myProfile.blockedPeers,
-                hiddenPeers: myProfile.hiddenPeers
-              };
-              setMyProfile(persistedProfile);
-              localStorage.setItem('myProfile', JSON.stringify(persistedProfile));
-              addLog('Profile saved locally');
-              contacts.forEach((contact) => {
-                if (!contact.connected) return;
-                peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
-              });
-            }}
-            onUnblockPeer={handleUnblockPeer}
-            onExportIdentity={handleExportIdentity}
-            onImportIdentity={handleImportIdentity}
-            onCreateIdentity={handleCreateIdentity}
-            onClearIdentity={handleClearIdentity}
+                    const persistedProfile = {
+                      ...myProfile,
+                      displayName: nextDisplayName,
+                      bio: myProfile.bio.trim(),
+                      blockedPeers: myProfile.blockedPeers,
+                      hiddenPeers: myProfile.hiddenPeers
+                    };
+                    setMyProfile(persistedProfile);
+                    localStorage.setItem('myProfile', JSON.stringify(persistedProfile));
+                    addLog('Profile saved locally');
+                    contacts.forEach((contact) => {
+                      if (!contact.connected) return;
+                      peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
+                    });
+                  }}>Save Profile</button>
+                  <button className="btn secondary" onClick={handleExportIdentity}>Export Identity</button>
+                </div>
+                <div className="row">
+                  <button className="btn secondary" onClick={handleImportIdentity}>Import Identity</button>
+                  <button className="btn secondary" onClick={handleCreateIdentity}>Create New Identity</button>
+                  <button className="btn secondary" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
+                </div>
+              </div>
+            }
           />
         )}
 
@@ -1811,6 +2018,10 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
 
         {page === 'settings' && (
           <SettingsPage
+            identityId={identity?.id ?? ''}
+            publicKey={identity?.publicKey ?? ''}
+            contacts={contacts.length}
+            posts={posts.length}
             logs={logs}
             onClearLogs={() => setLogs([])}
             signalEndpoint={signalEndpoint}
@@ -1827,6 +2038,8 @@ unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).len
               localStorage.removeItem('hiddenDiscovery');
               localStorage.removeItem('myceliumHeaderCollapsed');
             }}
+            onClearOldMessages={() => { void handleClearOldPeerCache(); }}
+            onClearAllMessages={() => { void handleClearAllPeerCache(); }}
           />
         )}
       </main>

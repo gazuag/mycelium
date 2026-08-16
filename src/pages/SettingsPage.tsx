@@ -1,5 +1,11 @@
 interface SettingsPageProps {
+  identityId: string;
+  publicKey: string;
+  contacts: number;
+  posts: number;
   onResetApp: () => void;
+  onClearOldMessages: () => void;
+  onClearAllMessages: () => void;
   logs: string[];
   onClearLogs: () => void;
   signalEndpoint: string;
@@ -11,7 +17,13 @@ interface SettingsPageProps {
 }
 
 export function SettingsPage({
+  identityId,
+  publicKey,
+  contacts,
+  posts,
   onResetApp,
+  onClearOldMessages,
+  onClearAllMessages,
   logs,
   onClearLogs,
   signalEndpoint,
@@ -28,11 +40,52 @@ export function SettingsPage({
     ? `Connected to server and ${connectedPeers} peers`
     : 'Disconnected. See diagnostics';
 
+  const handleCopyDiagnostics = async () => {
+    const text = logs.join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // fallback to a hidden textarea for browsers that block clipboard access
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'true');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+  };
+
   return (
     <section className="page-view">
       <div className="page-header">
         <h2>Diagnostics</h2>
         <p className="note">Runtime status, endpoints, and app diagnostics.</p>
+      </div>
+
+      <div className="card">
+        <h3>Identity</h3>
+        <p><strong>Fingerprint</strong></p>
+        <p className="note monospace">{identityId}</p>
+        <p><strong>Public key</strong></p>
+        <p className="note monospace break-word">{publicKey}</p>
+      </div>
+
+      <div className="card">
+        <h3>Stats</h3>
+        <div className="stat-grid">
+          <div>
+            <strong>{contacts}</strong>
+            <p className="note">Peers</p>
+          </div>
+          <div>
+            <strong>{posts}</strong>
+            <p className="note">Posts</p>
+          </div>
+        </div>
       </div>
 
       <div className="card">
@@ -67,12 +120,17 @@ export function SettingsPage({
           )}
         </div>
         <div className="row">
+          <button className="btn secondary" type="button" onClick={handleCopyDiagnostics}>Copy diagnostics</button>
           <button className="btn secondary" type="button" onClick={onClearLogs}>Clear diagnostics log</button>
         </div>
       </div>
 
       <div className="card">
-        <button className="btn secondary" onClick={onResetApp}>Reset local state</button>
+        <div className="row">
+          <button className="btn secondary" onClick={onResetApp}>Reset local state</button>
+          <button className="btn secondary" onClick={onClearOldMessages}>Clear up old messages</button>
+          <button className="btn secondary" onClick={onClearAllMessages}>Clear up ALL messages</button>
+        </div>
       </div>
     </section>
   );

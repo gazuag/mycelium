@@ -1,0 +1,45 @@
+import { useMemo, useState } from 'react';
+import type { Contact } from '../types';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
+
+interface FollowButtonProps {
+  peerId: string;
+  contacts: Contact[];
+  onToggleFollow: (peerId: string) => Promise<void> | void;
+  className?: string;
+}
+
+export function FollowButton({ peerId, contacts, onToggleFollow, className = 'chip' }: FollowButtonProps) {
+  const match = useMemo(
+    () => contacts.find((contact) => contact.publicKey === peerId || contact.fingerprint === peerId),
+    [contacts, peerId]
+  );
+  const isFollowing = Boolean(match?.followed);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const displayName = useMemo(() => {
+    if (!match) {
+      return displayNameOrFallback(undefined, peerId);
+    }
+    return displayNameOrFallback(match.displayName, match.fingerprint || match.publicKey || peerId);
+  }, [match, peerId]);
+
+  const handleClick = async () => {
+    await onToggleFollow(peerId);
+    const nextState = !isFollowing;
+    setStatusMessage(nextState ? `Followed ${displayName}` : `Unfollowed ${displayName}`);
+  };
+
+  return (
+    <div className="follow-button-wrap">
+      <button
+        className={className}
+        type="button"
+        onClick={() => { void handleClick(); }}
+      >
+        {isFollowing ? 'Unfollow' : 'Follow'}
+      </button>
+      {statusMessage ? <span className="note follow-status">{statusMessage}</span> : null}
+    </div>
+  );
+}

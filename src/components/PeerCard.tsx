@@ -1,5 +1,6 @@
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 
 interface PeerCardProps {
@@ -30,9 +31,11 @@ export function PeerCard({ contact, onViewProfile, onMessage, onToggleFollow, on
       </div>
       <div className="peer-card-footer">
         <button className="chip" onClick={() => onMessage(contact.fingerprint)} type="button">Message</button>
-        <button className="chip" onClick={() => onToggleFollow(contact.publicKey)} type="button">
-          {contact.followed ? 'Unfollow' : 'Follow'}
-        </button>
+        <FollowButton
+          peerId={contact.fingerprint || contact.publicKey}
+          contacts={[contact]}
+          onToggleFollow={async (peerId) => { await onToggleFollow(peerId); }}
+        />
         {onBlock ? <button className="chip secondary" onClick={() => onBlock(contact.fingerprint)} type="button">Block</button> : null}
       </div>
     </article>

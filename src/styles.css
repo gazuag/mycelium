@@ -36,6 +36,9 @@ button {
   cursor: pointer;
 }
 
+.one-line-header {
+  display:inline;
+}
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -343,6 +346,19 @@ body, html, #root {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+}
+
+.compact-profile-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.compact-profile-header h2 {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .page-header-actions {

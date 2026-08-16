@@ -369,6 +369,11 @@ export class PeerConnectionManager {
     this.sendLegacyPayload('metadata', { metadata });
   }
 
+  public requestProfile() {
+    if (!this.remoteId) return;
+    void this.sendPacket('PROFILE_REQUEST', {});
+  }
+
   public sendRequestPosts(since: string | null = null, limit = 100) {
     if (this.remoteSupportsMyp) {
       void this.sendPacket('POST_REQUEST', {

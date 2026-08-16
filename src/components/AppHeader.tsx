@@ -38,8 +38,7 @@ export function AppHeader({
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
       <div className="app-header-top">
         <div>
-          <p className="app-title">Mycelium</p>
-          <p className="app-subtitle">Private peer-to-peer social</p>
+          <p className="app-title">Mycelium - Private peer-to-peer social</p>
         </div>
         <button className="icon-btn" onClick={onToggleCollapse} aria-label="Toggle header">
           {collapsed ? '▼' : '▲'}
@@ -51,13 +50,6 @@ export function AppHeader({
           <span className="status-light" aria-hidden="true" />
           <strong>{summary}</strong>
         </div>
-
-        {myFingerprint && (
-          <div className="identity-line">
-            <span>My identity key:</span>
-            <strong>{myFingerprint}</strong>
-          </div>
-        )}
 
         <div className="app-header-actions">
           {unreadCount > 0 ? (

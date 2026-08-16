@@ -1,15 +1,25 @@
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 
 interface ProfileHeaderProps {
   contact: Contact;
-  onFollowToggle: () => void;
-  onBlock: () => void;
-  onMessage: () => void;
+  onFollowToggle?: () => void;
+  onBlock?: () => void;
+  onMessage?: () => void;
+  showOnlineIndicator?: boolean;
+  showActions?: boolean;
 }
 
-export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: ProfileHeaderProps) {
+export function ProfileHeader({
+  contact,
+  onFollowToggle,
+  onBlock,
+  onMessage,
+  showOnlineIndicator = true,
+  showActions = true
+}: ProfileHeaderProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
@@ -22,14 +32,18 @@ export function ProfileHeader({ contact, onFollowToggle, onBlock, onMessage }: P
             <p className="note">{contact.fingerprint}</p>
           </div>
         </div>
-        <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
+        {showOnlineIndicator ? (
+          <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
+        ) : null}
       </div>
       <p className="note">{contact.profile?.bio ?? 'No bio yet.'}</p>
-      <div className="profile-actions">
-        <button className="btn" onClick={onFollowToggle}>{contact.followed ? 'Unfollow' : 'Follow'}</button>
-        <button className="btn secondary" onClick={onMessage}>Message</button>
-        <button className="btn secondary" onClick={onBlock}>Block</button>
-      </div>
+      {showActions && onFollowToggle && onMessage && onBlock ? (
+        <div className="profile-actions">
+          <button className="btn" onClick={onFollowToggle}>{contact.followed ? 'Unfollow' : 'Follow'}</button>
+          <button className="btn secondary" onClick={onMessage}>Message</button>
+          <button className="btn secondary" onClick={onBlock}>Block</button>
+        </div>
+      ) : null}
     </section>
   );
 }
