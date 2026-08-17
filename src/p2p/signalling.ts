@@ -18,23 +18,29 @@ export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer
 
 const SIGNAL_SERVER_HOST = 'mycelium.my.to';
 const SIGNAL_SERVER_PORT = 8765;
+const DEFAULT_SIGNAL_SERVER_URL = `wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`;
 
 function normalizeSignalUrl(rawUrl: string) {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return DEFAULT_SIGNAL_SERVER_URL;
+  }
+
   try {
-    const url = new URL(rawUrl);
-    if (url.protocol === 'http:') {
-      url.protocol = 'wss:';
-    } else if (url.protocol === 'https:') {
-      url.protocol = 'wss:';
+    const url = new URL(trimmed);
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+      console.warn('Only ws:// and wss:// are supported for the signalling server. HTTP/S endpoints are rejected.');
+      return DEFAULT_SIGNAL_SERVER_URL;
     }
     return url.toString();
   } catch {
-    return `wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`;
+    return DEFAULT_SIGNAL_SERVER_URL;
   }
 }
 
 export function resolveSignalServerUrl() {
-  return normalizeSignalUrl(`wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`);
+  const configuredUrl = (globalThis as typeof globalThis & { VITE_SIGNAL_SERVER_URL?: string }).VITE_SIGNAL_SERVER_URL ?? '';
+  return normalizeSignalUrl(configuredUrl.trim() || DEFAULT_SIGNAL_SERVER_URL);
 }
 
 export function connectToSignalling(
@@ -43,6 +49,9 @@ export function connectToSignalling(
   onStatus?: (status: string) => void
 ) {
   const signalServerUrl = resolveSignalServerUrl();
+  if (!signalServerUrl.startsWith('ws://') && !signalServerUrl.startsWith('wss://')) {
+    throw new Error('The signalling server must use a websocket URL only. No HTTP/S endpoints are allowed.');
+  }
   const socket = new WebSocket(signalServerUrl);
   const normalizedId = localId.trim();
 

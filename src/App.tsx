@@ -321,7 +321,7 @@ function App() {
   };
 
   const addKnownPeer = async (peerId: string) => {
-    if (!peerId || peerId === identity?.id) return;
+    if (!peerId || peerId === identity?.id || peerId === identity?.publicKey) return;
     if (blockedPeersRef.current.has(peerId)) {
       addLog(`Ignoring blocked peer from network: ${peerId}`);
       return;
@@ -657,8 +657,11 @@ function App() {
   };
 
   const handlePeerList = async (peers: string[]) => {
-    const validPeers = peers.filter((peerId) => isValidPeerFingerprint(peerId) && !blockedPeersRef.current.has(peerId));
-    const invalidPeers = peers.filter((peerId) => !isValidPeerFingerprint(peerId) || blockedPeersRef.current.has(peerId));
+    const validPeers = peers.filter((peerId) => {
+      if (!peerId || peerId === identity?.id) return false;
+      return isValidPeerFingerprint(peerId) && !blockedPeersRef.current.has(peerId);
+    });
+    const invalidPeers = peers.filter((peerId) => !validPeers.includes(peerId) && !blockedPeersRef.current.has(peerId) && peerId !== identity?.id);
     if (invalidPeers.length) {
       addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
     }
@@ -1114,8 +1117,12 @@ function App() {
   const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !blockedPeerSet.has(post.author));
 
   const visibleContacts = useMemo(
-    () => contacts.filter((contact) => !blockedPeerSet.has(contact.fingerprint)),
-    [contacts, blockedPeerSet]
+    () => contacts.filter((contact) => {
+      if (!contact.fingerprint) return false;
+      if (identity && (contact.fingerprint === identity.id || contact.publicKey === identity.publicKey)) return false;
+      return !blockedPeerSet.has(contact.fingerprint);
+    }),
+    [contacts, blockedPeerSet, identity]
   );
 
   const discoverFeedPosts = useMemo(() => {
