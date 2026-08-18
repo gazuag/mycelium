@@ -29,12 +29,14 @@ export function AppHeader({
   onOpenPeopleInbox,
   onRefresh
 }: AppHeaderProps & { onRefresh?: () => void }) {
-  const isGood = connectionStatus === 'connected' && signallingStatus === 'connected';
-  const isWarning = connectionStatus === 'signalling' || connectionStatus === 'connecting' || signallingStatus === 'connecting' || signallingStatus === 'reconnecting';
+  const isGood = signallingStatus === 'connected';
+  const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
   const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
   const summary = isGood
-    ? `Connected to server and ${connectedPeers} peers`
-    : 'Disconnected. See diagnostics';
+    ? `Connected to signalling server and ${connectedPeers} peers`
+    : isWarning
+      ? 'Connecting to network'
+      : 'Disconnected. See diagnostics';
 
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>

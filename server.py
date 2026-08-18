@@ -5,10 +5,11 @@ import logging
 import os
 import sqlite3
 import ssl
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -24,6 +25,8 @@ def normalize_client_id(value: Optional[str]) -> Optional[str]:
 MAX_DISCOVERY_POSTS = int(os.environ.get('MAX_DISCOVERY_POSTS', '10000'))
 MAX_POST_SIZE = int(os.environ.get('MAX_POST_SIZE', '4096'))
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
+SIGNAL_QUEUE_TTL_SECONDS = int(os.environ.get('SIGNAL_QUEUE_TTL_SECONDS', '60'))
+MAX_QUEUED_SIGNALS_PER_CLIENT = int(os.environ.get('MAX_QUEUED_SIGNALS_PER_CLIENT', '32'))
 DB_PATH = Path(os.environ.get('DISCOVERY_DB_PATH', 'discovery.db'))
 SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
 SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8765'))
@@ -31,6 +34,30 @@ TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 
 clients: Dict[str, WebSocketServerProtocol] = {}
+pending_signals: Dict[str, List[Tuple[float, str]]] = {}
+
+
+def queue_signal(target: str, raw_message: str) -> None:
+    now = time.monotonic()
+    queued = [item for item in pending_signals.get(target, []) if now - item[0] <= SIGNAL_QUEUE_TTL_SECONDS]
+    queued.append((now, raw_message))
+    pending_signals[target] = queued[-MAX_QUEUED_SIGNALS_PER_CLIENT:]
+    logging.info('Queued signal for %s (%d pending)', target, len(pending_signals[target]))
+
+
+async def flush_queued_signals(client_id: str, websocket: WebSocketServerProtocol) -> None:
+    queued = pending_signals.pop(client_id, [])
+    now = time.monotonic()
+    fresh_messages = [raw_message for timestamp, raw_message in queued if now - timestamp <= SIGNAL_QUEUE_TTL_SECONDS]
+    for raw_message in fresh_messages:
+        try:
+            if websocket.open:
+                await websocket.send(raw_message)
+        except Exception:
+            logging.warning('Failed to deliver queued signal to %s', client_id)
+            break
+    if fresh_messages:
+        logging.info('Delivered %d queued signals to %s', len(fresh_messages), client_id)
 
 async def broadcast_peer_list() -> None:
     message = json.dumps({
@@ -172,6 +199,7 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                 clients[client_id] = websocket
                 logging.info('Registered client %s (%d clients currently)', client_id, len(clients))
                 await broadcast_peer_list()
+                await flush_queued_signals(client_id, websocket)
                 continue
 
             if msg_type in {'offer', 'answer', 'ice-candidate'}:
@@ -185,7 +213,8 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                     await recipient.send(raw_message)
                     logging.info('Relayed %s from %s to %s', msg_type, sender or '<unknown>', target)
                 else:
-                    logging.info('Target %s not connected; ignoring %s', target, msg_type)
+                    queue_signal(target, raw_message)
+                    logging.info('Target %s not connected; queued %s', target, msg_type)
                 continue
 
             # Mycelium protocol packets
