@@ -1000,17 +1000,27 @@ function App() {
   async function handleToggleFollow(peerId: string) {
     const existing = contactsRef.current.find((c) => c.publicKey === peerId || c.fingerprint === peerId);
     const normalizedId = existing?.publicKey || existing?.fingerprint || peerId;
+    const fingerprint = existing?.fingerprint || (isValidPeerFingerprint(peerId) ? peerId : await deriveFingerprint(peerId));
     const baseContact: Contact = existing ?? {
       publicKey: normalizedId,
-      fingerprint: peerId,
+      fingerprint,
       displayName: undefined,
       addedAt: new Date().toISOString(),
       followed: false
     };
-    const updated = { ...baseContact, publicKey: normalizedId, fingerprint: baseContact.fingerprint || peerId, followed: !baseContact.followed };
+    const updated = { ...baseContact, publicKey: normalizedId, fingerprint, followed: !baseContact.followed };
 
     await saveContact(updated);
-    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === normalizedId || c.fingerprint === peerId ? updated : c)).concat(existing ? [] : [updated])));
+    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === normalizedId || c.fingerprint === peerId || c.fingerprint === fingerprint ? updated : c)).concat(existing ? [] : [updated])));
+    const socket = signallingSocketRef.current;
+    const manager = peerManagersRef.current[fingerprint] ?? ensurePeerManager(fingerprint);
+    if (socket?.readyState === WebSocket.OPEN && manager) {
+      if (manager.isDataChannelOpen()) {
+        manager.sendMetadata(buildPeerMetadata(fingerprint));
+      } else {
+        void manager.createOffer(fingerprint, socket);
+      }
+    }
     addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint || updated.publicKey}`);
   }
 
@@ -1039,20 +1049,31 @@ function App() {
   };
 
   const handleLikePost = async (postId: string) => {
-    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'like', isRecommendation: true, recommendedBy: identity?.id ?? post.recommendedBy ?? post.author } : post)));
-    const target = posts.find((post) => post.id === postId);
-    if (target && identity) {
-      const next = { ...target, reaction: 'like', isRecommendation: true, recommendedBy: identity.id } as StoredPost;
+    const target = discoveryPosts.find((post) => post.id === postId) ?? posts.find((post) => post.id === postId);
+    if (target && identity && target.author !== identity.id && target.author !== identity.publicKey) {
+      const isLiked = target.reaction === 'like' && target.recommendedBy === identity.id;
+      const next = {
+        ...target,
+        reaction: isLiked ? undefined : 'like' as const,
+        isRecommendation: !isLiked,
+        recommendedBy: isLiked ? undefined : identity.id
+      } as StoredPost;
+      setPosts((prev) => {
+        const hasPost = prev.some((post) => post.id === postId);
+        return hasPost ? prev.map((post) => (post.id === postId ? { ...post, ...next } : post)) : [next, ...prev];
+      });
+      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
       await savePost(next);
       addLog(`Liked post ${postId}`);
     }
   };
 
   const handleDislikePost = async (postId: string) => {
-    setPosts((prev) => prev.map((post) => (post.id === postId ? { ...post, reaction: 'dislike', notInterested: true } : post)));
-    const target = posts.find((post) => post.id === postId);
+    const target = posts.find((post) => post.id === postId) ?? discoveryPosts.find((post) => post.id === postId);
     if (target) {
       const next = { ...target, reaction: 'dislike', notInterested: true } as StoredPost;
+      setPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
+      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
       await savePost(next);
       addLog(`Disliked post ${postId}`);
     }
@@ -1187,8 +1208,10 @@ function App() {
     return selected.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [posts, hiddenPostIds, contacts, myProfile.feedMix]);
 
+  const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
+  const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
   const profilePosts = profileContactId
-    ? posts.filter((post) => post.author === profileContactId && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => profileAuthorIds.has(post.author) && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
@@ -1336,19 +1359,21 @@ function App() {
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
             valid,
+            authorFingerprint,
             authorDisplayName: authorDisplayName || undefined
           };
         } catch {
           const knownContact = contactsRef.current.find((contact) =>
             contact.fingerprint === post.author || contact.publicKey === post.author
           );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : post.author);
+          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return {
             ...post,
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
             valid: false,
+            authorFingerprint,
             authorDisplayName: authorDisplayName || undefined
           };
         }
@@ -1376,6 +1401,7 @@ function App() {
       source: 'discovery',
       receivedAt: new Date().toISOString(),
       valid,
+      authorFingerprint,
       authorDisplayName: resolveAuthorDisplayName(authorFingerprint, knownContact) || undefined
     };
     await addKnownPeer(post.author);
@@ -1916,6 +1942,7 @@ function App() {
             discoveryPosts={discoverFeedPosts}
             contacts={contacts}
             myPeerId={identity.id}
+            myPublicKey={identity.publicKey}
             onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={handleOpenPeerProfile}
             onFollow={handleToggleFollow}
@@ -1944,8 +1971,8 @@ function App() {
         {page === 'myProfile' && myProfileContact && (
           <ProfilePage
             contact={myProfileContact}
-            posts={posts.filter((post) => post.author === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
-            likedPosts={posts.filter((post) => post.recommendedBy === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            posts={posts.filter((post) => post.author === identity?.id || post.author === identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            likedPosts={posts.filter((post) => post.recommendedBy === identity?.id && post.author !== identity?.id && post.author !== identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}

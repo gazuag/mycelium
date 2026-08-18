@@ -111,12 +111,16 @@ export function ProfilePage({
               <PostCard
                 key={post.id}
                 post={post}
-                authorName={displayNameOrFallback(contact.displayName, contact.fingerprint)}
-                authorId={contact.fingerprint}
-                onAuthorClick={onAuthorClick}
+                authorName={displayNameOrFallback(
+                  post.authorDisplayName || (post.authorFingerprint === contact.fingerprint ? contact.displayName : undefined),
+                  post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author)
+                )}
+                authorId={post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author)}
+                onAuthorClick={() => onAuthorClick(post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author))}
                 onLike={() => onLike(post.id)}
                 onDislike={() => onDislike(post.id)}
                 onReply={() => {} }
+                isOwnPost={isOwnProfile}
               />
             ))}
           </div>

@@ -503,6 +503,14 @@ body, html, #root {
   color: #a6e3a1;
 }
 
+.post-card-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.75rem;
+  align-items: center;
+  overflow-x: auto;
+}
+
 .post-actions,
 .profile-actions,
 .discover-actions,
@@ -542,6 +550,41 @@ body, html, #root {
 
 .chip.secondary {
   background: rgba(255,255,255,0.04);
+}
+
+.like-button {
+  width: 2.4rem;
+  height: 2.4rem;
+  flex: 0 0 2.4rem;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: #f6f7f1;
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.like-button:hover,
+.like-button:focus-visible {
+  transform: translateY(-1px);
+  border-color: #ff6b6b;
+  color: #ff6b6b;
+}
+
+.like-button.liked {
+  border-color: #ff4d5a;
+  background: rgba(255,77,90,0.12);
+  color: #ff4d5a;
+}
+
+.like-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .reply-composer {

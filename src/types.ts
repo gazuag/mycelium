@@ -65,6 +65,7 @@ export interface StoredPost extends SignedPost {
   disliked?: boolean;
   notInterested?: boolean;
   seen?: boolean;
+  authorFingerprint?: string;
   authorDisplayName?: string;
   isRecommendation?: boolean;
   recommendedBy?: string;

@@ -1,5 +1,6 @@
 import type { StoredPost } from '../types';
 import { IdentityAvatar } from './IdentityAvatar';
+import { LikeButton } from './LikeButton';
 
 interface PostCardProps {
   post: StoredPost;
@@ -13,6 +14,7 @@ interface PostCardProps {
   recommendationLabel?: string;
   replyComposer?: React.ReactNode;
   showDislikeButton?: boolean;
+  isOwnPost?: boolean;
 }
 
 export function PostCard({
@@ -26,7 +28,8 @@ export function PostCard({
   footerActions,
   recommendationLabel,
   replyComposer,
-  showDislikeButton = true
+  showDislikeButton = true,
+  isOwnPost = false
 }: PostCardProps) {
   const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
   const keyLabel = fingerprintLike ? authorId : undefined;
@@ -54,17 +57,18 @@ export function PostCard({
         <div className="post-tags">{post.tags.map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
       ) : null}
 
-      <div className="post-actions">
-        <button className="chip" onClick={onLike} type="button">Like</button>
-        {showDislikeButton ? (
-          <button className="chip" onClick={onDislike} type="button">Hide</button>
-        ) : null}
-        <button className="chip" onClick={() => onReply()} type="button">Reply</button>
+      <div className="post-card-actions">
+        <div className="post-actions">
+          <LikeButton isLiked={post.reaction === 'like'} onToggle={onLike} disabled={isOwnPost} />
+          {showDislikeButton && post.reaction !== 'like' ? (
+            <button className="chip" onClick={onDislike} type="button">Hide</button>
+          ) : null}
+          <button className="chip" onClick={() => onReply()} type="button">Reply</button>
+        </div>
+        {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}
       </div>
 
       {replyComposer ? <div className="reply-composer-wrap">{replyComposer}</div> : null}
-
-      {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}
     </article>
   );
 }

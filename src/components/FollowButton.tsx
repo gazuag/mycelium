@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
@@ -16,8 +16,6 @@ export function FollowButton({ peerId, contacts, onToggleFollow, className = 'ch
     [contacts, peerId]
   );
   const isFollowing = Boolean(match?.followed);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-
   const displayName = useMemo(() => {
     if (!match) {
       return displayNameOrFallback(undefined, peerId);
@@ -27,8 +25,6 @@ export function FollowButton({ peerId, contacts, onToggleFollow, className = 'ch
 
   const handleClick = async () => {
     await onToggleFollow(peerId);
-    const nextState = !isFollowing;
-    setStatusMessage(nextState ? `Followed ${displayName}` : `Unfollowed ${displayName}`);
   };
 
   const isOwnPeer = Boolean(
@@ -53,7 +49,6 @@ export function FollowButton({ peerId, contacts, onToggleFollow, className = 'ch
       >
         {isFollowing ? 'Unfollow' : 'Follow'}
       </button>
-      {statusMessage ? <span className="note follow-status">{statusMessage}</span> : null}
     </div>
   );
 }

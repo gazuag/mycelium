@@ -2,9 +2,10 @@ export function createIdenticonDataUrl(seed: string, size = 48) {
   const normalizedSeed = (seed || 'mycelium').trim() || 'mycelium';
 
   let hash = 14695981039346656037n;
+  const mask = (1n << 64n) - 1n;
   for (let i = 0; i < normalizedSeed.length; i += 1) {
     hash ^= BigInt(normalizedSeed.charCodeAt(i));
-    hash *= 1099511628211n;
+    hash = (hash * 1099511628211n) & mask;
   }
 
   const binary = hash.toString(2).padStart(64, '0');
