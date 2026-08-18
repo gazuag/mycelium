@@ -1,5 +1,6 @@
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import type { Contact, StoredPost } from '../types';
+import { BlockedPeerList } from '../components/BlockedPeerList';
 
 interface MyProfilePageProps {
   identityId: string;
@@ -98,18 +99,7 @@ export function MyProfilePage({
 
       <div className="card">
         <h3>Blocked Peers</h3>
-        {blockedPeers.length === 0 ? (
-          <p className="note">No blocked peers yet.</p>
-        ) : (
-          <div className="blocked-peer-list">
-            {blockedPeers.map((peerId) => (
-              <div key={peerId} className="blocked-peer-item">
-                <span className="monospace break-word">{peerId}</span>
-                <button className="chip secondary" type="button" onClick={() => onUnblockPeer(peerId)}>Unblock</button>
-              </div>
-            ))}
-          </div>
-        )}
+        <BlockedPeerList peerIds={blockedPeers} onUnblock={onUnblockPeer} />
       </div>
 
       <div className="card">

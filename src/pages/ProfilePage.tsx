@@ -18,6 +18,7 @@ interface ProfilePageProps {
   onAuthorClick: (peerId: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
+  onHide?: (postId: string) => void;
   notice?: string | null;
   isOwnProfile?: boolean;
   profileSettings?: React.ReactNode;
@@ -36,6 +37,7 @@ export function ProfilePage({
   onAuthorClick,
   onLike,
   onDislike,
+  onHide,
   notice,
   isOwnProfile = false,
   profileSettings,
@@ -119,6 +121,7 @@ export function ProfilePage({
                 onAuthorClick={() => onAuthorClick(post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author))}
                 onLike={() => onLike(post.id)}
                 onDislike={() => onDislike(post.id)}
+                onHide={onHide}
                 onReply={() => {} }
                 isOwnPost={isOwnProfile}
               />

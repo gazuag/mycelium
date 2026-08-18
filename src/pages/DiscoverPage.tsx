@@ -1,6 +1,7 @@
 import type { Contact, StoredPost } from '../types';
 import { FollowButton } from '../components/FollowButton';
 import { PostCard } from '../components/PostCard';
+import { BlockButton } from '../components/BlockButton';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface DiscoverPageProps {
@@ -13,10 +14,12 @@ interface DiscoverPageProps {
   onFollow: (publicKey: string) => void;
   onLike: (postId: string) => void;
   onDislike: (postId: string) => void;
+  onHide?: (postId: string) => void;
+  onBlock: (peerId: string) => void;
   onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock, onSave }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -61,6 +64,12 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
                       contacts={contacts}
                       myPeerId={myPeerId}
                       onToggleFollow={async (peerId) => { await onFollow(peerId); }}
+                    />
+                    <BlockButton
+                      peerId={authorFingerprint}
+                      contacts={contacts}
+                      myPeerId={myPeerId}
+                      onBlock={onBlock}
                     />
                   </div>
                 }

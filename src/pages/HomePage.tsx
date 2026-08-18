@@ -128,6 +128,7 @@ export function HomePage({
                 onAuthorClick={onAuthorClick}
                 onLike={() => onLike(post.id)}
                 onDislike={() => { onDislike(post.id); onHide(post.id); }}
+                onHide={onHide}
                 onReply={() => {
                   setReplyingToPostId((prev) => (prev === post.id ? null : post.id));
                   if (replyingToPostId !== post.id) {

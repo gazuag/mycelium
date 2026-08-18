@@ -2,6 +2,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
+import { BlockButton } from './BlockButton';
 
 interface ProfileHeaderProps {
   contact: Contact;
@@ -48,7 +49,7 @@ export function ProfileHeader({
             myPeerId={myPeerId}
           />
           <button className="btn secondary" onClick={onMessage}>Message</button>
-          <button className="btn secondary" onClick={onBlock}>Block</button>
+          <BlockButton peerId={contact.fingerprint} contacts={[contact]} myPeerId={myPeerId} onBlock={() => onBlock()} />
         </div>
       ) : null}
     </section>

@@ -1,6 +1,7 @@
 import type { StoredPost } from '../types';
 import { IdentityAvatar } from './IdentityAvatar';
 import { LikeButton } from './LikeButton';
+import { HideButton } from './HideButton';
 
 interface PostCardProps {
   post: StoredPost;
@@ -9,6 +10,7 @@ interface PostCardProps {
   onAuthorClick: (peerId: string) => void;
   onLike: () => void;
   onDislike: () => void;
+  onHide?: (postId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
@@ -24,6 +26,7 @@ export function PostCard({
   onAuthorClick,
   onLike,
   onDislike,
+  onHide,
   onReply,
   footerActions,
   recommendationLabel,
@@ -61,7 +64,7 @@ export function PostCard({
         <div className="post-actions">
           <LikeButton isLiked={post.reaction === 'like'} onToggle={onLike} disabled={isOwnPost} />
           {showDislikeButton && post.reaction !== 'like' ? (
-            <button className="chip" onClick={onDislike} type="button">Hide</button>
+            <HideButton postId={post.id} onHide={onHide ?? (() => onDislike())} />
           ) : null}
           <button className="chip" onClick={() => onReply()} type="button">Reply</button>
         </div>

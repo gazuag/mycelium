@@ -14,6 +14,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
+import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize } from './p2p/protocol';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
@@ -531,7 +532,7 @@ function App() {
 
         const sinceMs = since ? Date.parse(since) : 0;
         const feedPosts = posts
-          .filter((post) => !blockedPeerSet.has(post.author))
+          .filter((post) => !isBlockedPost(post))
           .filter((post) => post.author === identity?.id || contactsRef.current.some((contact) => contact.fingerprint === post.author && contact.followed))
           .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -539,7 +540,7 @@ function App() {
 
         const recommendations = posts
           .filter((post) => post.isRecommendation && post.recommendedBy)
-          .filter((post) => !blockedPeerSet.has(post.author))
+          .filter((post) => !isBlockedPost(post))
           .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, Math.max(1, limit));
@@ -711,7 +712,7 @@ function App() {
       if (rawProfile) {
         try {
           const parsed = JSON.parse(rawProfile);
-          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string' || parsed.feedMix) {
+          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string' || parsed.feedMix || Array.isArray(parsed.blockedPeers) || Array.isArray(parsed.hiddenPeers)) {
             const parsedFeedMix = parsed.feedMix && typeof parsed.feedMix === 'object'
               ? {
                   followedAuthors: Number(parsed.feedMix.followedAuthors ?? DEFAULT_FEED_MIX.followedAuthors),
@@ -1135,7 +1136,8 @@ function App() {
   }
 
   const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
-  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !blockedPeerSet.has(post.author));
+  const isBlockedPost = (post: StoredPost) => blockedPeerSet.has(post.author) || Boolean(post.authorFingerprint && blockedPeerSet.has(post.authorFingerprint));
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !isBlockedPost(post));
 
   const visibleContacts = useMemo(
     () => contacts.filter((contact) => {
@@ -1159,13 +1161,13 @@ function App() {
 
     const authoredByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
-      .filter((post) => !blockedPeerSet.has(post.author))
+      .filter((post) => !isBlockedPost(post))
       .filter((post) => followedSet.has(post.author))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     const likedByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
-      .filter((post) => !blockedPeerSet.has(post.author))
+      .filter((post) => !isBlockedPost(post))
       .filter((post) => post.reaction === 'like')
       .filter((post) => {
         const author = post.author;
@@ -1211,11 +1213,11 @@ function App() {
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
   const profilePosts = profileContactId
-    ? posts.filter((post) => profileAuthorIds.has(post.author) && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => profileAuthorIds.has(post.author) && !isBlockedPost(post)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
-    ? posts.filter((post) => post.recommendedBy === profileContactId && !blockedPeerSet.has(post.author)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts.filter((post) => post.recommendedBy === profileContactId && !isBlockedPost(post)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
@@ -1259,9 +1261,9 @@ function App() {
       localStorage.setItem('myProfile', JSON.stringify(nextProfile));
       return nextProfile;
     });
-    setContacts((prev) => prev.filter((contact) => contact.fingerprint !== peerId));
-    setPosts((prev) => prev.filter((post) => post.author !== peerId));
-    setDiscoveryPosts((prev) => prev.filter((post) => post.author !== peerId));
+    setContacts((prev) => prev.filter((candidate) => candidate.fingerprint !== peerId));
+    setPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
+    setDiscoveryPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
     setDirectChats((prev) => {
       const next = { ...prev };
       delete next[peerId];
@@ -1347,6 +1349,7 @@ function App() {
     try {
       const items = await fetchDiscovery(socket, 20);
       const verifiedPosts = await Promise.all(items.map(async (post) => {
+        const cachedPost = posts.find((cached) => cached.id === post.id);
         try {
           const valid = await verifySignedPost(post);
           const knownContact = contactsRef.current.find((contact) =>
@@ -1356,6 +1359,13 @@ function App() {
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return {
             ...post,
+            ...(cachedPost ? {
+              reaction: cachedPost.reaction,
+              isRecommendation: cachedPost.isRecommendation,
+              recommendedBy: cachedPost.recommendedBy,
+              authorFingerprint: cachedPost.authorFingerprint,
+              authorDisplayName: cachedPost.authorDisplayName
+            } : {}),
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
             valid,
@@ -1370,6 +1380,13 @@ function App() {
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return {
             ...post,
+            ...(cachedPost ? {
+              reaction: cachedPost.reaction,
+              isRecommendation: cachedPost.isRecommendation,
+              recommendedBy: cachedPost.recommendedBy,
+              authorFingerprint: cachedPost.authorFingerprint,
+              authorDisplayName: cachedPost.authorDisplayName
+            } : {}),
             source: 'discovery' as const,
             receivedAt: new Date().toISOString(),
             valid: false,
@@ -1948,6 +1965,8 @@ function App() {
             onFollow={handleToggleFollow}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
+            onHide={handleHideDiscoveryPost}
+            onBlock={handleBlockPeer}
             onSave={handleSaveDiscoveryPost}
           />
         )}
@@ -1965,17 +1984,19 @@ function App() {
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
+            onHide={handleHidePost}
           />
         )}
 
         {page === 'myProfile' && myProfileContact && (
           <ProfilePage
             contact={myProfileContact}
-            posts={posts.filter((post) => post.author === identity?.id || post.author === identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            posts={posts.filter((post) => post.author === identity?.id || post.author === identity?.publicKey || post.authorFingerprint === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
             likedPosts={posts.filter((post) => post.recommendedBy === identity?.id && post.author !== identity?.id && post.author !== identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
+            onHide={handleHidePost}
             isOwnProfile
             profileSettingsOpen={profileSettingsOpen}
             onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}
@@ -2040,6 +2061,10 @@ function App() {
                   <button className="btn secondary" onClick={handleImportIdentity}>Import Identity</button>
                   <button className="btn secondary" onClick={handleCreateIdentity}>Create New Identity</button>
                   <button className="btn secondary" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
+                </div>
+                <div className="blocked-peers-settings">
+                  <h3>Blocked Peers</h3>
+                  <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
                 </div>
               </div>
             }

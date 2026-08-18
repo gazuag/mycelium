@@ -2,6 +2,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
+import { BlockButton } from './BlockButton';
 
 interface PeerCardProps {
   contact: Contact;
@@ -38,7 +39,9 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
           myPeerId={myPeerId}
           onToggleFollow={async (peerId) => { await onToggleFollow(peerId); }}
         />
-        {onBlock ? <button className="chip secondary" onClick={() => onBlock(contact.fingerprint)} type="button">Block</button> : null}
+        {onBlock ? (
+          <BlockButton peerId={contact.fingerprint} contacts={[contact]} myPeerId={myPeerId} onBlock={onBlock} />
+        ) : null}
       </div>
     </article>
   );
