@@ -84,6 +84,7 @@ function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
+  const postsRef = useRef<StoredPost[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
   const outboundAckTimersRef = useRef<Record<string, number>>({});
   const recentOutboundMessageKeysRef = useRef<Record<string, Set<string>>>({});
@@ -152,6 +153,10 @@ function App() {
   useEffect(() => {
     contactsRef.current = contacts;
   }, [contacts]);
+
+  useEffect(() => {
+    postsRef.current = posts;
+  }, [posts]);
 
   useEffect(() => {
     messageQueueRef.current = messageQueue;
@@ -531,14 +536,14 @@ function App() {
         }
 
         const sinceMs = since ? Date.parse(since) : 0;
-        const feedPosts = posts
+        const feedPosts = postsRef.current
           .filter((post) => !isBlockedPost(post))
-          .filter((post) => post.author === identity?.id || contactsRef.current.some((contact) => contact.fingerprint === post.author && contact.followed))
+          .filter((post) => post.author === identityRef.current?.id || contactsRef.current.some((contact) => contact.fingerprint === post.author && contact.followed))
           .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, Math.max(1, limit));
 
-        const recommendations = posts
+        const recommendations = postsRef.current
           .filter((post) => post.isRecommendation && post.recommendedBy)
           .filter((post) => !isBlockedPost(post))
           .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
