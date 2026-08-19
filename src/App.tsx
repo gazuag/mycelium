@@ -226,14 +226,14 @@ function App() {
 
   const getLocalDisplayName = () => myProfile.displayName.trim() || generatedDisplayName || 'Me';
 
-  const buildPeerMetadata = (peerId: string) => {
+  const buildPeerMetadata = (peerId: string, followingOverride?: boolean) => {
     const p = myProfileRef.current;
     const id = identityRef.current;
     const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
     return {
       author: id?.id ?? '',
       displayName: p.displayName.trim() || fallbackName || 'Me',
-      following: contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
+      following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
       bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
       tags: []
@@ -574,6 +574,10 @@ function App() {
           return;
         }
 
+        for (const stored of uniqueById.values()) {
+          await savePost(stored);
+        }
+
         setPosts((prev) => {
           const merged = new Map<string, StoredPost>();
           for (const existing of prev) {
@@ -595,7 +599,8 @@ function App() {
         const manager = peerManagersRef.current[peer];
         if (manager) {
           manager.sendMetadata(buildPeerMetadata(peer));
-          manager.sendRequestPosts();
+          const since = localStorage.getItem(`myceliumHomeSync:${peer}`);
+          manager.sendRequestPosts(since, 100);
         }
         await flushQueuedMessages(peer);
       },
@@ -910,6 +915,11 @@ function App() {
   }, [page, discoveryPosts.length]);
 
   useEffect(() => {
+    if (!identity?.id || page !== 'home') return;
+    void handleRefreshHomeFeed();
+  }, [page, identity?.id]);
+
+  useEffect(() => {
     if (!identity?.id) return;
     const interval = window.setInterval(() => {
       const lastSync = localStorage.getItem('myceliumLastHomeSync');
@@ -1012,12 +1022,16 @@ function App() {
     const updated = { ...baseContact, publicKey: normalizedId, fingerprint, followed: !baseContact.followed };
 
     await saveContact(updated);
-    setContacts((prev) => dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === normalizedId || c.fingerprint === peerId || c.fingerprint === fingerprint ? updated : c)).concat(existing ? [] : [updated])));
+    setContacts((prev) => {
+      const next = dedupeContactsByFingerprint(prev.map((c) => (c.publicKey === normalizedId || c.fingerprint === peerId || c.fingerprint === fingerprint ? updated : c)).concat(existing ? [] : [updated]));
+      contactsRef.current = next;
+      return next;
+    });
     const socket = signallingSocketRef.current;
     const manager = peerManagersRef.current[fingerprint] ?? ensurePeerManager(fingerprint);
     if (socket?.readyState === WebSocket.OPEN && manager) {
       if (manager.isDataChannelOpen()) {
-        manager.sendMetadata(buildPeerMetadata(fingerprint));
+        manager.sendMetadata(buildPeerMetadata(fingerprint, updated.followed));
       } else {
         void manager.createOffer(fingerprint, socket);
       }
@@ -1326,10 +1340,18 @@ function App() {
 
       for (const contact of followedPeers) {
         const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
-        const since = localStorage.getItem(`myceliumHomeSync:${contact.fingerprint}`);
-        if (manager && socket.readyState === WebSocket.OPEN) {
+        if (!manager) continue;
+
+        if (manager.isDataChannelOpen()) {
+          const since = localStorage.getItem(`myceliumHomeSync:${contact.fingerprint}`);
           manager.sendRequestPosts(since, 100);
           addLog(`Requested home updates from ${contact.fingerprint}${since ? ` since ${since}` : ' (last 100)'}`);
+        } else if (contact.online) {
+          const channelState = manager.getDataChannelState();
+          if (channelState === 'closed' || channelState === 'missing') {
+            manager.createOffer(contact.fingerprint, socket);
+            addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
+          }
         }
       }
 

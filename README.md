@@ -284,6 +284,12 @@ Payload:
 - since
 - limit
 
+or:
+
+- [id-keys]
+
+One or more ID keys of specific posts requested if the peer has them. These could be their own posts or any posts that they have stored.
+
 ⸻
 
 ~~~
