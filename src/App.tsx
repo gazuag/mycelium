@@ -227,6 +227,21 @@ function App() {
     });
   };
 
+  // Signed posts store the author's raw public key; resolve it to the short fingerprint used for contact matching.
+  const resolvePostAuthorFingerprint = async (author: string): Promise<string> => {
+    if (identityRef.current && (author === identityRef.current.id || author === identityRef.current.publicKey)) {
+      return identityRef.current.id;
+    }
+    const knownContact = contactsRef.current.find((contact) => contact.fingerprint === author || contact.publicKey === author);
+    if (knownContact) return knownContact.fingerprint;
+    if (isValidPeerFingerprint(author)) return author;
+    try {
+      return await deriveFingerprint(author);
+    } catch {
+      return author;
+    }
+  };
+
   const generatedDisplayName = useMemo(() => identity ? fingerprintToHumanName(identity.id) : 'Me', [identity]);
 
   const getLocalDisplayName = () => myProfile.displayName.trim() || generatedDisplayName || 'Me';
@@ -508,11 +523,13 @@ function App() {
           return;
         }
         const valid = await verifySignedPost(post);
+        const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
         const stored: StoredPost = {
           ...post,
           source: 'peer',
           receivedAt: new Date().toISOString(),
-          valid
+          valid,
+          authorFingerprint
         };
         await savePost(stored);
         setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
@@ -538,7 +555,12 @@ function App() {
         const sinceMs = since ? Date.parse(since) : 0;
         const feedPosts = postsRef.current
           .filter((post) => !isBlockedPost(post))
-          .filter((post) => post.author === identityRef.current?.id || contactsRef.current.some((contact) => contact.fingerprint === post.author && contact.followed))
+          .filter((post) => {
+            const authorFingerprint = post.authorFingerprint ?? post.author;
+            return authorFingerprint === identityRef.current?.id
+              || post.author === identityRef.current?.publicKey
+              || contactsRef.current.some((contact) => contact.followed && (contact.fingerprint === authorFingerprint || contact.publicKey === post.author));
+          })
           .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .slice(0, Math.max(1, limit));
@@ -563,11 +585,13 @@ function App() {
 
         for (const post of allPosts) {
           const valid = await verifySignedPost(post);
+          const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
           const stored: StoredPost = {
             ...post,
             source: 'peer',
             receivedAt: new Date().toISOString(),
             valid,
+            authorFingerprint,
             isRecommendation: recommendations.some((recommendation) => recommendation.id === post.id),
             recommendedBy: recommendations.some((recommendation) => recommendation.id === post.id) ? peer : undefined
           };
@@ -1111,7 +1135,8 @@ function App() {
       source: 'local',
       receivedAt: new Date().toISOString(),
       valid: true,
-      replyCount: 0
+      replyCount: 0,
+      authorFingerprint: identity.id
     };
     await savePost(stored);
     setPosts((prev) => [stored, ...prev]);
@@ -1172,26 +1197,23 @@ function App() {
   }, [visibleDiscoveryPosts]);
 
   const visibleHomePosts = useMemo(() => {
-    const followedSet = new Set(
-      contacts
-        .filter((contact) => contact.followed)
-        .map((contact) => contact.fingerprint)
-    );
+    const followedContacts = contacts.filter((contact) => contact.followed);
+    const isByFollowedAuthor = (post: StoredPost) => {
+      const authorFingerprint = post.authorFingerprint ?? post.author;
+      return followedContacts.some((contact) => contact.fingerprint === authorFingerprint || contact.publicKey === post.author);
+    };
 
     const authoredByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
       .filter((post) => !isBlockedPost(post))
-      .filter((post) => followedSet.has(post.author))
+      .filter((post) => isByFollowedAuthor(post))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     const likedByFollowed = posts
       .filter((post) => !hiddenPostIds.has(post.id))
       .filter((post) => !isBlockedPost(post))
       .filter((post) => post.reaction === 'like')
-      .filter((post) => {
-        const author = post.author;
-        return author && author !== 'local' && followedSet.has(author);
-      })
+      .filter((post) => post.author && post.author !== 'local' && isByFollowedAuthor(post))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes);
