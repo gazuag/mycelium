@@ -95,6 +95,15 @@ export class PeerConnectionManager {
         this.onState(peerId, 'connecting');
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.onState(peerId, 'disconnected');
+        if (state === 'failed' || state === 'closed') {
+          // ICE rarely recovers from 'failed'; tear down so the next attempt builds a fresh RTCPeerConnection.
+          this.stopPingLoop();
+          this.dataChannel = null;
+          this.helloSent = false;
+          if (this.remoteId) {
+            this.onClose(this.remoteId);
+          }
+        }
       }
     };
 
@@ -397,22 +406,25 @@ export class PeerConnectionManager {
     this.remoteId = remoteId;
     this.polite = this.localId > remoteId;
     this.makingOffer = true;
-    this.onState(remoteId, 'signalling');
-    this.onEvent(remoteId, `Creating offer for ${remoteId}`);
-    const channel = this.peerConnection.createDataChannel('chat');
-    this.attachDataChannel(channel);
+    try {
+      this.onState(remoteId, 'signalling');
+      this.onEvent(remoteId, `Creating offer for ${remoteId}`);
+      const channel = this.peerConnection.createDataChannel('chat');
+      this.attachDataChannel(channel);
 
-    const offer = await this.peerConnection.createOffer();
-    await this.peerConnection.setLocalDescription(offer);
-    this.makingOffer = false;
-    this.onEvent(remoteId, `Sending offer to ${remoteId}`);
+      const offer = await this.peerConnection.createOffer();
+      await this.peerConnection.setLocalDescription(offer);
+      this.onEvent(remoteId, `Sending offer to ${remoteId}`);
 
-    this.sendSignal(signallingSocket, {
-      type: 'offer',
-      from: this.localId,
-      to: remoteId,
-      payload: offer
-    });
+      this.sendSignal(signallingSocket, {
+        type: 'offer',
+        from: this.localId,
+        to: remoteId,
+        payload: offer
+      });
+    } finally {
+      this.makingOffer = false;
+    }
   }
 
   private async addIceCandidate(candidate: RTCIceCandidateInit) {
@@ -442,9 +454,14 @@ export class PeerConnectionManager {
 
     if (message.type === 'offer') {
       const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';
-      if (offerCollision && !this.polite) {
-        this.onEvent(message.from, 'Ignoring incoming offer due to glare collision');
-        return;
+      if (offerCollision) {
+        if (!this.polite) {
+          this.onEvent(message.from, 'Ignoring incoming offer due to glare collision');
+          return;
+        }
+        // Polite peer yields: roll back our own in-flight offer so we can accept theirs instead.
+        this.onEvent(message.from, 'Rolling back local offer due to glare collision (polite peer)');
+        await this.peerConnection.setLocalDescription({ type: 'rollback' });
       }
 
       this.onEvent(message.from, `Received offer from ${message.from}`);

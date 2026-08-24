@@ -99,12 +99,13 @@ export function HomePage({
       ) : (
         <div className="feed-list">
           {visiblePosts.map((post) => {
+            const authorFingerprint = post.authorFingerprint ?? post.author;
             const matchingContact = contacts.find((contact) =>
-              contact.fingerprint === post.author || contact.publicKey === post.author
+              contact.fingerprint === authorFingerprint || contact.publicKey === post.author
             );
             const authorName = matchingContact
               ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.author)
-              : post.authorDisplayName?.trim() || 'Unknown peer';
+              : displayNameOrFallback(post.authorDisplayName, authorFingerprint);
             const recommendationLabel = post.isRecommendation && post.recommendedBy
               ? `Recommended by ${displayNameOrFallback(
                   contacts.find((contact) =>
@@ -124,7 +125,7 @@ export function HomePage({
                 key={post.id}
                 post={post}
                 authorName={authorName}
-                authorId={post.author}
+                authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 onAuthorClick={onAuthorClick}
                 onLike={() => onLike(post.id)}
                 onDislike={() => { onDislike(post.id); onHide(post.id); }}

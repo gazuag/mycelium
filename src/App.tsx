@@ -576,7 +576,6 @@ function App() {
         if (manager) {
           manager.sendPostsBatch(feedPosts, recommendations);
           addLog(`Sent ${feedPosts.length} posts and ${recommendations.length} recommendations to ${peer}`);
-          localStorage.setItem(`myceliumHomeSync:${peer}`, new Date().toISOString());
         }
       },
       async (peer: string, posts: SignedPost[], recommendations: SignedPost[] = []) => {
@@ -617,7 +616,21 @@ function App() {
           }
           return [...merged.values()].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
         });
-        localStorage.setItem(`myceliumHomeSync:${peer}`, new Date().toISOString());
+        // Only advance the cursor when something was actually received, and use the newest
+        // post timestamp (not wall-clock now) so an empty/partial batch never causes older,
+        // not-yet-synced posts to become permanently unreachable on future requests.
+        if (allPosts.length > 0) {
+          const latestTimestamp = allPosts.reduce(
+            (latest, post) => Math.max(latest, new Date(post.timestamp).getTime()),
+            0
+          );
+          const cursorKey = `myceliumHomeSync:${peer}`;
+          const existingCursor = localStorage.getItem(cursorKey);
+          const existingCursorMs = existingCursor ? Date.parse(existingCursor) : 0;
+          if (latestTimestamp > existingCursorMs) {
+            localStorage.setItem(cursorKey, new Date(latestTimestamp).toISOString());
+          }
+        }
         addLog(`Received ${allPosts.length} posts and recommendations from ${peer}`);
       },
       async (peer: string) => {
@@ -628,8 +641,11 @@ function App() {
         const manager = peerManagersRef.current[peer];
         if (manager) {
           manager.sendMetadata(buildPeerMetadata(peer));
-          const since = localStorage.getItem(`myceliumHomeSync:${peer}`);
-          manager.sendRequestPosts(since, 100);
+          const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
+          if (contact?.followed) {
+            const since = localStorage.getItem(`myceliumHomeSync:${peer}`);
+            manager.sendRequestPosts(since, 100);
+          }
         }
         await flushQueuedMessages(peer);
       },
@@ -1254,7 +1270,11 @@ function App() {
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
   const profilePosts = profileContactId
-    ? posts.filter((post) => profileAuthorIds.has(post.author) && !isBlockedPost(post)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? posts
+      // post.author is the raw public key, not the fingerprint - match on authorFingerprint too
+      .filter((post) => profileAuthorIds.has(post.authorFingerprint ?? post.author) || profileAuthorIds.has(post.author))
+      .filter((post) => !isBlockedPost(post))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
