@@ -70,6 +70,42 @@ The exact serialization format should be canonical and deterministic so that sig
 
 `replication_policy` describes how aggressively the object should be replicated and how long temporary replicas should be retained.
 
+The object ID and signature use the same canonical immutable content, excluding both `object_id` and `signature`:
+
+    object content
+        -> canonical serialization
+        -> SHA-256 -> object_id
+
+    object content
+        -> canonical serialization
+        -> author signature -> signature
+
+The signature is envelope metadata and is not part of the object ID. The object ID is not part of the signed content. Consequently, changing only the signature does not change the object ID, while changing any immutable content requires both a new object ID and a new valid signature.
+
+## Object Transport (Initial)
+
+The object layer uses an `ObjectTransport` abstraction and does not own peer connections. The initial transport path is a direct transfer to one already-connected peer:
+
+        Object Layer
+                -> ObjectTransport
+                -> existing PeerConnection/WebRTC transport
+
+The first object-layer packet is `OBJECT_STORE`. It reuses the existing Mycelium outer packet format and carries one complete generic distributed object in its payload:
+
+        {
+            "protocol": "mycelium",
+            "version": 1,
+            "id": "<UUID>",
+            "type": "OBJECT_STORE",
+            "timestamp": "<UTC ISO8601>",
+            "sender": "<Sender Node ID>",
+            "recipient": "<Recipient Node ID>",
+            "payload": { "object": { "<distributed object>" } },
+            "signature": "<Digital Signature>"
+        }
+
+At this stage, `OBJECT_STORE` is handled only between directly connected peers. The receiver validates the generic object independently and stores it locally. There is no forwarding, FIND, distributed QUERY, replication, retry routing, or delivery protocol yet. The object layer does not invoke application-specific post, profile, or direct-message handlers.
+
 ## 4. Encryption and signatures
 
 Signing and encryption are separate operations.

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { PeerConnectionManager } from './p2p/webrtc';
+import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
+import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deletePost, deleteDirectChatMessage } from './storage/idb';
 import { createSignedPost, verifySignedPost } from './crypto/signed';
 import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
@@ -15,8 +17,10 @@ import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
-import { canonicalize } from './p2p/protocol';
+import { canonicalize, type PacketSigner } from './p2p/protocol';
+import { buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, IndexedDbObjectStore, receiveFindResponsePacket, receiveObjectPacket, respondToFindPacket, type ObjectPacket, type ObjectStore } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
+import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -87,6 +91,7 @@ function App() {
   const postsRef = useRef<StoredPost[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
   const outboundAckTimersRef = useRef<Record<string, number>>({});
+  const outboundChatMessageIdsRef = useRef<Record<string, string>>({});
   const recentOutboundMessageKeysRef = useRef<Record<string, Set<string>>>({});
   const pageRef = useRef<PageKey>('home');
   const chatContactIdRef = useRef<string | null>(null);
@@ -134,9 +139,23 @@ function App() {
   const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
+  const [objectTestPeerId, setObjectTestPeerId] = useState('');
+  const [objectTestStatus, setObjectTestStatus] = useState('');
+  const [objectTestLastId, setObjectTestLastId] = useState<string | null>(null);
+  const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; payload: unknown }>>([]);
+  const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
   const selectedContactIdRef = useRef<string | null>(null);
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
+  const objectStoreRef = useRef<ObjectStore | null>(null);
+  const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
+
+  if (!objectStoreRef.current) {
+    objectStoreRef.current = new IndexedDbObjectStore();
+  }
+  if (!objectTransportRef.current) {
+    objectTransportRef.current = new PeerConnectionObjectTransport(() => peerManagersRef.current);
+  }
 
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
@@ -226,6 +245,41 @@ function App() {
       return next;
     });
   };
+
+  const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    if (packet.type === 'FIND') {
+      const handled = await respondToFindPacket(packet, store, (response) => objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable')), identityRef.current?.id ?? 'unknown');
+      addLog(`${handled ? 'Handled' : 'Rejected'} generic FIND from ${peerId}`);
+      return;
+    }
+    if (packet.type === 'FIND_RESPONSE') {
+      const found = await receiveFindResponsePacket(packet, store);
+      addLog(`${found ? 'Stored' : 'Rejected'} generic FIND response from ${peerId}`);
+      if (found) void refreshObjectStore();
+      return;
+    }
+    const stored = await receiveObjectPacket(packet, store);
+    addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
+    if (stored) {
+      setObjectTestStatus(`Received and stored ${packet.payload.object.object_id} from ${peerId}`);
+      void refreshObjectStore();
+    }
+  };
+
+  const refreshObjectStore = async () => {
+    const objects = await objectStoreRef.current?.query();
+    setObjectStoreObjects((objects ?? []) as Array<{ object_id: string; object_type: string; author: string; payload: unknown }>);
+  };
+
+  useEffect(() => {
+    const transport = objectTransportRef.current;
+    if (!transport) return;
+    return transport.onPacket((peerId, packet) => {
+      void handleObjectPacket(peerId, packet);
+    });
+  }, []);
 
   // Signed posts store the author's raw public key; resolve it to the short fingerprint used for contact matching.
   const resolvePostAuthorFingerprint = async (author: string): Promise<string> => {
@@ -462,11 +516,10 @@ function App() {
   const ensurePeerManager = (peerId: string) => {
     const existing = peerManagersRef.current[peerId];
     if (existing) {
-      const state = existing.getDataChannelState();
-      if (state === 'open' || state === 'connecting') {
+      if (!existing.needsReplacement()) {
         return existing;
       }
-      delete peerManagersRef.current[peerId];
+      closeAndRemovePeerManager(peerManagersRef.current, peerId, existing);
     }
     if (!identity) return null;
 
@@ -481,9 +534,12 @@ function App() {
       payload: Record<string, unknown>;
     }) => signString(identity.privateKey, canonicalize(packet));
 
-    const manager = new PeerConnectionManager(
+    let manager: PeerConnectionManager;
+    const isCurrentManager = (peer: string) => peerManagersRef.current[peer] === manager;
+    manager = new PeerConnectionManager(
       identity.id,
       (peer, state) => {
+        if (!isCurrentManager(peer)) return;
         setConnectionStatus(state);
         updateContactState(peer, { connected: state === 'connected', lastConnectionStatus: state });
         if (state !== 'connected') {
@@ -491,6 +547,7 @@ function App() {
         }
       },
       (peer, incoming) => {
+        if (!isCurrentManager(peer)) return;
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring direct message from invalid peer id: ${peer}`);
           return;
@@ -518,6 +575,7 @@ function App() {
         }
       },
       async (peer: string, post: SignedPost) => {
+        if (!isCurrentManager(peer)) return;
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} post ignored`);
           return;
@@ -536,6 +594,7 @@ function App() {
         addLog(`Received ${valid ? 'verified' : 'invalid'} post from ${peer}`);
       },
       (peer: string, metadata: PeerMetadata) => {
+        if (!isCurrentManager(peer)) return;
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
           return;
@@ -547,6 +606,7 @@ function App() {
         handlePeerMetadata(peer, metadata);
       },
       async (peer: string, since: string | null = null, limit = 100) => {
+        if (!isCurrentManager(peer)) return;
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} requested feed ignored`);
           return;
@@ -579,6 +639,7 @@ function App() {
         }
       },
       async (peer: string, posts: SignedPost[], recommendations: SignedPost[] = []) => {
+        if (!isCurrentManager(peer)) return;
         const uniqueById = new Map<string, StoredPost>();
         const allPosts = [...posts, ...recommendations];
 
@@ -634,6 +695,7 @@ function App() {
         addLog(`Received ${allPosts.length} posts and recommendations from ${peer}`);
       },
       async (peer: string) => {
+        if (!isCurrentManager(peer)) return;
         setDataChannelOpen(true);
         setActivePeerId(peer);
         updateContactState(peer, { connected: true });
@@ -650,8 +712,9 @@ function App() {
         await flushQueuedMessages(peer);
       },
       (peer: string) => {
+        if (!isCurrentManager(peer)) return;
         // Remove dead manager so reconnect creates a fresh RTCPeerConnection
-        delete peerManagersRef.current[peer];
+        closeAndRemovePeerManager(peerManagersRef.current, peer, manager);
         if (selectedContactIdRef.current === peer) {
           setDataChannelOpen(false);
           setActivePeerId(null);
@@ -659,9 +722,11 @@ function App() {
         updateContactState(peer, { connected: false, lastConnectionStatus: 'disconnected' });
       },
       (peer: string, event: string) => {
+        if (!isCurrentManager(peer)) return;
         addLog(`Peer ${peer}: ${event}`);
       },
       (peer: string) => {
+        if (!isCurrentManager(peer)) return;
         // Respond to PROFILE_REQUEST with our current profile
         const manager = peerManagersRef.current[peer];
         if (manager) {
@@ -669,42 +734,41 @@ function App() {
           addLog(`Sent profile to ${peer} (on request)`);
         }
       },
-      async (peer: string, messageId: string) => {
-        const timerId = outboundAckTimersRef.current[messageId];
-        if (timerId) {
-          window.clearTimeout(timerId);
-          delete outboundAckTimersRef.current[messageId];
-        }
-        await updateDirectChatMessageStatus(messageId, 'sent');
-        markDirectMessageDelivered(peer, messageId, 'sent');
+      async (peer: string, transportMessageId: string) => {
+        if (!isCurrentManager(peer)) return;
+        const chatMessageId = acknowledgeMessage(outboundAckTimersRef.current, outboundChatMessageIdsRef.current, transportMessageId) ?? transportMessageId;
+          await updateDirectChatMessageStatus(chatMessageId, 'sent');
+          markDirectMessageDelivered(peer, chatMessageId, 'sent');
       },
-      packetSigner
+      packetSigner,
+      undefined,
+      undefined,
+      (peer, packet) => {
+        objectTransportRef.current?.handlePacket(peer, packet);
+      }
     );
 
     peerManagersRef.current[peerId] = manager;
     return manager;
   };
 
-  const registerMessageAckTimeout = (peerId: string, messageId: string, text: string) => {
-    if (outboundAckTimersRef.current[messageId]) {
-      window.clearTimeout(outboundAckTimersRef.current[messageId]);
-    }
-
-    outboundAckTimersRef.current[messageId] = window.setTimeout(async () => {
-      const alreadyQueued = messageQueueRef.current[peerId]?.some((entry) => entry.chatMessageId === messageId);
+  const registerMessageAckTimeout = (peerId: string, transportMessageId: string, chatMessageId: string, text: string) => {
+    scheduleMessageAckTimeout(outboundAckTimersRef.current, outboundChatMessageIdsRef.current, transportMessageId, chatMessageId, async () => {
+      addLog(`Direct-message ACK timeout fired for ${peerId} message ${transportMessageId}`);
+      const alreadyQueued = messageQueueRef.current[peerId]?.some((entry) => entry.chatMessageId === chatMessageId);
       if (alreadyQueued || isDuplicateOutboundMessage(peerId, text)) {
         return;
       }
 
-      await queuePeerMessage(peerId, text, messageId);
-      await updateDirectChatMessageStatus(messageId, 'queued');
-      markDirectMessageDelivered(peerId, messageId, 'queued');
+      await queuePeerMessage(peerId, text, chatMessageId);
+      await updateDirectChatMessageStatus(chatMessageId, 'queued');
+      markDirectMessageDelivered(peerId, chatMessageId, 'queued');
       const socket = signallingSocketRef.current;
       const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && manager) {
         manager.createOffer(peerId, socket);
       }
-    }, 5000);
+    });
   };
 
   const handlePeerList = async (peers: string[]) => {
@@ -898,10 +962,11 @@ function App() {
           reconnectTimerRef.current = null;
         }
         if (!suppressReconnectRef.current && (status === 'error' || status === 'closed') && reconnectTimerRef.current === null) {
+          addLog(`Signalling reconnect timer scheduled in 3000ms after ${status}`);
           reconnectTimerRef.current = window.setTimeout(() => {
             reconnectTimerRef.current = null;
             setSignallingReconnectTick((prev) => prev + 1);
-            addLog('Retrying signalling connection');
+            addLog('Signalling reconnect timer fired; retrying signalling connection');
           }, 3000);
         }
       }
@@ -921,6 +986,7 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
     const interval = window.setInterval(() => {
+      addLog('30-second peer reconnect interval fired');
       const socket = signallingSocketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
@@ -930,15 +996,12 @@ function App() {
         const manager = ensurePeerManager(contact.fingerprint);
         if (!manager) return;
 
-        const channelState = manager.getDataChannelState();
         const shouldReconnect = (contact.online || hasQueuedMessages) && (
           !contact.connected ||
-          channelState === 'closed' ||
-          channelState === 'missing' ||
-          channelState === 'connecting'
+          manager.needsReplacement()
         );
 
-        if (shouldReconnect && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
+        if (shouldReconnect && !manager.isNegotiating() && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
           addLog(`Reconnect attempt to ${contact.fingerprint}`);
           manager.createOffer(contact.fingerprint, socket);
         }
@@ -967,6 +1030,7 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
     const interval = window.setInterval(() => {
+      addLog('60-second home-sync interval fired');
       const lastSync = localStorage.getItem('myceliumLastHomeSync');
       if (!lastSync) {
         void handleRefreshHomeFeed();
@@ -1893,8 +1957,8 @@ function App() {
 
     if (canSendImmediately && manager) {
       const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'sent');
-      manager.sendChatMessage(trimmedMessage);
-      registerMessageAckTimeout(peerId, messageId, trimmedMessage);
+      const transportMessageId = manager.sendChatMessage(trimmedMessage);
+      registerMessageAckTimeout(peerId, transportMessageId, messageId, trimmedMessage);
       addLog(`Sent direct message to ${peerId}`);
     } else {
       const messageId = saveDirectMessage(peerId, trimmedMessage, false, 'queued');
@@ -1918,6 +1982,102 @@ function App() {
 
     updateContactState(peerId, { unreadMessages: 0 });
     setMessage('');
+  }
+
+  async function handleSendObjectTest() {
+    if (!identity || !objectTestPeerId) return;
+    try {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const objectIdentity = createObjectIdentity(identity);
+      const object = await createSignedObject({
+        object_type: 'mycelium.browser-test',
+        created_at: new Date().toISOString(),
+        payload: { message: 'Stage 2 browser transport test', sent_at: new Date().toISOString() },
+        replication_policy: {}
+      }, objectIdentity);
+      await store.put(object);
+      lastObjectTestRef.current = object;
+      setObjectTestLastId(object.object_id);
+      await refreshObjectStore();
+      const packetSigner: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+      const packet = await buildObjectStorePacket(identity.id, objectTestPeerId, object, packetSigner);
+      await objectTransportRef.current?.send(objectTestPeerId, packet);
+      setObjectTestStatus(`Created, stored locally, and sent ${object.object_id} to ${objectTestPeerId}`);
+      addLog(`Created and stored generic browser test object ${object.object_id}`);
+      addLog(`Sent generic browser test object ${object.object_id} to ${objectTestPeerId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Object test failed: ${message}`);
+      addLog(`Generic object test failed: ${message}`);
+    }
+  }
+
+  async function handleResendObjectTest() {
+    const object = lastObjectTestRef.current;
+    if (!identity || !object || !objectTestPeerId) return;
+    try {
+      const packetSigner: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+      const packet = await buildObjectStorePacket(identity.id, objectTestPeerId, object, packetSigner);
+      await objectTransportRef.current?.send(objectTestPeerId, packet);
+      await refreshObjectStore();
+      setObjectTestStatus(`Resent the same object ${object.object_id} to ${objectTestPeerId}`);
+      addLog(`Resent the same generic browser test object ${object.object_id} to ${objectTestPeerId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Object resend failed: ${message}`);
+      addLog(`Generic object resend failed: ${message}`);
+    }
+  }
+
+  async function handleFindObjectTest() {
+    const objectId = objectTestLastId;
+    const peerId = objectTestPeerId;
+    const store = objectStoreRef.current;
+    const transport = objectTransportRef.current;
+    if (!identity || !objectId || !peerId || !store || !transport) return;
+    try {
+      await store.delete(objectId);
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      await refreshObjectStore();
+      addLog(`FIND TEST: removed local copy ${objectId}; querying ${peerId}`);
+      const found = await findObject(identity.id, peerId, objectId, transport, store);
+      if (!found) {
+        setObjectTestStatus(`FIND TEST: FAIL - peer returned no object for ${objectId}`);
+        addLog(`FIND TEST: FAIL - no object returned for ${objectId}`);
+        return;
+      }
+      await refreshObjectStore();
+      setObjectTestStatus(`FIND TEST: PASS - retrieved and stored ${found.object_id} from ${peerId}`);
+      addLog(`FIND TEST: PASS - validated and stored ${found.object_id} from ${peerId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`FIND TEST: FAIL - ${message}`);
+      addLog(`FIND TEST: FAIL - ${message}`);
+    }
+  }
+
+  async function handleFindMissingObjectTest() {
+    const peerId = objectTestPeerId;
+    const store = objectStoreRef.current;
+    const transport = objectTransportRef.current;
+    if (!identity || !peerId || !store || !transport) return;
+    const missingObjectId = await sha256(`mycelium.find-missing-test:${identity.id}:${Date.now()}:${Math.random()}`);
+    try {
+      const found = await findObject(identity.id, peerId, missingObjectId, transport, store);
+      const localCopy = await store.get(missingObjectId);
+      if (found || localCopy) {
+        setObjectTestStatus(`FIND MISSING TEST: FAIL - unexpected object returned for ${missingObjectId}`);
+        addLog(`FIND MISSING TEST: FAIL - unexpected object returned for ${missingObjectId}`);
+        return;
+      }
+      setObjectTestStatus(`FIND MISSING TEST: PASS - peer returned no object for ${missingObjectId}`);
+      addLog(`FIND MISSING TEST: PASS - no object stored for ${missingObjectId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`FIND MISSING TEST: FAIL - ${message}`);
+      addLog(`FIND MISSING TEST: FAIL - ${message}`);
+    }
   }
 
   function handleSendPostToPeer(post: StoredPost) {
@@ -2165,6 +2325,18 @@ function App() {
             signallingStatus={signallingStatus}
             connectedPeers={connectedPeersCount}
             syncStatus={syncStatus}
+            objectTransportTest={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
+              connectedPeers: objectTransportRef.current?.connectedPeers() ?? [],
+              selectedPeerId: objectTestPeerId,
+              status: objectTestStatus,
+              objects: objectStoreObjects,
+              onPeerChange: setObjectTestPeerId,
+              onSend: () => { void handleSendObjectTest(); },
+              onResend: () => { void handleResendObjectTest(); },
+              onFind: () => { void handleFindObjectTest(); },
+              onFindMissing: () => { void handleFindMissingObjectTest(); },
+              onRefresh: () => { void refreshObjectStore(); }
+            } : undefined}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());

@@ -14,6 +14,18 @@ interface SettingsPageProps {
   signallingStatus: string;
   connectedPeers: number;
   syncStatus: string;
+  objectTransportTest?: {
+    connectedPeers: string[];
+    selectedPeerId: string;
+    status: string;
+    objects: Array<{ object_id: string; object_type: string; author: string; payload: unknown }>;
+    onPeerChange: (peerId: string) => void;
+    onSend: () => void;
+    onResend: () => void;
+    onFind: () => void;
+    onFindMissing: () => void;
+    onRefresh: () => void;
+  };
 }
 
 export function SettingsPage({
@@ -31,7 +43,8 @@ export function SettingsPage({
   connectionStatus,
   signallingStatus,
   connectedPeers,
-  syncStatus
+  syncStatus,
+  objectTransportTest
 }: SettingsPageProps) {
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
@@ -110,6 +123,45 @@ export function SettingsPage({
         <p><strong>Discovery</strong></p>
         <p className="monospace break-word">{discoveryEndpoint}/api/discovery</p>
       </div>
+
+      {objectTransportTest && (
+        <div className="card">
+          <h3>Object transport test</h3>
+          <p className="note">Development-only direct OBJECT_STORE test.</p>
+          <div className="row">
+            <select
+              value={objectTransportTest.selectedPeerId}
+              onChange={(event) => objectTransportTest.onPeerChange(event.target.value)}
+            >
+              <option value="">Select connected peer</option>
+              {objectTransportTest.connectedPeers.map((peerId) => <option key={peerId} value={peerId}>{peerId}</option>)}
+            </select>
+            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSend}>
+              Create and send test object
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onResend}>
+              Send last object again
+            </button>
+            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFind}>
+              Run FIND test
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFindMissing}>
+              FIND missing object
+            </button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onRefresh}>Refresh object store</button>
+          </div>
+          {objectTransportTest.status && <p className="note monospace break-word">{objectTransportTest.status}</p>}
+          <p className="note">Local objects: {objectTransportTest.objects.length}</p>
+          {objectTransportTest.objects.map((object) => (
+            <div className="note monospace break-word" key={object.object_id}>
+              <div>{object.object_type}</div>
+              <div>{object.object_id}</div>
+              <div>author: {object.author}</div>
+              <div>payload: {JSON.stringify(object.payload)}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="card">
         <h3>Diagnostics</h3>

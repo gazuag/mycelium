@@ -1,9 +1,12 @@
 import type { PeerSignalMessage, SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata, SignedPost } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
+import type { ObjectPacket } from '../object-layer/types';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 const PING_INTERVAL_MS = 30000;
+let nextManagerId = 1;
+let nextConnectionId = 1;
 
 export class PeerConnectionManager {
   private peerConnection: RTCPeerConnection;
@@ -25,6 +28,7 @@ export class PeerConnectionManager {
   private onEvent: (peerId: string, event: string) => void;
   private onProfileRequest: (peerId: string) => void;
   private onMessageAck: (peerId: string, messageId: string) => void;
+  private onObjectPacket?: (peerId: string, packet: ObjectPacket) => void;
   private packetSigner?: PacketSigner;
   private helloSent = false;
   private remoteSupportsMyp = false;
@@ -32,6 +36,14 @@ export class PeerConnectionManager {
   private pendingMessageAcks = new Map<string, { text: string; sentAt: string }>();
   private capabilities: string[];
   private softwareVersion: string;
+  private readonly managerId = `manager-${nextManagerId++}`;
+  private connectionId = '';
+  private connectionCreatedAt = 0;
+  private connectionEstablishedAt = 0;
+  private isOfferer = false;
+  private signalProcessing: Promise<void> = Promise.resolve();
+  private destroyed = false;
+  private awaitingIncomingChannel = false;
 
   constructor(
     localId: string,
@@ -49,7 +61,8 @@ export class PeerConnectionManager {
     onMessageAck: (peerId: string, messageId: string) => void,
     packetSigner?: PacketSigner,
     capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1'],
-    softwareVersion = 'mycelium-web/0.1'
+    softwareVersion = 'mycelium-web/0.1',
+    onObjectPacket?: (peerId: string, packet: ObjectPacket) => void
   ) {
     this.localId = localId;
     this.onState = onState;
@@ -65,17 +78,28 @@ export class PeerConnectionManager {
     this.onProfileRequest = onProfileRequest;
     this.onMessageAck = onMessageAck;
     this.packetSigner = packetSigner;
+    this.onObjectPacket = onObjectPacket;
     this.capabilities = capabilities;
     this.softwareVersion = softwareVersion;
     this.peerConnection = this.createConnection();
   }
 
   private createConnection() {
+    this.connectionId = `connection-${nextConnectionId++}`;
+    this.connectionCreatedAt = Date.now();
+    this.connectionEstablishedAt = 0;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    this.onEvent('<unknown>', `${this.managerId}/${this.connectionId} RTCPeerConnection created iceServers=${ICE_SERVERS.map((server) => server.urls).join(',')}`);
 
     pc.onicecandidate = (event) => {
+      const peerId = this.remoteId ?? '<unknown>';
+      if (event.candidate) {
+        const candidateType = getCandidateType(event.candidate.candidate);
+        this.onEvent(peerId, `${this.connectionLabel()} Local ICE candidate ready type=${candidateType} protocol=${event.candidate.protocol ?? 'unknown'} address=${event.candidate.address ?? '<hidden>'} elapsed=${this.connectionElapsed()}`);
+      } else {
+        this.onEvent(peerId, `${this.connectionLabel()} Local ICE candidate gathering complete elapsed=${this.connectionElapsed()}`);
+      }
       if (event.candidate && this.remoteId) {
-        this.onEvent(this.remoteId, `Local ICE candidate ready for ${this.remoteId}`);
         this.onSignal({
           type: 'ice-candidate',
           from: this.localId,
@@ -85,11 +109,26 @@ export class PeerConnectionManager {
       }
     };
 
+    pc.onicecandidateerror = (event) => {
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, `${this.connectionLabel()} ICE candidate error url=${event.url ?? '<unknown>'} code=${event.errorCode} text=${event.errorText || '<none>'} elapsed=${this.connectionElapsed()}`);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      const peerId = this.remoteId ?? '<unknown>';
+      this.onEvent(peerId, `${this.connectionLabel()} ICE connection state: ${pc.iceConnectionState} elapsed=${this.connectionElapsed()}`);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed' || pc.iceConnectionState === 'failed') {
+        void this.logSelectedCandidatePair(pc, peerId);
+      }
+    };
+
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       const peerId = this.remoteId ?? '<unknown>';
-      this.onEvent(peerId, `PeerConnection state: ${state}`);
+      this.onEvent(peerId, `${this.connectionLabel()} PeerConnection state: ${state} elapsed=${this.connectionElapsed()}`);
       if (state === 'connected') {
+        if (!this.connectionEstablishedAt) this.connectionEstablishedAt = Date.now();
+        void this.logSelectedCandidatePair(pc, peerId);
         this.onState(peerId, 'connected');
       } else if (state === 'connecting') {
         this.onState(peerId, 'connecting');
@@ -98,7 +137,6 @@ export class PeerConnectionManager {
         if (state === 'failed' || state === 'closed') {
           // ICE rarely recovers from 'failed'; tear down so the next attempt builds a fresh RTCPeerConnection.
           this.stopPingLoop();
-          this.dataChannel = null;
           this.helloSent = false;
           if (this.remoteId) {
             this.onClose(this.remoteId);
@@ -109,26 +147,74 @@ export class PeerConnectionManager {
 
     pc.onsignalingstatechange = () => {
       const peerId = this.remoteId ?? '<unknown>';
-      this.onEvent(peerId, `Signaling state: ${pc.signalingState}`);
+      this.onEvent(peerId, `${this.connectionLabel()} Signaling state: ${pc.signalingState}`);
     };
 
     pc.onicegatheringstatechange = () => {
       const peerId = this.remoteId ?? '<unknown>';
-      this.onEvent(peerId, `ICE gathering state: ${pc.iceGatheringState}`);
+      this.onEvent(peerId, `${this.connectionLabel()} ICE gathering state: ${pc.iceGatheringState} elapsed=${this.connectionElapsed()}`);
     };
 
     pc.ondatachannel = (event) => {
+      this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} ondatachannel label=${event.channel.label} id=${event.channel.id ?? '<unknown>'}`);
+      if (this.isOfferer && this.dataChannel && this.dataChannel !== event.channel) {
+        this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} ignoring duplicate data channel label=${event.channel.label} id=${event.channel.id ?? '<unknown>'}`);
+        event.channel.close();
+        return;
+      }
+      if (this.dataChannel && this.dataChannel !== event.channel) {
+        this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} replacing previous data channel with incoming channel id=${event.channel.id ?? '<unknown>'}`);
+        this.dataChannel.close();
+      }
+      this.awaitingIncomingChannel = false;
       this.attachDataChannel(event.channel);
     };
 
     return pc;
   }
 
+  private async logSelectedCandidatePair(pc: RTCPeerConnection, peerId: string) {
+    try {
+      const stats = await pc.getStats();
+      let selectedPair: CandidatePairStats | undefined;
+      const candidates = new Map<string, CandidateStats>();
+      stats.forEach((report) => {
+        if (report.type === 'candidate-pair') {
+          const pair = report as CandidatePairStats;
+          if (pair.state === 'succeeded' && pair.nominated) {
+            selectedPair = pair;
+          }
+        }
+        if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+          candidates.set(report.id, report as CandidateStats);
+        }
+      });
+      if (!selectedPair) {
+        this.onEvent(peerId, `${this.connectionLabel()} ICE selected candidate pair unavailable`);
+        return;
+      }
+      const local = candidates.get(selectedPair.localCandidateId);
+      const remote = candidates.get(selectedPair.remoteCandidateId);
+      const pairProtocol = local?.protocol && remote?.protocol
+        ? `${local.protocol}/${remote.protocol}`
+        : 'unknown';
+      this.onEvent(peerId, `${this.connectionLabel()} ICE selected pair local=${formatCandidate(local)} remote=${formatCandidate(remote)} pairProtocol=${pairProtocol} state=${selectedPair.state}`);
+    } catch (error) {
+      this.onEvent(peerId, `${this.connectionLabel()} ICE stats unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private attachDataChannel(channel: RTCDataChannel) {
+    const peerId = this.remoteId ?? '<unknown>';
+    this.onEvent(peerId, `${this.connectionLabel()} data channel attached label=${channel.label} id=${channel.id ?? '<unknown>'}`);
     this.dataChannel = channel;
     this.dataChannel.onopen = () => {
-      const peerId = this.remoteId ?? '<unknown>';
-      this.onEvent(peerId, 'Data channel opened');
+      if (this.dataChannel !== channel) {
+        this.onEvent(peerId, `${this.connectionLabel()} ignoring stale data channel open label=${channel.label} id=${channel.id ?? '<unknown>'}`);
+        channel.close();
+        return;
+      }
+      this.onEvent(peerId, `${this.connectionLabel()} Data channel opened label=${channel.label} id=${channel.id ?? '<unknown>'}`);
       this.onState(peerId, 'connected');
       this.sendHello();
       void this.sendPacket('PROFILE_REQUEST', {});
@@ -136,13 +222,17 @@ export class PeerConnectionManager {
       this.onOpen(peerId);
     };
     this.dataChannel.onclose = () => {
-      const peerId = this.remoteId ?? '<unknown>';
-      this.onEvent(peerId, 'Data channel closed');
+      if (this.dataChannel !== channel) {
+        this.onEvent(peerId, `${this.connectionLabel()} ignoring stale data channel close label=${channel.label} id=${channel.id ?? '<unknown>'}`);
+        return;
+      }
+      this.onEvent(peerId, `${this.connectionLabel()} Data channel closed label=${channel.label} id=${channel.id ?? '<unknown>'}`);
       this.stopPingLoop();
       this.onState(peerId, 'disconnected');
       this.onClose(peerId);
     };
     this.dataChannel.onmessage = (event) => {
+      if (this.dataChannel !== channel) return;
       const data = event.data;
       const peerId = this.remoteId ?? '<unknown>';
       if (typeof data === 'string') {
@@ -191,6 +281,12 @@ export class PeerConnectionManager {
   private handleMyceliumPacket(packet: any) {
     const peerId = this.remoteId ?? packet.sender ?? '<unknown>';
     switch (packet.type) {
+      case 'OBJECT_STORE':
+      case 'FIND':
+      case 'FIND_RESPONSE': {
+        this.onObjectPacket?.(peerId, packet as ObjectPacket);
+        return;
+      }
       case 'HELLO': {
         const nickname = typeof packet.payload?.nickname === 'string' ? packet.payload.nickname : peerId;
         const supported = Array.isArray(packet.payload?.capabilities) ? packet.payload.capabilities.join(', ') : 'none';
@@ -205,7 +301,7 @@ export class PeerConnectionManager {
         return;
       }
       case 'PONG': {
-        this.onEvent(peerId, `PONG received for ping ${String(packet.payload?.pingId ?? 'unknown')}`);
+        this.onEvent(peerId, `${this.connectionLabel()} PONG received for ping ${String(packet.payload?.pingId ?? 'unknown')}`);
         return;
       }
       case 'MESSAGE': {
@@ -294,9 +390,30 @@ export class PeerConnectionManager {
     return this.dataChannel?.readyState ?? 'missing';
   }
 
+  public isNegotiating() {
+    return this.makingOffer
+      || this.peerConnection.signalingState === 'have-local-offer'
+      || this.peerConnection.signalingState === 'have-remote-offer'
+      || this.peerConnection.connectionState === 'connecting'
+      || this.peerConnection.iceConnectionState === 'checking'
+      || this.awaitingIncomingChannel;
+  }
+
+  public needsReplacement() {
+    return this.destroyed
+      || this.peerConnection.connectionState === 'failed'
+      || this.peerConnection.connectionState === 'closed'
+      || this.peerConnection.iceConnectionState === 'failed'
+      || this.peerConnection.iceConnectionState === 'closed';
+  }
+
   private async sendPacket(type: Parameters<typeof buildPacket>[2], payload: Record<string, unknown>) {
     if (!this.remoteId) return;
     const packet = await buildPacket(this.localId, this.remoteId, type, payload, this.packetSigner);
+    this.sendData(packet);
+  }
+
+  public sendObjectPacket(packet: ObjectPacket) {
     this.sendData(packet);
   }
 
@@ -319,8 +436,10 @@ export class PeerConnectionManager {
   private startPingLoop() {
     this.stopPingLoop();
     this.pingIntervalId = window.setInterval(() => {
+      const pingId = createPacketId();
+      this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} sending PING ${pingId}`);
       void this.sendPacket('PING', {
-        pingId: createPacketId(),
+        pingId,
         sentAt: new Date().toISOString()
       });
     }, PING_INTERVAL_MS);
@@ -351,7 +470,7 @@ export class PeerConnectionManager {
           signature: 'unsigned-v1'
         }
       });
-      return;
+      return messageId;
     }
 
     const messageId = createPacketId();
@@ -360,6 +479,7 @@ export class PeerConnectionManager {
       sentAt: new Date().toISOString()
     });
     this.sendData({ type: 'chat', id: messageId, text });
+    return messageId;
   }
 
   public sendSignedPost(post: SignedPost) {
@@ -403,12 +523,46 @@ export class PeerConnectionManager {
   }
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {
+    this.onEvent(remoteId, `${this.connectionLabel()} createOffer called state=${this.peerConnection.connectionState} signaling=${this.peerConnection.signalingState} channel=${this.dataChannel?.label ?? '<none>'}:${this.dataChannel?.id ?? '<none>'}`);
     this.remoteId = remoteId;
+    if (this.destroyed) {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: manager is destroyed`);
+      return;
+    }
+    if (this.peerConnection.connectionState === 'connected') {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: connectionState=connected and renegotiation is not required`);
+      return;
+    }
+    if (this.dataChannel) {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: primary data channel already exists`);
+      return;
+    }
+    if (this.makingOffer) {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: makingOffer=true`);
+      return;
+    }
+      if (this.awaitingIncomingChannel) {
+        this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: waiting for the answerer's incoming data channel`);
+        return;
+      } else if (this.peerConnection.signalingState === 'have-local-offer') {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: signalingState=have-local-offer; an answer is outstanding`);
+      return;
+    }
+    if (this.peerConnection.connectionState === 'connecting') {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: connectionState=connecting`);
+      return;
+    }
+    if (this.peerConnection.signalingState !== 'stable') {
+      this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: signalingState=${this.peerConnection.signalingState}`);
+      return;
+    }
+    this.isOfferer = true;
     this.polite = this.localId > remoteId;
     this.makingOffer = true;
     try {
       this.onState(remoteId, 'signalling');
       this.onEvent(remoteId, `Creating offer for ${remoteId}`);
+      this.onEvent(remoteId, `${this.connectionLabel()} createDataChannel label=chat`);
       const channel = this.peerConnection.createDataChannel('chat');
       this.attachDataChannel(channel);
 
@@ -428,6 +582,9 @@ export class PeerConnectionManager {
   }
 
   private async addIceCandidate(candidate: RTCIceCandidateInit) {
+    const details = parseCandidate(candidate.candidate ?? '');
+    const peerId = this.remoteId ?? '<unknown>';
+    this.onEvent(peerId, `Remote ICE candidate received type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port}`);
     if (this.peerConnection.remoteDescription) {
       await this.peerConnection.addIceCandidate(candidate);
     } else {
@@ -442,8 +599,18 @@ export class PeerConnectionManager {
     this.pendingIceCandidates = [];
   }
 
-  public async handleSignal(message: PeerSignalMessage, signallingSocket: WebSocket) {
+  public handleSignal(message: PeerSignalMessage, signallingSocket: WebSocket) {
+    const queued = this.signalProcessing.then(() => this.processSignal(message, signallingSocket));
+    this.signalProcessing = queued.catch(() => undefined);
+    return queued;
+  }
+
+  private async processSignal(message: PeerSignalMessage, signallingSocket: WebSocket) {
     if (message.to !== this.localId) return;
+    if (this.destroyed) {
+      this.onEvent(message.from, `${this.connectionLabel()} ignored signal: manager is destroyed`);
+      return;
+    }
 
     this.remoteId = message.from;
     this.polite = this.localId > message.from;
@@ -462,9 +629,16 @@ export class PeerConnectionManager {
         // Polite peer yields: roll back our own in-flight offer so we can accept theirs instead.
         this.onEvent(message.from, 'Rolling back local offer due to glare collision (polite peer)');
         await this.peerConnection.setLocalDescription({ type: 'rollback' });
+        if (this.dataChannel) {
+          this.onEvent(message.from, `${this.connectionLabel()} closing locally-created channel after yielding offer collision`);
+          this.dataChannel.close();
+          this.dataChannel = null;
+        }
       }
 
       this.onEvent(message.from, `Received offer from ${message.from}`);
+      this.isOfferer = false;
+      this.awaitingIncomingChannel = true;
       await this.peerConnection.setRemoteDescription(message.payload);
       await this.flushPendingIceCandidates();
 
@@ -478,9 +652,17 @@ export class PeerConnectionManager {
         payload: answer
       });
     } else if (message.type === 'answer') {
+      if (this.peerConnection.signalingState !== 'have-local-offer') {
+        this.onEvent(message.from, `${this.connectionLabel()} ignoring stale answer in signalingState=${this.peerConnection.signalingState}`);
+        return;
+      }
       this.onEvent(message.from, `Received answer from ${message.from}`);
-      await this.peerConnection.setRemoteDescription(message.payload);
-      await this.flushPendingIceCandidates();
+      try {
+        await this.peerConnection.setRemoteDescription(message.payload);
+        await this.flushPendingIceCandidates();
+      } catch (error) {
+        this.onEvent(message.from, `${this.connectionLabel()} failed to apply answer: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } else if (message.type === 'ice-candidate') {
       this.onEvent(message.from, `Received ICE candidate from ${message.from}`);
       await this.addIceCandidate(message.payload);
@@ -496,12 +678,65 @@ export class PeerConnectionManager {
   }
 
   public closeConnection() {
-    if (this.dataChannel && this.dataChannel.readyState !== 'closed') {
-      this.dataChannel.close();
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} closeConnection called state=${this.peerConnection.connectionState}`);
+    const channel = this.dataChannel;
+    this.dataChannel = null;
+    if (channel && channel.readyState !== 'closed') {
+      channel.close();
     }
     if (this.peerConnection && this.peerConnection.connectionState !== 'closed') {
       this.peerConnection.close();
     }
     this.stopPingLoop();
   }
+
+  private connectionLabel() {
+    return `${this.managerId}/${this.connectionId}`;
+  }
+
+  private connectionElapsed() {
+    const start = this.connectionEstablishedAt || this.connectionCreatedAt;
+    return `${Date.now() - start}ms`;
+  }
+}
+
+type CandidatePairStats = {
+  localCandidateId: string;
+  remoteCandidateId: string;
+  state: string;
+  protocol?: string;
+  nominated?: boolean;
+};
+
+type CandidateStats = {
+  candidateType?: string;
+  protocol?: string;
+  address?: string;
+  ip?: string;
+  port?: number;
+};
+
+function getCandidateType(candidate: string) {
+  return parseCandidate(candidate).type;
+}
+
+function parseCandidate(candidate: string) {
+  const parts = candidate.trim().split(/\s+/);
+  const typeIndex = parts.indexOf('typ');
+  const address = parts[4] ?? '<unknown>';
+  const port = parts[5] ?? '<unknown>';
+  return {
+    type: typeIndex >= 0 ? parts[typeIndex + 1] ?? 'unknown' : 'unknown',
+    protocol: parts[2]?.toLowerCase() ?? 'unknown',
+    address,
+    port
+  };
+}
+
+function formatCandidate(candidate: CandidateStats | undefined) {
+  const address = candidate?.address ?? candidate?.ip ?? '<unknown>';
+  const port = candidate?.port === undefined ? '<unknown>' : String(candidate.port);
+  return `${candidate?.candidateType ?? 'unknown'}:${candidate?.protocol ?? 'unknown'}@${address}:${port}`;
 }

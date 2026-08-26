@@ -54,24 +54,25 @@ export function connectToSignalling(
   }
   const socket = new WebSocket(signalServerUrl);
   const normalizedId = localId.trim();
+  const socketStartedAt = Date.now();
 
   onStatus?.('connecting');
 
   socket.addEventListener('open', () => {
     onStatus?.('connected');
-    console.log('Signalling server connected', signalServerUrl);
+    console.log(`[signalling peer=${normalizedId} elapsed=${Date.now() - socketStartedAt}ms] WebSocket open`, signalServerUrl);
     const registerMessage = JSON.stringify({ type: 'register', id: normalizedId });
     socket.send(registerMessage);
   });
 
   socket.addEventListener('close', () => {
     onStatus?.('closed');
-    console.log('Signalling server disconnected', signalServerUrl);
+    console.log(`[signalling peer=${normalizedId} elapsed=${Date.now() - socketStartedAt}ms] WebSocket close`, signalServerUrl);
   });
 
   socket.addEventListener('error', (event) => {
     onStatus?.('error');
-    console.error('Signalling server error', signalServerUrl, event);
+    console.error(`[signalling peer=${normalizedId} elapsed=${Date.now() - socketStartedAt}ms] WebSocket error`, signalServerUrl, event);
   });
 
   socket.addEventListener('message', (event) => {
