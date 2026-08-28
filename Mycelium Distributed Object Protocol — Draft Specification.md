@@ -106,6 +106,14 @@ The first object-layer packet is `OBJECT_STORE`. It reuses the existing Mycelium
 
 At this stage, `OBJECT_STORE` is handled only between directly connected peers. The receiver validates the generic object independently and stores it locally. There is no forwarding, FIND, distributed QUERY, replication, retry routing, or delivery protocol yet. The object layer does not invoke application-specific post, profile, or direct-message handlers.
 
+## Direct FIND Request Tracking
+
+The initial direct `FIND` operation includes a unique `requestId`, a non-negative `ttl`, and an optional `origin` field in its payload. The `origin` identifies the node that originated the request and therefore the node that should ultimately receive any successful `FIND_RESPONSE`. A `FIND_RESPONSE` repeats the request ID and requested object ID and may also carry the same `origin` for route validation.
+
+The receiving peer keeps a short-lived cache of processed request IDs. A repeated request ID is ignored, including when a later copy contains a different object ID. Different request IDs may independently request the same object. Every valid request performs a local lookup, including when `ttl` is zero. A `ttl` of zero is the final lookup hop: a matching object is returned, while a missing object produces an empty response and is not forwarded. Positive TTL values are consumed by this hop and may be forwarded only when the local lookup misses. The cache is bounded by request lifetime and is cleaned as new requests arrive.
+
+For Phase 5 recursive forwarding, every forwarded `FIND` keeps the same `requestId`, decrements `ttl`, and preserves `origin`. The forwarding peer does not create a new request ID. When a peer forwards a request, it must exclude the peer that sent the request to it. If a peer has the object, it creates a `FIND_RESPONSE` addressed to the immediate upstream peer; each relay re-emits the same response toward the node recorded as the request `origin` or the previous hop from its local request route cache. This prevents a response from being broadcast to every connected peer while still allowing it to traverse the reverse path of the request.
+
 ## 4. Encryption and signatures
 
 Signing and encryption are separate operations.

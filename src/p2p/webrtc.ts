@@ -5,6 +5,7 @@ import type { ObjectPacket } from '../object-layer/types';
 
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 const PING_INTERVAL_MS = 30000;
+const OFFER_RECOVERY_TIMEOUT_MS = 10000;
 let nextManagerId = 1;
 let nextConnectionId = 1;
 
@@ -44,6 +45,7 @@ export class PeerConnectionManager {
   private signalProcessing: Promise<void> = Promise.resolve();
   private destroyed = false;
   private awaitingIncomingChannel = false;
+  private offerRecoveryTimerId: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   constructor(
     localId: string,
@@ -215,6 +217,7 @@ export class PeerConnectionManager {
         return;
       }
       this.onEvent(peerId, `${this.connectionLabel()} Data channel opened label=${channel.label} id=${channel.id ?? '<unknown>'}`);
+      this.clearOfferRecoveryTimer();
       this.onState(peerId, 'connected');
       this.sendHello();
       void this.sendPacket('PROFILE_REQUEST', {});
@@ -533,9 +536,14 @@ export class PeerConnectionManager {
       this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: connectionState=connected and renegotiation is not required`);
       return;
     }
-    if (this.dataChannel) {
+    if (this.dataChannel?.readyState === 'open') {
       this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: primary data channel already exists`);
       return;
+    }
+    if (this.dataChannel && this.peerConnection.signalingState === 'stable') {
+      this.onEvent(remoteId, `${this.connectionLabel()} discarding stale data channel state=${this.dataChannel.readyState} before recovery`);
+      this.dataChannel.close();
+      this.dataChannel = null;
     }
     if (this.makingOffer) {
       this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: makingOffer=true`);
@@ -568,6 +576,7 @@ export class PeerConnectionManager {
 
       const offer = await this.peerConnection.createOffer();
       await this.peerConnection.setLocalDescription(offer);
+      this.startOfferRecoveryTimer(remoteId);
       this.onEvent(remoteId, `Sending offer to ${remoteId}`);
 
       this.sendSignal(signallingSocket, {
@@ -660,6 +669,7 @@ export class PeerConnectionManager {
       try {
         await this.peerConnection.setRemoteDescription(message.payload);
         await this.flushPendingIceCandidates();
+        this.clearOfferRecoveryTimer();
       } catch (error) {
         this.onEvent(message.from, `${this.connectionLabel()} failed to apply answer: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -690,6 +700,31 @@ export class PeerConnectionManager {
       this.peerConnection.close();
     }
     this.stopPingLoop();
+    this.clearOfferRecoveryTimer();
+  }
+
+  private startOfferRecoveryTimer(peerId: string) {
+    this.clearOfferRecoveryTimer();
+    this.offerRecoveryTimerId = globalThis.setTimeout(() => {
+      this.offerRecoveryTimerId = null;
+      if (this.destroyed || this.dataChannel?.readyState === 'open' || this.peerConnection.signalingState !== 'have-local-offer') return;
+      this.onEvent(peerId, `${this.connectionLabel()} abandoning stale local offer and connecting data channel after ${OFFER_RECOVERY_TIMEOUT_MS}ms`);
+      void this.peerConnection.setLocalDescription({ type: 'rollback' }).then(() => {
+        if (this.dataChannel) {
+          this.dataChannel.close();
+          this.dataChannel = null;
+        }
+      }).catch((error) => {
+        this.onEvent(peerId, `${this.connectionLabel()} failed to roll back stale local offer: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, OFFER_RECOVERY_TIMEOUT_MS);
+  }
+
+  private clearOfferRecoveryTimer() {
+    if (this.offerRecoveryTimerId !== null) {
+      globalThis.clearTimeout(this.offerRecoveryTimerId);
+      this.offerRecoveryTimerId = null;
+    }
   }
 
   private connectionLabel() {

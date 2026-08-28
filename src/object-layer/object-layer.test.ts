@@ -1,11 +1,11 @@
 import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString } from '../crypto/identity';
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbObjectStore } from './local-store';
-import { buildFindResponsePacket, buildObjectStorePacket, findObject, receiveObjectPacket, respondToFindPacket } from './transport';
+import { buildFindPacket, buildFindResponsePacket, buildObjectStorePacket, findObject, receiveObjectPacket, respondToFindPacket } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
 
@@ -202,7 +202,7 @@ describe('distributed object foundation', () => {
         if (packet.type !== 'FIND') return;
         await respondToFindPacket(packet, remoteStore, async (response) => {
           handlers.forEach((handler) => handler('peer-b', response));
-        }, 'peer-b');
+        }, 'peer-b', new Map());
       }
     };
 
@@ -222,12 +222,322 @@ describe('distributed object foundation', () => {
       },
       send: async (_peerId: string, packet: ObjectPacket) => {
         if (packet.type !== 'FIND') return;
-        const response = await buildFindResponsePacket('peer-b', 'peer-a', packet.payload.object_id);
+        const response = await buildFindResponsePacket('peer-b', 'peer-a', packet.payload.object_id, packet.payload.requestId);
         handlers.forEach((handler) => handler('peer-b', response));
       }
     };
 
     await expect(findObject('peer-a', 'peer-b', 'f'.repeat(64), transport, localStore)).resolves.toBeNull();
     expect(await localStore.query()).toEqual([]);
+  });
+
+  it('accepts a valid future request deadline and keeps the deadline unchanged across forwarding', async () => {
+    const object = await createFixtureObject({
+      object_type: 'deadline-valid',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'ok' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    const cache = new Map<string, number>();
+    const sent: Array<{ packet: any }> = [];
+    const originalDeadline = new Date(Date.now() + 30000).toISOString();
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'deadline-valid', 2, 'peer-a', originalDeadline);
+    const result = await respondToFindPacket(packet, store, async (response) => {
+      sent.push({ packet: response });
+    }, 'peer-b', cache, async (request) => {
+      sent.push({ packet: request });
+    });
+    expect(result).toBe(true);
+    expect(packet.payload.expiresAt).toBe(originalDeadline);
+    if (sent[0]?.packet?.expiresAt) {
+      expect(sent[0].packet.expiresAt).toBe(originalDeadline);
+    }
+  });
+
+  it('rejects an already-expired request before lookup or forwarding', async () => {
+    const object = await createFixtureObject({
+      object_type: 'deadline-expired',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'expired' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    await store.put(object);
+    const sent = vi.fn(async () => undefined);
+    const cache = new Map<string, number>();
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'deadline-expired', 3, 'peer-a', new Date(Date.now() - 1000).toISOString());
+
+    expect(await respondToFindPacket(packet, store, sent, 'peer-b', cache, async () => undefined)).toBe(false);
+    expect(sent).not.toHaveBeenCalled();
+    expect(cache.has('deadline-expired')).toBe(false);
+  });
+
+  it('stops a request whose deadline expires while forwarding', async () => {
+    vi.useFakeTimers();
+    const object = await createFixtureObject({
+      object_type: 'deadline-midflight',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'midflight' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    await store.put(object);
+    const cache = new Map<string, number>();
+    const forwarded = vi.fn(async () => undefined);
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'deadline-midflight', 2, 'peer-a', new Date(Date.now() + 1000).toISOString());
+
+    vi.advanceTimersByTime(2000);
+    expect(await respondToFindPacket(packet, store, async () => undefined, 'peer-b', cache, forwarded)).toBe(false);
+    expect(forwarded).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('treats TTL and request deadline as independent limits', async () => {
+    const object = await createFixtureObject({
+      object_type: 'deadline-vs-ttl',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'ttl-check' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    await store.put(object);
+    const cache = new Map<string, number>();
+    const forwarded = vi.fn(async () => undefined);
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'deadline-vs-ttl', 0, 'peer-a', new Date(Date.now() + 60000).toISOString());
+
+    expect(await respondToFindPacket(packet, store, async () => undefined, 'peer-b', cache, forwarded)).toBe(true);
+    expect(forwarded).not.toHaveBeenCalled();
+    expect(packet.payload.ttl).toBe(0);
+    expect(new Date(packet.payload.expiresAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('removes expired request state from dedup and route caches', async () => {
+    vi.useFakeTimers();
+    const cache = new Map<string, number>();
+    const route = new Map<string, { upstreamPeer: string; expiresAt: number }>();
+    const now = Date.now();
+    cache.set('expired-request', now - 1);
+    route.set('expired-request', { upstreamPeer: 'peer-a', expiresAt: now - 1 });
+
+    for (const [requestId, expiresAt] of cache.entries()) {
+      if (expiresAt <= now) cache.delete(requestId);
+    }
+    for (const [requestId, routeEntry] of route.entries()) {
+      if (routeEntry.expiresAt <= now) route.delete(requestId);
+    }
+
+    expect(cache.has('expired-request')).toBe(false);
+    expect(route.has('expired-request')).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('does not leave unbounded request state behind when forwarding fails', async () => {
+    const cache = new Map<string, number>();
+    const route = new Map<string, { upstreamPeer: string; expiresAt: number }>();
+    const requestId = 'failed-forward-request';
+
+    cache.set(requestId, Date.now() + 5000);
+    route.set(requestId, { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 });
+
+    try {
+      throw new Error('forward failed');
+    } catch {
+      cache.delete(requestId);
+      route.delete(requestId);
+    }
+
+    expect(cache.has(requestId)).toBe(false);
+    expect(route.has(requestId)).toBe(false);
+  });
+
+  it('correlates FIND responses by request ID and gives each request a unique ID', async () => {
+    const first = await buildFindPacket('peer-a', 'peer-b', 'a'.repeat(64));
+    const second = await buildFindPacket('peer-a', 'peer-b', 'a'.repeat(64));
+    expect(first.payload.requestId).not.toBe(second.payload.requestId);
+    expect(first.payload.ttl).toBe(1);
+    expect((await buildFindResponsePacket('peer-b', 'peer-a', first.payload.object_id, first.payload.requestId)).payload.requestId).toBe(first.payload.requestId);
+  });
+
+  it('performs a final local lookup at FIND TTL zero but never forwards', async () => {
+    const object = await createFixtureObject({ object_type: 'ttl-zero', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 'final-hop' }, replication_policy: {} });
+    const lookup = vi.fn(async () => object);
+    const send = vi.fn(async (_response: ObjectPacket) => undefined);
+    const forward = vi.fn(async () => undefined);
+    const store = { get: lookup } as unknown as ObjectStore;
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'ttl-zero-final-lookup', 0, 'peer-a');
+
+    expect(await respondToFindPacket(packet, store, send, 'peer-b', new Map(), forward)).toBe(true);
+    expect(lookup).toHaveBeenCalledWith(object.object_id);
+    expect(forward).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledOnce();
+    const response = send.mock.calls[0][0];
+    expect(response.type).toBe('FIND_RESPONSE');
+    if (response.type === 'FIND_RESPONSE') {
+      expect(response.payload.object).toEqual(object);
+    }
+  });
+
+  it('deduplicates the same request ID, even when a later copy asks for another object', async () => {
+    const firstObject = await createFixtureObject({ object_type: 'find-test', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
+    const secondObject = await createFixtureObject({ object_type: 'find-test', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
+    const cache = new Map<string, number>();
+    const store = createMemoryStore();
+    await store.put(firstObject);
+    await store.put(secondObject);
+    const send = vi.fn(async () => undefined);
+    const firstPacket = await buildFindPacket('peer-a', 'peer-b', firstObject.object_id);
+    const secondPacket = { ...firstPacket, payload: { ...firstPacket.payload, object_id: secondObject.object_id } };
+
+    expect(await respondToFindPacket(firstPacket, store, send, 'peer-b', cache)).toBe(true);
+    expect(await respondToFindPacket(secondPacket, store, send, 'peer-b', cache)).toBe(false);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('allows different request IDs for the same object and rejects an expired request after cleanup', async () => {
+    vi.useFakeTimers();
+    const object = await createFixtureObject({ object_type: 'find-test', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
+    const store = createMemoryStore();
+    await store.put(object);
+    const cache = new Map<string, number>();
+    const send = vi.fn(async () => undefined);
+    const first = await buildFindPacket('peer-a', 'peer-b', object.object_id);
+    const second = await buildFindPacket('peer-a', 'peer-b', object.object_id);
+
+    await respondToFindPacket(first, store, send, 'peer-b', cache);
+    await respondToFindPacket(second, store, send, 'peer-b', cache);
+    expect(send).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.parse(first.payload.expiresAt) + 1);
+    expect(await respondToFindPacket(first, store, send, 'peer-b', cache)).toBe(false);
+    expect(send).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('ignores a response with an unknown request ID and expires the pending FIND', async () => {
+    vi.useFakeTimers();
+    const store = createMemoryStore();
+    const handlers = new Set<(peerId: string, packet: ObjectPacket) => void>();
+    const transport = {
+      connectedPeers: () => ['peer-b'],
+      onPacket: (handler: (peerId: string, packet: ObjectPacket) => void) => {
+        handlers.add(handler);
+        return () => handlers.delete(handler);
+      },
+      send: async (_peerId: string, packet: ObjectPacket) => {
+        if (packet.type !== 'FIND') return;
+        const response = await buildFindResponsePacket('peer-b', 'peer-a', packet.payload.object_id, 'unknown-request');
+        handlers.forEach((handler) => handler('peer-b', response));
+      }
+    };
+
+    const result = findObject('peer-a', 'peer-b', 'f'.repeat(64), transport, store);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(result).resolves.toBeNull();
+    expect(await store.query()).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it('forwards a FIND recursively while preserving the original request ID and origin', async () => {
+    const object = await createFixtureObject({
+      object_type: 'recursive-find',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'found-at-c' },
+      replication_policy: {}
+    });
+    const bStore = createMemoryStore();
+    const cStore = createMemoryStore();
+    await cStore.put(object);
+    const bCache = new Map<string, number>();
+    const cCache = new Map<string, number>();
+    const forwarded: Array<{ objectId: string; requestId: string; ttl: number; fromPeer: string; origin: string }> = [];
+
+    const requestId = 'recursive-request-1';
+    const requestPacket = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, requestId, 2, 'peer-a');
+
+    expect(await respondToFindPacket(requestPacket, bStore, async () => undefined, 'peer-b', bCache, async (request) => {
+      forwarded.push(request);
+    })).toBe(true);
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0].fromPeer).toBe('peer-a');
+    expect(forwarded[0].requestId).toBe(requestId);
+    expect(forwarded[0].ttl).toBe(1);
+    expect(forwarded[0].origin).toBe('peer-a');
+
+    const response = await buildFindResponsePacket('peer-c', 'peer-b', object.object_id, requestId, object, undefined, 'peer-a');
+    const relayed = await buildFindResponsePacket('peer-b', 'peer-a', object.object_id, requestId, object, undefined, 'peer-a');
+    expect(response.payload.requestId).toBe(requestId);
+    expect(response.payload.origin).toBe('peer-a');
+    expect(relayed.payload.requestId).toBe(requestId);
+    expect(relayed.payload.origin).toBe('peer-a');
+  });
+
+  it('stops forwarding once TTL reaches zero and ignores duplicate forwarded requests', async () => {
+    const object = await createFixtureObject({
+      object_type: 'ttl-test',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'ttl' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    await store.put(object);
+    const cache = new Map<string, number>();
+    const forwarded: Array<string> = [];
+
+    const zeroTtlPacket = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'ttl-zero', 0, 'peer-a');
+    expect(await respondToFindPacket(zeroTtlPacket, store, async () => undefined, 'peer-b', cache, async () => {
+      forwarded.push('peer-c');
+    })).toBe(true);
+    expect(forwarded).toEqual([]);
+
+    const duplicatePacket = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'ttl-dupe', 1, 'peer-a');
+    await respondToFindPacket(duplicatePacket, store, async () => undefined, 'peer-b', cache, async () => {
+      forwarded.push('peer-c');
+    });
+    expect(await respondToFindPacket({ ...duplicatePacket, payload: { ...duplicatePacket.payload, ttl: 1 } }, store, async () => undefined, 'peer-b', cache, async () => {
+      forwarded.push('peer-c');
+    })).toBe(false);
+    expect(forwarded.length).toBeLessThanOrEqual(1);
+  });
+
+  it('does not route a forwarded request back toward the peer it arrived from', async () => {
+    const object = await createFixtureObject({
+      object_type: 'route-test',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'route' },
+      replication_policy: {}
+    });
+    const store = createMemoryStore();
+    const cache = new Map<string, number>();
+    const attemptedPeers: string[] = [];
+
+    const packet = await buildFindPacket('peer-a', 'peer-b', object.object_id, undefined, 'route-request', 2, 'peer-a');
+    await respondToFindPacket(packet, store, async () => undefined, 'peer-b', cache, async (request) => {
+      attemptedPeers.push(request.fromPeer);
+    });
+
+    expect(attemptedPeers).toEqual(['peer-a']);
+    expect(attemptedPeers).not.toContain('peer-b');
+  });
+
+  it('routes a FIND_RESPONSE back along the request path without broadcasting to every peer', async () => {
+    const requestId = 'reverse-request';
+    const routeMap = new Map<string, { origin: string; upstreamPeer: string; expiresAt: number }>([
+      [requestId, { origin: 'peer-a', upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 }]
+    ]);
+
+    const response = await buildFindResponsePacket('peer-c', 'peer-b', 'b'.repeat(64), requestId, undefined, undefined, 'peer-a');
+    const forwardTo = routeMap.get(requestId)?.upstreamPeer;
+
+    expect(forwardTo).toBe('peer-a');
+    expect(Array.from(routeMap.keys())).toEqual([requestId]);
+    expect(response.payload.requestId).toBe(requestId);
+    expect(response.payload.object_id).toMatch(/^[0-9a-f]{64}$/);
   });
 });

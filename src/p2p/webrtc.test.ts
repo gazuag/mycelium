@@ -27,6 +27,7 @@ class FakePeerConnection {
   static activeRemoteDescriptionCalls = 0;
   static maxActiveRemoteDescriptionCalls = 0;
   static createDataChannelCalls = 0;
+  lastDataChannel: FakeDataChannel | null = null;
 
   connectionState: RTCPeerConnectionState = 'new';
   signalingState: RTCSignalingState = 'stable';
@@ -45,7 +46,8 @@ class FakePeerConnection {
 
   createDataChannel() {
     FakePeerConnection.createDataChannelCalls += 1;
-    return new FakeDataChannel(FakePeerConnection.createDataChannelCalls);
+    this.lastDataChannel = new FakeDataChannel(FakePeerConnection.createDataChannelCalls);
+    return this.lastDataChannel;
   }
 
   async createOffer() {
@@ -113,7 +115,7 @@ beforeEach(() => {
   FakePeerConnection.maxActiveRemoteDescriptionCalls = 0;
   FakePeerConnection.createDataChannelCalls = 0;
   Object.defineProperty(globalThis, 'RTCPeerConnection', { value: FakePeerConnection, configurable: true });
-  Object.defineProperty(globalThis, 'window', { value: { setInterval, clearInterval }, configurable: true });
+  Object.defineProperty(globalThis, 'window', { value: { setInterval, clearInterval, setTimeout, clearTimeout }, configurable: true });
 });
 
 describe('PeerConnectionManager lifecycle', () => {
@@ -125,6 +127,34 @@ describe('PeerConnectionManager lifecycle', () => {
     await manager.createOffer('peer-b', socket);
 
     expect(FakePeerConnection.createDataChannelCalls).toBe(1);
+  });
+
+  it('recovers a non-polite glare collision after the local offer becomes stale', async () => {
+    vi.useFakeTimers();
+    const manager = createManager();
+    const socket = fakeSocket();
+
+    await manager.createOffer('peer-b', socket);
+    await manager.handleSignal(signal('offer'), socket);
+    expect(FakePeerConnection.createDataChannelCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(10001);
+    await manager.createOffer('peer-b', socket);
+
+    expect(FakePeerConnection.createDataChannelCalls).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it('replaces a stale connecting channel once signalling is stable', async () => {
+    const manager = createManager();
+    const socket = fakeSocket();
+    const peerConnection = FakePeerConnection.instances[0];
+
+    await manager.createOffer('peer-b', socket);
+    await peerConnection.setLocalDescription({ type: 'rollback' });
+    await manager.createOffer('peer-b', socket);
+
+    expect(FakePeerConnection.createDataChannelCalls).toBe(2);
   });
 
   it('lets the answerer accept the incoming chat channel without creating one', async () => {
@@ -140,6 +170,22 @@ describe('PeerConnectionManager lifecycle', () => {
     channel.onopen?.();
 
     expect(manager.getDataChannelState()).toBe('open');
+  });
+
+  it('opens the normal offer-answer data channel path without creating a duplicate', async () => {
+    const manager = createManager();
+    const peerConnection = FakePeerConnection.instances[0];
+    const socket = fakeSocket();
+
+    await manager.createOffer('peer-b', socket);
+    await manager.handleSignal(signal('answer'), socket);
+    const channel = peerConnection.lastDataChannel!;
+    channel.readyState = 'open';
+    channel.onopen?.();
+    await manager.createOffer('peer-b', socket);
+
+    expect(manager.getDataChannelState()).toBe('open');
+    expect(FakePeerConnection.createDataChannelCalls).toBe(1);
   });
 
   it('keeps an answerer waiting for ondatachannel after signalling returns to stable', async () => {

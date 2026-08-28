@@ -17,13 +17,20 @@ interface SettingsPageProps {
   objectTransportTest?: {
     connectedPeers: string[];
     selectedPeerId: string;
+    storagePeerId: string;
     status: string;
     objects: Array<{ object_id: string; object_type: string; author: string; payload: unknown }>;
     onPeerChange: (peerId: string) => void;
+    onStoragePeerChange: (peerId: string) => void;
     onSend: () => void;
+    onPlaceOnly: () => void;
     onResend: () => void;
     onFind: () => void;
     onFindMissing: () => void;
+    onSendTtlZero: () => void;
+    onSendDuplicate: () => void;
+    onSendExpired: () => void;
+    onSendUnknownResponse: () => void;
     onRefresh: () => void;
   };
 }
@@ -127,7 +134,7 @@ export function SettingsPage({
       {objectTransportTest && (
         <div className="card">
           <h3>Object transport test</h3>
-          <p className="note">Development-only direct OBJECT_STORE test.</p>
+          <p className="note">Development-only distributed object protocol tests.</p>
           <div className="row">
             <select
               value={objectTransportTest.selectedPeerId}
@@ -136,8 +143,18 @@ export function SettingsPage({
               <option value="">Select connected peer</option>
               {objectTransportTest.connectedPeers.map((peerId) => <option key={peerId} value={peerId}>{peerId}</option>)}
             </select>
+            <select
+              value={objectTransportTest.storagePeerId}
+              onChange={(event) => objectTransportTest.onStoragePeerChange(event.target.value)}
+            >
+              <option value="">Peer to store test object on</option>
+              {objectTransportTest.connectedPeers.map((peerId) => <option key={peerId} value={peerId}>{peerId}</option>)}
+            </select>
             <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSend}>
               Create and send test object
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.storagePeerId} onClick={objectTransportTest.onPlaceOnly}>
+              Place object on peer only
             </button>
             <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onResend}>
               Send last object again
@@ -147,6 +164,18 @@ export function SettingsPage({
             </button>
             <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFindMissing}>
               FIND missing object
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendTtlZero}>
+              FIND TTL 0
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendDuplicate}>
+              FIND duplicate
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendExpired}>
+              FIND expired
+            </button>
+            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendUnknownResponse}>
+              Unknown response
             </button>
             <button className="btn secondary" type="button" onClick={objectTransportTest.onRefresh}>Refresh object store</button>
           </div>

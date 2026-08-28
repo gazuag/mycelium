@@ -18,7 +18,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, IndexedDbObjectStore, receiveFindResponsePacket, receiveObjectPacket, respondToFindPacket, type ObjectPacket, type ObjectStore } from './object-layer';
+import { buildFindPacket, buildFindResponsePacket, buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, type ObjectPacket, type ObjectStore } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
@@ -140,6 +140,7 @@ function App() {
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
   const [objectTestPeerId, setObjectTestPeerId] = useState('');
+  const [objectTestStoragePeerId, setObjectTestStoragePeerId] = useState('');
   const [objectTestStatus, setObjectTestStatus] = useState('');
   const [objectTestLastId, setObjectTestLastId] = useState<string | null>(null);
   const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; payload: unknown }>>([]);
@@ -149,6 +150,8 @@ function App() {
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
+  const findRequestCacheRef = useRef<Map<string, number>>(new Map());
+  const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore();
@@ -249,20 +252,122 @@ function App() {
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
     const store = objectStoreRef.current;
     if (!store) return;
+    const now = Date.now();
+    for (const [requestId, route] of findRequestRouteRef.current.entries()) {
+      if (route.expiresAt <= now) {
+        findRequestRouteRef.current.delete(requestId);
+      }
+    }
+    for (const [seenRequestId, expiresAt] of findRequestCacheRef.current.entries()) {
+      if (expiresAt <= now) {
+        findRequestCacheRef.current.delete(seenRequestId);
+      }
+    }
     if (packet.type === 'FIND') {
-      const handled = await respondToFindPacket(packet, store, (response) => objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable')), identityRef.current?.id ?? 'unknown');
+      addLog(`OBJECT FIND received from ${peerId}: requestId=${packet.payload.requestId} ttl=${packet.payload.ttl} expiresAt=${packet.payload.expiresAt}`);
+      if (typeof packet.payload?.requestId === 'string' && typeof packet.payload?.expiresAt === 'string') {
+        const expiresAtMs = Date.parse(packet.payload.expiresAt);
+        if (!Number.isNaN(expiresAtMs) && now < expiresAtMs) {
+          findRequestRouteRef.current.set(packet.payload.requestId, { upstreamPeer: peerId, expiresAt: expiresAtMs });
+        }
+      }
+      const handled = await respondToFindPacket(
+        packet,
+        store,
+        async (response) => {
+          addLog(`OBJECT FIND_RESPONSE generated: requestId=${response.payload.requestId} object=${response.payload.object ? 'present' : 'missing'} to=${peerId}`);
+          const route = response.payload.requestId ? findRequestRouteRef.current.get(response.payload.requestId) : undefined;
+          if (route && route.upstreamPeer !== peerId && typeof response.payload.origin === 'string') {
+            const relayed = await buildFindResponsePacket(
+              identityRef.current?.id ?? 'unknown',
+              route.upstreamPeer,
+              response.payload.object_id,
+              response.payload.requestId,
+              response.payload.object,
+              undefined,
+              response.payload.origin,
+              response.payload.expiresAt
+            );
+            findRequestRouteRef.current.delete(response.payload.requestId);
+            addLog(`OBJECT FIND_RESPONSE relayed: requestId=${response.payload.requestId} ${peerId} -> ${route.upstreamPeer}`);
+            await objectTransportRef.current?.send(route.upstreamPeer, relayed);
+            return;
+          }
+          await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
+        },
+        identityRef.current?.id ?? 'unknown',
+        findRequestCacheRef.current,
+        async ({ objectId, requestId, ttl, fromPeer, origin, expiresAt }) => {
+          addLog(`OBJECT FIND local lookup missed: requestId=${requestId} object=${objectId} ttl=${ttl + 1}`);
+          const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
+          const nextPeers = connectedPeers.filter((candidate) => candidate !== fromPeer && candidate !== identityRef.current?.id);
+          if (nextPeers.length === 0) {
+            const emptyResponse = await buildFindResponsePacket(
+              identityRef.current?.id ?? 'unknown',
+              fromPeer,
+              objectId,
+              requestId,
+              undefined,
+              undefined,
+              origin,
+              expiresAt
+            );
+            findRequestRouteRef.current.delete(requestId);
+            await objectTransportRef.current?.send(fromPeer, emptyResponse);
+            return;
+          }
+          const nextPeer = nextPeers[0];
+          const forwardedPacket = await buildFindPacket(
+            identityRef.current?.id ?? 'unknown',
+            nextPeer,
+            objectId,
+            undefined,
+            requestId,
+            ttl,
+            origin,
+            expiresAt
+          );
+          findRequestRouteRef.current.set(requestId, { upstreamPeer: fromPeer, expiresAt: Date.parse(expiresAt) });
+          addLog(`OBJECT FIND forwarded: requestId=${requestId} ${fromPeer} -> ${nextPeer} ttl=${ttl} expiresAt=${expiresAt}`);
+          try {
+            await objectTransportRef.current?.send(nextPeer, forwardedPacket);
+          } catch (error) {
+            findRequestRouteRef.current.delete(requestId);
+            findRequestCacheRef.current.delete(requestId);
+            throw error;
+          }
+        }
+      );
       addLog(`${handled ? 'Handled' : 'Rejected'} generic FIND from ${peerId}`);
+      if (!handled) addLog(`OBJECT FIND suppressed or expired: requestId=${packet.payload.requestId}`);
       return;
     }
     if (packet.type === 'FIND_RESPONSE') {
-      const found = await receiveFindResponsePacket(packet, store);
-      addLog(`${found ? 'Stored' : 'Rejected'} generic FIND response from ${peerId}`);
-      if (found) void refreshObjectStore();
+      const requestId = typeof packet.payload?.requestId === 'string' ? packet.payload.requestId : null;
+      const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
+      addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
+      if (route && route.upstreamPeer !== peerId) {
+        const relayed = await buildFindResponsePacket(
+          identityRef.current?.id ?? 'unknown',
+          route.upstreamPeer,
+          packet.payload.object_id,
+          requestId!,
+          packet.payload.object,
+          undefined,
+          typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+          typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+        );
+        findRequestRouteRef.current.delete(requestId!);
+        addLog(`OBJECT FIND_RESPONSE relayed: requestId=${requestId} ${peerId} -> ${route.upstreamPeer}`);
+        await objectTransportRef.current?.send(route.upstreamPeer, relayed);
+      } else if (!route) {
+        addLog(`OBJECT FIND_RESPONSE ignored: unknown requestId=${requestId ?? 'unknown'}`);
+      }
       return;
     }
     const stored = await receiveObjectPacket(packet, store);
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
-    if (stored) {
+    if (stored && packet.type === 'OBJECT_STORE') {
       setObjectTestStatus(`Received and stored ${packet.payload.object.object_id} from ${peerId}`);
       void refreshObjectStore();
     }
@@ -2013,6 +2118,70 @@ function App() {
     }
   }
 
+  async function handlePlaceObjectTestOnly() {
+    if (!identity || !objectTestStoragePeerId) return;
+    try {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const objectIdentity = createObjectIdentity(identity);
+      const object = await createSignedObject({
+        object_type: 'mycelium.browser-test',
+        created_at: new Date().toISOString(),
+        payload: { message: 'Phase 5 recursive FIND browser test', sent_at: new Date().toISOString() },
+        replication_policy: {}
+      }, objectIdentity);
+      const packetSigner: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+      const packet = await buildObjectStorePacket(identity.id, objectTestStoragePeerId, object, packetSigner);
+      await objectTransportRef.current?.send(objectTestStoragePeerId, packet);
+      lastObjectTestRef.current = object;
+      setObjectTestLastId(object.object_id);
+      await store.delete(object.object_id);
+      await refreshObjectStore();
+      setObjectTestStatus(`Created ${object.object_id}; stored only on ${objectTestStoragePeerId}`);
+      addLog(`OBJECT TEST placed object ${object.object_id} on ${objectTestStoragePeerId}; removed local copy`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Object placement failed: ${message}`);
+      addLog(`OBJECT TEST placement failed: ${message}`);
+    }
+  }
+
+  async function sendDeveloperFindPacket(packet: ObjectPacket, label: string) {
+    if (!objectTestPeerId || !objectTransportRef.current) return;
+    try {
+      await objectTransportRef.current.send(objectTestPeerId, packet);
+      setObjectTestStatus(`${label} sent to ${objectTestPeerId}`);
+      const requestId = packet.type === 'FIND' || packet.type === 'FIND_RESPONSE' ? packet.payload.requestId : 'n/a';
+      addLog(`OBJECT DEV TEST ${label} sent: requestId=${requestId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`${label} failed: ${message}`);
+      addLog(`OBJECT DEV TEST ${label} failed: ${message}`);
+    }
+  }
+
+  async function handleSendTtlZeroTest() {
+    if (!identity || !objectTestPeerId || !objectTestLastId) return;
+    await sendDeveloperFindPacket(await buildFindPacket(identity.id, objectTestPeerId, objectTestLastId, undefined, `dev-ttl-zero-${Date.now()}`, 0, identity.id), 'FIND TTL 0');
+  }
+
+  async function handleSendDuplicateTest() {
+    if (!identity || !objectTestPeerId || !objectTestLastId) return;
+    const packet = await buildFindPacket(identity.id, objectTestPeerId, objectTestLastId, undefined, `dev-duplicate-${Date.now()}`, 2, identity.id);
+    await sendDeveloperFindPacket(packet, 'FIND duplicate first copy');
+    await sendDeveloperFindPacket(packet, 'FIND duplicate second copy');
+  }
+
+  async function handleSendExpiredTest() {
+    if (!identity || !objectTestPeerId || !objectTestLastId) return;
+    await sendDeveloperFindPacket(await buildFindPacket(identity.id, objectTestPeerId, objectTestLastId, undefined, `dev-expired-${Date.now()}`, 2, identity.id, new Date(Date.now() - 1000).toISOString()), 'FIND expired');
+  }
+
+  async function handleSendUnknownResponseTest() {
+    if (!identity || !objectTestPeerId || !objectTestLastId) return;
+    await sendDeveloperFindPacket(await buildFindResponsePacket(identity.id, objectTestPeerId, objectTestLastId, `dev-unknown-${Date.now()}`, undefined, undefined, identity.id), 'unknown FIND_RESPONSE');
+  }
+
   async function handleResendObjectTest() {
     const object = lastObjectTestRef.current;
     if (!identity || !object || !objectTestPeerId) return;
@@ -2049,6 +2218,7 @@ function App() {
       }
       await refreshObjectStore();
       setObjectTestStatus(`FIND TEST: PASS - retrieved and stored ${found.object_id} from ${peerId}`);
+      addLog(`OBJECT FIND requester validation/storage: validated and stored ${found.object_id} after response from ${peerId}`);
       addLog(`FIND TEST: PASS - validated and stored ${found.object_id} from ${peerId}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2328,13 +2498,20 @@ function App() {
             objectTransportTest={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
               connectedPeers: objectTransportRef.current?.connectedPeers() ?? [],
               selectedPeerId: objectTestPeerId,
+              storagePeerId: objectTestStoragePeerId,
               status: objectTestStatus,
               objects: objectStoreObjects,
               onPeerChange: setObjectTestPeerId,
+              onStoragePeerChange: setObjectTestStoragePeerId,
               onSend: () => { void handleSendObjectTest(); },
+              onPlaceOnly: () => { void handlePlaceObjectTestOnly(); },
               onResend: () => { void handleResendObjectTest(); },
               onFind: () => { void handleFindObjectTest(); },
               onFindMissing: () => { void handleFindMissingObjectTest(); },
+              onSendTtlZero: () => { void handleSendTtlZeroTest(); },
+              onSendDuplicate: () => { void handleSendDuplicateTest(); },
+              onSendExpired: () => { void handleSendExpiredTest(); },
+              onSendUnknownResponse: () => { void handleSendUnknownResponseTest(); },
               onRefresh: () => { void refreshObjectStore(); }
             } : undefined}
             onResetApp={() => {
