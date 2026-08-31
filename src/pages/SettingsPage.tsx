@@ -1,3 +1,6 @@
+import { useState } from 'react';
+import type { LogCategory, LogEntry } from '../App';
+
 interface SettingsPageProps {
   identityId: string;
   publicKey: string;
@@ -6,7 +9,7 @@ interface SettingsPageProps {
   onResetApp: () => void;
   onClearOldMessages: () => void;
   onClearAllMessages: () => void;
-  logs: string[];
+  logs: LogEntry[];
   onClearLogs: () => void;
   signalEndpoint: string;
   discoveryEndpoint: string;
@@ -17,20 +20,20 @@ interface SettingsPageProps {
   objectTransportTest?: {
     connectedPeers: string[];
     selectedPeerId: string;
-    storagePeerId: string;
+    objectIds: string;
+    suppressFindResponses: boolean;
     status: string;
     objects: Array<{ object_id: string; object_type: string; author: string; payload: unknown }>;
     onPeerChange: (peerId: string) => void;
-    onStoragePeerChange: (peerId: string) => void;
-    onSend: () => void;
-    onPlaceOnly: () => void;
-    onResend: () => void;
-    onFind: () => void;
-    onFindMissing: () => void;
-    onSendTtlZero: () => void;
-    onSendDuplicate: () => void;
-    onSendExpired: () => void;
-    onSendUnknownResponse: () => void;
+    onObjectIdsChange: (objectIds: string) => void;
+    onCreateSet: () => void;
+    onSelectFirstBranch: () => void;
+    onSelectSecondBranch: () => void;
+    onSelectAll: () => void;
+    onSendListed: () => void;
+    onRemoveListed: () => void;
+    onFindListed: () => void;
+    onToggleSuppressFindResponses: () => void;
     onRefresh: () => void;
   };
 }
@@ -53,6 +56,15 @@ export function SettingsPage({
   syncStatus,
   objectTransportTest
 }: SettingsPageProps) {
+  const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
+    pingPong: false,
+    discovery: false,
+    chat: false,
+    postRequests: false,
+    objectStorage: true,
+    ice: true,
+    general: false
+  });
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
   const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
@@ -63,7 +75,7 @@ export function SettingsPage({
       : 'Disconnected. See diagnostics';
 
   const handleCopyDiagnostics = async () => {
-    const text = logs.join('\n');
+    const text = logs.filter((entry) => logFilters[entry.category]).map((entry) => entry.text).join('\n');
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -133,8 +145,8 @@ export function SettingsPage({
 
       {objectTransportTest && (
         <div className="card">
-          <h3>Object transport test</h3>
-          <p className="note">Development-only distributed object protocol tests.</p>
+          <h3>Phase 6 aggregation test</h3>
+          <p className="note">Known-object-ID multi-peer FIND test. Use the same IDs across browser peers.</p>
           <div className="row">
             <select
               value={objectTransportTest.selectedPeerId}
@@ -143,40 +155,28 @@ export function SettingsPage({
               <option value="">Select connected peer</option>
               {objectTransportTest.connectedPeers.map((peerId) => <option key={peerId} value={peerId}>{peerId}</option>)}
             </select>
-            <select
-              value={objectTransportTest.storagePeerId}
-              onChange={(event) => objectTransportTest.onStoragePeerChange(event.target.value)}
-            >
-              <option value="">Peer to store test object on</option>
-              {objectTransportTest.connectedPeers.map((peerId) => <option key={peerId} value={peerId}>{peerId}</option>)}
-            </select>
-            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSend}>
-              Create and send test object
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.storagePeerId} onClick={objectTransportTest.onPlaceOnly}>
-              Place object on peer only
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onResend}>
-              Send last object again
-            </button>
-            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFind}>
-              Run FIND test
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFindMissing}>
-              FIND missing object
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendTtlZero}>
-              FIND TTL 0
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendDuplicate}>
-              FIND duplicate
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendExpired}>
-              FIND expired
-            </button>
-            <button className="btn secondary" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendUnknownResponse}>
-              Unknown response
-            </button>
+            <label>
+              <input type="checkbox" checked={objectTransportTest.suppressFindResponses} onChange={objectTransportTest.onToggleSuppressFindResponses} />
+              Suppress FIND responses on this peer
+            </label>
+            <button className="btn" type="button" onClick={objectTransportTest.onCreateSet}>Create five signed objects</button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onSelectFirstBranch}>Use 1, 2, 3</button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onSelectSecondBranch}>Use 3, 4, 5</button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onSelectAll}>Use all five</button>
+          </div>
+          <label>
+            Object IDs (one per line)
+            <textarea
+              rows={5}
+              value={objectTransportTest.objectIds}
+              onChange={(event) => objectTransportTest.onObjectIdsChange(event.target.value)}
+              placeholder="64-character object IDs"
+            />
+          </label>
+          <div className="row">
+            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendListed}>Send listed objects</button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onRemoveListed}>Remove listed locally</button>
+            <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFindListed}>FIND listed objects</button>
             <button className="btn secondary" type="button" onClick={objectTransportTest.onRefresh}>Refresh object store</button>
           </div>
           {objectTransportTest.status && <p className="note monospace break-word">{objectTransportTest.status}</p>}
@@ -195,11 +195,23 @@ export function SettingsPage({
       <div className="card">
         <h3>Diagnostics</h3>
         <p className="note">Live runtime log of events, discovery fetches, and peer sync activity.</p>
+        <div className="row">
+          {(['pingPong', 'discovery', 'chat', 'postRequests', 'objectStorage', 'ice', 'general'] as const).map((category) => (
+            <label key={category}>
+              <input
+                type="checkbox"
+                checked={logFilters[category]}
+                onChange={() => setLogFilters((current) => ({ ...current, [category]: !current[category] }))}
+              />
+              {category === 'pingPong' ? 'Ping / pong' : category === 'postRequests' ? 'Post requests' : category === 'objectStorage' ? 'Object storage' : category === 'ice' ? 'ICE' : category[0].toUpperCase() + category.slice(1)}
+            </label>
+          ))}
+        </div>
         <div className="log-box" role="log" aria-live="polite">
-          {logs.length === 0 ? (
+          {logs.filter((entry) => logFilters[entry.category]).length === 0 ? (
             <p>No diagnostics yet.</p>
           ) : (
-            logs.slice().reverse().map((entry, index) => <p key={`${entry}-${index}`}>{entry}</p>)
+            logs.filter((entry) => logFilters[entry.category]).slice().reverse().map((entry, index) => <p key={`${entry.text}-${index}`}>{entry.text}</p>)
           )}
         </div>
         <div className="row">

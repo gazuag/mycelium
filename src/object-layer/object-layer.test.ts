@@ -5,7 +5,7 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponsePacket, buildObjectStorePacket, findObject, receiveObjectPacket, respondToFindPacket } from './transport';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, findObject, FindAggregation, getFindObjectIds, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
 
@@ -539,5 +539,102 @@ describe('distributed object foundation', () => {
     expect(Array.from(routeMap.keys())).toEqual([requestId]);
     expect(response.payload.requestId).toBe(requestId);
     expect(response.payload.object_id).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('constructs canonical multi-object FIND packets and parses legacy single-object packets', async () => {
+    const objectIds = ['a'.repeat(64), 'b'.repeat(64)];
+    const packet = await buildFindPacket('peer-a', 'peer-b', objectIds, undefined, 'multi-request');
+    expect(packet.payload.requested_objects).toEqual(objectIds);
+    expect(getFindObjectIds(packet)).toEqual(objectIds);
+    const legacy = { ...packet, payload: { ...packet.payload, requested_objects: undefined as unknown as string[], object_id: objectIds[0] } };
+    expect(getFindObjectIds(legacy)).toEqual([objectIds[0]]);
+  });
+
+  it('aggregates local and child results, deduplicating strictly by object ID', async () => {
+    const first = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
+    const second = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
+    const third = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 3 }, replication_policy: {} });
+    const results: DistributedObject[][] = [];
+    const aggregation = new FindAggregation([first.object_id, second.object_id, third.object_id], Date.now() + 5000, async (objects) => { results.push(objects); });
+    aggregation.addChild('peer-c');
+    aggregation.addChild('peer-d');
+    aggregation.addLocal([first]);
+    await aggregation.addChildObjects('peer-c', [first, second]);
+    expect(results).toEqual([]);
+    await aggregation.addChildObjects('peer-d', [second, third]);
+    expect(results[0].map((object) => object.object_id)).toEqual([first.object_id, second.object_id, third.object_id]);
+  });
+
+  it('does not complete on the first partial child, but completes when all requested objects arrive', async () => {
+    const ids = ['a'.repeat(64), 'b'.repeat(64)];
+    const complete = vi.fn(async () => undefined);
+    const aggregation = new FindAggregation(ids, Date.now() + 5000, complete);
+    aggregation.addChild('peer-c');
+    aggregation.addChild('peer-d');
+    await aggregation.addChildObjects('peer-c', []);
+    expect(complete).not.toHaveBeenCalled();
+    await aggregation.addChildObjects('peer-d', []);
+    expect(complete).toHaveBeenCalledWith([], 'all-children-responded-or-failed');
+  });
+
+  it('completes after the grace period, deadline, or child failure', async () => {
+    vi.useFakeTimers();
+    const graceComplete = vi.fn(async () => undefined);
+    const grace = new FindAggregation(['a'.repeat(64)], Date.now() + 5000, graceComplete, 100);
+    grace.addChild('peer-c');
+    grace.startGracePeriod();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(graceComplete).toHaveBeenCalledOnce();
+
+    const deadlineComplete = vi.fn(async () => undefined);
+    const deadline = new FindAggregation(['b'.repeat(64)], Date.now() + 100, deadlineComplete, 500);
+    deadline.addChild('peer-c');
+    deadline.startGracePeriod();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(deadlineComplete).toHaveBeenCalledOnce();
+
+    const failureComplete = vi.fn(async () => undefined);
+    const failure = new FindAggregation(['c'.repeat(64)], Date.now() + 5000, failureComplete);
+    failure.addChild('peer-c');
+    failure.addChild('peer-d');
+    await failure.failChild('peer-c');
+    expect(failureComplete).not.toHaveBeenCalled();
+    await failure.failChild('peer-d');
+    expect(failureComplete).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  it('validates requested response objects and ignores invalid, unrequested, and late results', async () => {
+    const valid = await createFixtureObject({ object_type: 'aggregate-validation', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
+    const unrequested = await createFixtureObject({ object_type: 'aggregate-validation', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
+    const response = await buildFindResponseObjectsPacket('peer-c', 'peer-b', 'validation-request', [valid, unrequested, { ...valid, signature: 'invalid' }]);
+    const accepted = await validateFindResponseObjects(response, 'validation-request', new Set([valid.object_id]));
+    expect(accepted).toEqual([valid]);
+
+    const late = vi.fn(async () => undefined);
+    const aggregation = new FindAggregation([valid.object_id], Date.now() + 5000, late);
+    aggregation.addChild('peer-c');
+    await aggregation.addChildObjects('peer-c', [valid]);
+    await aggregation.addChildObjects('peer-c', [unrequested]);
+    expect(late).toHaveBeenCalledOnce();
+  });
+
+  it('selects at most two forwarding children and excludes the incoming peer and itself', () => {
+    expect(selectFindPeers(['peer-a', 'peer-b', 'peer-c', 'peer-d'], 'peer-a', 'peer-b')).toEqual(['peer-c', 'peer-d']);
+  });
+
+  it('keeps the upstream route until the final aggregate is sent', async () => {
+    const object = await createFixtureObject({ object_type: 'aggregate-route', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
+    const sent: ObjectPacket[] = [];
+    const aggregation = new FindAggregation([object.object_id, 'b'.repeat(64)], Date.now() + 5000, async (objects) => {
+      sent.push(await buildFindResponseObjectsPacket('peer-b', 'peer-a', 'route-aggregate', objects));
+    });
+    aggregation.addChild('peer-c');
+    aggregation.addChild('peer-d');
+    await aggregation.addChildObjects('peer-c', [object]);
+    expect(sent).toHaveLength(0);
+    await aggregation.addChildObjects('peer-d', []);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].type === 'FIND_RESPONSE' && sent[0].payload.objects).toEqual([object]);
   });
 });

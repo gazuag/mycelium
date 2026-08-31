@@ -18,7 +18,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponsePacket, buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, type ObjectPacket, type ObjectStore } from './object-layer';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
@@ -28,6 +28,22 @@ interface IdentityRecord {
   publicKey: string;
   privateKey: string;
   id: string;
+}
+
+export type LogCategory = 'pingPong' | 'discovery' | 'chat' | 'postRequests' | 'objectStorage' | 'ice' | 'general';
+export interface LogEntry {
+  text: string;
+  category: LogCategory;
+}
+
+function classifyLogEntry(entry: string): LogCategory {
+  if (/\b(PING|PONG|ping loop|keep.?alive)\b/i.test(entry)) return 'pingPong';
+  if (/\bDISCOVERY\b|discovery/i.test(entry)) return 'discovery';
+  if (/\bICE\b|candidate pair|candidate-pair/i.test(entry)) return 'ice';
+  if (/\b(OBJECT|FIND|generic object)\b|PHASE 6/i.test(entry)) return 'objectStorage';
+  if (/\b(chat|message|messages)\b/i.test(entry)) return 'chat';
+  if (/\b(post|posts|feed|recommendation|home updates)\b/i.test(entry)) return 'postRequests';
+  return 'general';
 }
 
 type PageKey = 'home' | 'people' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
@@ -101,7 +117,7 @@ function App() {
   const [remoteId, setRemoteId] = useState('');
   const [message, setMessage] = useState('');
   const [chat, setChat] = useState<string[]>([]);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [dataChannelOpen, setDataChannelOpen] = useState(false);
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
@@ -142,6 +158,8 @@ function App() {
   const [objectTestPeerId, setObjectTestPeerId] = useState('');
   const [objectTestStoragePeerId, setObjectTestStoragePeerId] = useState('');
   const [objectTestStatus, setObjectTestStatus] = useState('');
+  const [objectTestIds, setObjectTestIds] = useState('');
+  const [suppressPhase6FindResponses, setSuppressPhase6FindResponses] = useState(false);
   const [objectTestLastId, setObjectTestLastId] = useState<string | null>(null);
   const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; payload: unknown }>>([]);
   const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
@@ -152,6 +170,8 @@ function App() {
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
+  const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
+  const suppressPhase6FindResponsesRef = useRef(false);
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore();
@@ -196,10 +216,14 @@ function App() {
     identityRef.current = identity;
   }, [identity]);
 
+  useEffect(() => {
+    suppressPhase6FindResponsesRef.current = suppressPhase6FindResponses;
+  }, [suppressPhase6FindResponses]);
+
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
   const addLog = (entry: string) => {
-    setLogs((prev) => [...prev, `${new Date().toLocaleTimeString()}: ${entry}`]);
+    setLogs((prev) => [...prev, { text: `${new Date().toLocaleTimeString()}: ${entry}`, category: classifyLogEntry(entry) }]);
   };
 
   const statusLabel = useMemo(() => {
@@ -264,7 +288,76 @@ function App() {
       }
     }
     if (packet.type === 'FIND') {
-      addLog(`OBJECT FIND received from ${peerId}: requestId=${packet.payload.requestId} ttl=${packet.payload.ttl} expiresAt=${packet.payload.expiresAt}`);
+      addLog(`FIND ${String(packet.payload.requestId).slice(0, 12)} received`);
+      const requestedObjectIds = getFindObjectIds(packet);
+      if (requestedObjectIds && requestedObjectIds.length > 1) {
+        if (suppressPhase6FindResponsesRef.current) {
+          addLog(`PHASE 6 FIND response suppressed for deterministic partial test: requestId=${packet.payload.requestId}`);
+          return;
+        }
+        const requestId = packet.payload.requestId;
+        const expiresAt = packet.payload.expiresAt;
+        const expiresAtMs = Date.parse(expiresAt);
+        if (!requestId || Number.isNaN(expiresAtMs) || now >= expiresAtMs || findRequestCacheRef.current.has(requestId)) return;
+        findRequestCacheRef.current.set(requestId, expiresAtMs);
+        const localObjects = (await Promise.all(requestedObjectIds.map(async (objectId) => {
+          const object = await store.get(objectId);
+          return object && await validateObject(object) ? object : null;
+        }))).filter((object): object is NonNullable<typeof object> => object !== null);
+        const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
+        const nextPeers = selectFindPeers(connectedPeers, peerId, identityRef.current?.id ?? '', 2);
+        const aggregationStartedAt = Date.now();
+        addLog(`requested: ${requestedObjectIds.length} objects`);
+        addLog(`local results: ${localObjects.length}`);
+        addLog(`children selected: ${nextPeers.join(', ') || 'none'}`);
+        addLog(`upstream recorded: ${peerId}`);
+        let aggregation: FindAggregation;
+        aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
+          addLog('aggregate complete');
+          addLog(`reason: ${reason}`);
+          addLog(`returning: ${objects.length} objects`);
+          addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
+          const response = await buildFindResponseObjectsPacket(
+            identityRef.current?.id ?? 'unknown',
+            peerId,
+            requestId,
+            objects,
+            undefined,
+            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+            expiresAt
+          );
+          await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
+          addLog(`aggregate sent upstream to ${peerId}`);
+          findAggregationRef.current.delete(requestId);
+          findRequestCacheRef.current.delete(requestId);
+        });
+        findAggregationRef.current.set(requestId, {
+          aggregation,
+          requestedObjectIds: new Set(requestedObjectIds),
+          upstreamPeer: peerId,
+          origin: typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+          expiresAt
+        });
+        for (const nextPeer of nextPeers) aggregation.addChild(nextPeer);
+        aggregation.addLocal(localObjects);
+        if (!aggregation.isComplete() && requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId)) && packet.payload.ttl > 0) {
+          for (const nextPeer of nextPeers) {
+            const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt);
+            try {
+              await objectTransportRef.current?.send(nextPeer, forwardedPacket);
+              addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
+            } catch {
+              addLog(`child ${nextPeer} failed before response`);
+              aggregation.failChild(nextPeer);
+            }
+          }
+          aggregation.startGracePeriod();
+        } else {
+          for (const nextPeer of nextPeers) aggregation.failChild(nextPeer);
+          aggregation.startGracePeriod();
+        }
+        return;
+      }
       if (typeof packet.payload?.requestId === 'string' && typeof packet.payload?.expiresAt === 'string') {
         const expiresAtMs = Date.parse(packet.payload.expiresAt);
         if (!Number.isNaN(expiresAtMs) && now < expiresAtMs) {
@@ -344,6 +437,18 @@ function App() {
     }
     if (packet.type === 'FIND_RESPONSE') {
       const requestId = typeof packet.payload?.requestId === 'string' ? packet.payload.requestId : null;
+      const aggregationState = requestId ? findAggregationRef.current.get(requestId) : undefined;
+      if (aggregationState) {
+        if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
+          const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          addLog(`child ${peerId} response received`);
+          addLog(`objects: ${objects.length}`);
+          await aggregationState.aggregation.addChildObjects(peerId, objects);
+          addLog(`aggregate: ${aggregationState.aggregation.aggregateSize()} unique objects`);
+          addLog(`children pending: ${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
+        }
+        return;
+      }
       const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
       if (route && route.upstreamPeer !== peerId) {
@@ -624,6 +729,7 @@ function App() {
       if (!existing.needsReplacement()) {
         return existing;
       }
+      addLog(`ICE offer/reconnect replacing existing peer manager for ${peerId}: state=${existing.getDataChannelState()}`);
       closeAndRemovePeerManager(peerManagersRef.current, peerId, existing);
     }
     if (!identity) return null;
@@ -818,6 +924,13 @@ function App() {
       },
       (peer: string) => {
         if (!isCurrentManager(peer)) return;
+        for (const state of findAggregationRef.current.values()) {
+          if (state.aggregation.hasChild(peer)) {
+            addLog(`child ${peer} disconnected`);
+            addLog('marking child failed');
+            void state.aggregation.failChild(peer);
+          }
+        }
         // Remove dead manager so reconnect creates a fresh RTCPeerConnection
         closeAndRemovePeerManager(peerManagersRef.current, peer, manager);
         if (selectedContactIdRef.current === peer) {
@@ -2250,6 +2363,91 @@ function App() {
     }
   }
 
+  function getPhase6ObjectIds() {
+    return [...new Set(objectTestIds.split(/\s+/).map((objectId) => objectId.trim()).filter(Boolean))];
+  }
+
+  function selectPhase6ObjectIds(start: number, end: number) {
+    const ids = getPhase6ObjectIds();
+    setObjectTestIds(ids.slice(start, end).join('\n'));
+  }
+
+  async function handleCreatePhase6Set() {
+    if (!identity) return;
+    try {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const objectIdentity = createObjectIdentity(identity);
+      const objects = await Promise.all(Array.from({ length: 5 }, (_, index) => createSignedObject({
+        object_type: 'mycelium.phase6-browser-test',
+        created_at: new Date().toISOString(),
+        payload: { object_number: index + 1, test: 'phase6-aggregation' },
+        replication_policy: {}
+      }, objectIdentity)));
+      for (const object of objects) await store.put(object);
+      setObjectTestIds(objects.map((object) => object.object_id).join('\n'));
+      await refreshObjectStore();
+      setObjectTestStatus('Created five signed objects locally. Select a branch set and send it to the connected peer.');
+      addLog(`PHASE 6 created five signed objects: ${objects.map((object) => object.object_id).join(',')}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Phase 6 setup failed: ${message}`);
+      addLog(`PHASE 6 setup failed: ${message}`);
+    }
+  }
+
+  async function handleSendPhase6Listed() {
+    if (!identity || !objectTestPeerId) return;
+    const objectIds = getPhase6ObjectIds();
+    const store = objectStoreRef.current;
+    if (!store || objectIds.length === 0) return;
+    try {
+      const packetSigner: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+      let sent = 0;
+      for (const objectId of objectIds) {
+        const object = await store.get(objectId);
+        if (!object) continue;
+        await objectTransportRef.current?.send(objectTestPeerId, await buildObjectStorePacket(identity.id, objectTestPeerId, object, packetSigner));
+        sent += 1;
+      }
+      setObjectTestStatus(`Sent ${sent} listed objects to ${objectTestPeerId}`);
+      addLog(`PHASE 6 seeded ${sent} objects to ${objectTestPeerId}: ${objectIds.join(',')}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Phase 6 seed failed: ${message}`);
+      addLog(`PHASE 6 seed failed: ${message}`);
+    }
+  }
+
+  async function handleRemovePhase6Listed() {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    const objectIds = getPhase6ObjectIds();
+    for (const objectId of objectIds) await store.delete(objectId);
+    await refreshObjectStore();
+    setObjectTestStatus(`Removed ${objectIds.length} listed objects locally`);
+    addLog(`PHASE 6 removed listed objects locally: ${objectIds.join(',')}`);
+  }
+
+  async function handleFindPhase6Listed() {
+    if (!identity || !objectTestPeerId) return;
+    const objectIds = getPhase6ObjectIds();
+    const store = objectStoreRef.current;
+    const transport = objectTransportRef.current;
+    if (!store || objectIds.length < 2 || !transport) return;
+    try {
+      addLog(`PHASE 6 FIND started via ${objectTestPeerId}: requested=${objectIds.join(',')}`);
+      const found = await findObjects(identity.id, objectTestPeerId, objectIds, transport, store, 2, 1000);
+      await refreshObjectStore();
+      setObjectTestStatus(`FIND returned ${found.length}/${objectIds.length} distinct objects`);
+      addLog(`PHASE 6 FIND completed via ${objectTestPeerId}: returned=${found.map((object) => object.object_id).join(',')} distinct=${new Set(found.map((object) => object.object_id)).size}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setObjectTestStatus(`Phase 6 FIND failed: ${message}`);
+      addLog(`PHASE 6 FIND failed: ${message}`);
+    }
+  }
+
   function handleSendPostToPeer(post: StoredPost) {
     if (!selectedContactId) return;
     const manager = peerManagersRef.current[selectedContactId];
@@ -2498,20 +2696,20 @@ function App() {
             objectTransportTest={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
               connectedPeers: objectTransportRef.current?.connectedPeers() ?? [],
               selectedPeerId: objectTestPeerId,
-              storagePeerId: objectTestStoragePeerId,
+              objectIds: objectTestIds,
+              suppressFindResponses: suppressPhase6FindResponses,
               status: objectTestStatus,
               objects: objectStoreObjects,
               onPeerChange: setObjectTestPeerId,
-              onStoragePeerChange: setObjectTestStoragePeerId,
-              onSend: () => { void handleSendObjectTest(); },
-              onPlaceOnly: () => { void handlePlaceObjectTestOnly(); },
-              onResend: () => { void handleResendObjectTest(); },
-              onFind: () => { void handleFindObjectTest(); },
-              onFindMissing: () => { void handleFindMissingObjectTest(); },
-              onSendTtlZero: () => { void handleSendTtlZeroTest(); },
-              onSendDuplicate: () => { void handleSendDuplicateTest(); },
-              onSendExpired: () => { void handleSendExpiredTest(); },
-              onSendUnknownResponse: () => { void handleSendUnknownResponseTest(); },
+              onObjectIdsChange: setObjectTestIds,
+              onCreateSet: () => { void handleCreatePhase6Set(); },
+              onSelectFirstBranch: () => selectPhase6ObjectIds(0, 3),
+              onSelectSecondBranch: () => selectPhase6ObjectIds(2, 5),
+              onSelectAll: () => selectPhase6ObjectIds(0, 5),
+              onSendListed: () => { void handleSendPhase6Listed(); },
+              onRemoveListed: () => { void handleRemovePhase6Listed(); },
+              onFindListed: () => { void handleFindPhase6Listed(); },
+              onToggleSuppressFindResponses: () => setSuppressPhase6FindResponses((current) => !current),
               onRefresh: () => { void refreshObjectStore(); }
             } : undefined}
             onResetApp={() => {

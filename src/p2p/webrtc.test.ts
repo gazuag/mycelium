@@ -30,6 +30,7 @@ class FakePeerConnection {
   lastDataChannel: FakeDataChannel | null = null;
 
   connectionState: RTCPeerConnectionState = 'new';
+  iceConnectionState: RTCIceConnectionState = 'new';
   signalingState: RTCSignalingState = 'stable';
   remoteDescription: RTCSessionDescriptionInit | null = null;
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
@@ -39,6 +40,7 @@ class FakePeerConnection {
   onsignalingstatechange: (() => void) | null = null;
   onicegatheringstatechange: (() => void) | null = null;
   ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null;
+  stats = new Map<string, any>();
 
   constructor() {
     FakePeerConnection.instances.push(this);
@@ -89,7 +91,7 @@ class FakePeerConnection {
   }
 
   async addIceCandidate() {}
-  async getStats() { return new Map(); }
+  async getStats() { return this.stats; }
   close() {
     this.connectionState = 'closed';
   }
@@ -106,7 +108,7 @@ function createManager() {
 }
 
 function signal(type: PeerSignalMessage['type'], from = 'peer-b'): PeerSignalMessage {
-  return { type, from, to: 'peer-a', payload: { type, sdp: type } } as PeerSignalMessage;
+  return { type, from, to: 'peer-a', payload: { type, sdp: type, negotiationId: 'negotiation-test' } } as PeerSignalMessage;
 }
 
 beforeEach(() => {
@@ -119,6 +121,108 @@ beforeEach(() => {
 });
 
 describe('PeerConnectionManager lifecycle', () => {
+  it('logs all checked ICE pairs on failure and the selected pair when connected', async () => {
+    const events: string[] = [];
+    const manager = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const connection = FakePeerConnection.instances[0];
+    connection.stats = new Map([
+      ['local-1', { id: 'local-1', type: 'local-candidate', foundation: 'local-foundation', candidateType: 'host', protocol: 'udp', address: '192.0.2.1', port: 5000, relatedAddress: '10.0.0.1', relatedPort: 5000 }],
+      ['remote-1', { id: 'remote-1', type: 'remote-candidate', foundation: 'remote-foundation', candidateType: 'host', protocol: 'udp', address: '198.51.100.1', port: 6000 }],
+      ['pair-1', { id: 'pair-1', type: 'candidate-pair', localCandidateId: 'local-1', remoteCandidateId: 'remote-1', state: 'succeeded', nominated: true, selected: true, priority: 100, currentRoundTripTime: 0.025 }],
+      ['pair-2', { id: 'pair-2', type: 'candidate-pair', localCandidateId: 'local-1', remoteCandidateId: 'remote-1', state: 'failed', nominated: false, priority: 50, requestsSent: 4, requestsReceived: 2, responsesSent: 1, responsesReceived: 0, error: 'timeout', errorCode: 701 }]
+    ]);
+
+    connection.iceConnectionState = 'checking';
+    connection.oniceconnectionstatechange?.();
+    await Promise.resolve();
+    expect(events.some((event) => event.includes('ICE stats snapshot state=checking candidatePairs=2'))).toBe(true);
+    expect(events.some((event) => event.includes('ICE stats state=checking') && event.includes('id=pair-1') && event.includes('localCandidateId=local-1') && event.includes('remoteCandidateId=remote-1') && event.includes('priority=100'))).toBe(true);
+    expect(events.some((event) => event.includes('ICE stats state=checking') && event.includes('id=pair-2') && event.includes('state=failed'))).toBe(true);
+
+    connection.iceConnectionState = 'connected';
+    connection.oniceconnectionstatechange?.();
+    await Promise.resolve();
+    expect(events.some((event) => event.includes('ICE stats snapshot state=connected candidatePairs=2'))).toBe(true);
+    expect(events.some((event) => event.includes('ICE stats state=connected selected candidate pair id=pair-1') && event.includes('192.0.2.1:5000') && event.includes('198.51.100.1:6000') && event.includes('foundation=local-foundation') && event.includes('rtt=0.025s'))).toBe(true);
+
+    connection.iceConnectionState = 'disconnected';
+    connection.oniceconnectionstatechange?.();
+    await Promise.resolve();
+    expect(events.some((event) => event.includes('ICE stats snapshot state=disconnected candidatePairs=2'))).toBe(true);
+
+    connection.iceConnectionState = 'failed';
+    connection.oniceconnectionstatechange?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events.some((event) => event.includes('ICE stats snapshot state=failed candidatePairs=2'))).toBe(true);
+    expect(events.some((event) => event.includes('ICE stats state=failed selected candidate pair id=pair-1 state=succeeded'))).toBe(true);
+    expect(events.some((event) => event.includes('ICE stats state=failed candidate pair id=pair-2 state=failed') && event.includes('nominated=false') && event.includes('requestsSent=4') && event.includes('requestsReceived=2') && event.includes('responsesSent=1') && event.includes('error=timeout(701)'))).toBe(true);
+  });
+
+  it('logs queued and successful remote ICE candidate application', async () => {
+    const events: string[] = [];
+    const manager = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const candidate = { candidate: 'candidate:1 1 udp 2122260223 192.168.1.20 54321 typ host', sdpMid: '0', sdpMLineIndex: 0 };
+    const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    await manager.createOffer('peer-b', socket);
+    const localConnectionId = manager.getConnectionId();
+    await manager.handleSignal({ type: 'ice-candidate', from: 'peer-b', to: 'peer-a', payload: { negotiationId: manager.getActiveNegotiationId(), candidate } }, socket);
+    expect(events.some((event) => event.includes('ICE addIceCandidate queued') && event.includes('type=host') && event.includes('address=192.168.1.20') && event.includes('port=54321') && event.includes('queued=true'))).toBe(true);
+
+    const connection = FakePeerConnection.instances[0];
+    connection.remoteDescription = { type: 'answer', sdp: 'answer' };
+    await manager.handleSignal({ type: 'ice-candidate', from: 'peer-b', to: 'peer-a', payload: { negotiationId: manager.getActiveNegotiationId(), candidate } }, socket);
+    expect(events.some((event) => event.includes('ICE addIceCandidate succeeded') && event.includes('type=host') && event.includes('queued=false'))).toBe(true);
+  });
+
+  it('ignores signalling messages from a stale connection generation', async () => {
+    const events: string[] = [];
+    const manager = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const socket = fakeSocket();
+    await manager.createOffer('peer-b', socket);
+    const activeId = manager.getConnectionId();
+    const staleId = `${activeId}-stale`;
+    const connection = FakePeerConnection.instances[0];
+    const setRemoteDescription = vi.spyOn(connection, 'setRemoteDescription');
+    await manager.handleSignal({ type: 'answer', from: 'peer-b', to: 'peer-a', payload: { type: 'answer', sdp: 'stale', negotiationId: staleId } }, socket);
+    await manager.handleSignal({ type: 'ice-candidate', from: 'peer-b', to: 'peer-a', payload: { negotiationId: staleId, candidate: { candidate: 'candidate:1 1 udp 1 192.168.1.21 54322 typ host' } } }, socket);
+    expect(setRemoteDescription).not.toHaveBeenCalled();
+    expect(events.some((event) => event.includes('ignored stale answer') && event.includes(staleId))).toBe(true);
+    expect(events.some((event) => event.includes('ignored stale ICE') && event.includes(staleId))).toBe(true);
+  });
+
+  it('shares the offerer negotiation ID across peers with different local connection IDs', async () => {
+    const offerer = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const answerer = new PeerConnectionManager(
+      'peer-b', noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    await offerer.createOffer('peer-b', socket);
+    const offer = JSON.parse(socket.send.mock.calls[0][0]) as PeerSignalMessage;
+    await answerer.handleSignal({ ...offer, from: 'peer-a', to: 'peer-b' }, socket);
+
+    expect(offerer.getConnectionId()).not.toBe(answerer.getConnectionId());
+    expect(offerer.getActiveNegotiationId()).toBe(offer.payload.negotiationId);
+    expect(answerer.getActiveNegotiationId()).toBe(offer.payload.negotiationId);
+    const answer = JSON.parse(socket.send.mock.calls[1][0]) as PeerSignalMessage;
+    expect(answer.type).toBe('answer');
+    expect(answer.payload.negotiationId).toBe(offer.payload.negotiationId);
+    expect(answer.payload.connectionId).toBeUndefined();
+  });
+
   it('does not create another channel for repeated offers', async () => {
     const manager = createManager();
     const socket = fakeSocket();

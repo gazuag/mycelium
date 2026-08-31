@@ -14,7 +14,7 @@ export class PeerConnectionManager {
   private dataChannel: RTCDataChannel | null = null;
   private localId: string;
   private remoteId: string | null = null;
-  private pendingIceCandidates: RTCIceCandidateInit[] = [];
+  private pendingIceCandidates: Array<{ negotiationId: string; candidate: RTCIceCandidateInit | null }> = [];
   private makingOffer = false;
   private polite = false;
   private onState: (peerId: string, state: ConnectionState) => void;
@@ -38,7 +38,8 @@ export class PeerConnectionManager {
   private capabilities: string[];
   private softwareVersion: string;
   private readonly managerId = `manager-${nextManagerId++}`;
-  private connectionId = '';
+  private localConnectionId = '';
+  private activeNegotiationId: string | null = null;
   private connectionCreatedAt = 0;
   private connectionEstablishedAt = 0;
   private isOfferer = false;
@@ -87,11 +88,11 @@ export class PeerConnectionManager {
   }
 
   private createConnection() {
-    this.connectionId = `connection-${nextConnectionId++}`;
+    this.localConnectionId = `connection-${nextConnectionId++}`;
     this.connectionCreatedAt = Date.now();
     this.connectionEstablishedAt = 0;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    this.onEvent('<unknown>', `${this.managerId}/${this.connectionId} RTCPeerConnection created iceServers=${ICE_SERVERS.map((server) => server.urls).join(',')}`);
+    this.onEvent('<unknown>', `${this.connectionLabel()} RTCPeerConnection created iceServers=${ICE_SERVERS.map((server) => server.urls).join(',')}`);
 
     pc.onicecandidate = (event) => {
       const peerId = this.remoteId ?? '<unknown>';
@@ -106,7 +107,14 @@ export class PeerConnectionManager {
           type: 'ice-candidate',
           from: this.localId,
           to: this.remoteId,
-          payload: event.candidate
+          payload: { negotiationId: this.activeNegotiationId ?? '<none>', candidate: event.candidate.toJSON() }
+        });
+      } else if (!event.candidate && this.remoteId) {
+        this.onSignal({
+          type: 'ice-candidate',
+          from: this.localId,
+          to: this.remoteId,
+          payload: { negotiationId: this.activeNegotiationId ?? '<none>', candidate: null }
         });
       }
     };
@@ -119,8 +127,8 @@ export class PeerConnectionManager {
     pc.oniceconnectionstatechange = () => {
       const peerId = this.remoteId ?? '<unknown>';
       this.onEvent(peerId, `${this.connectionLabel()} ICE connection state: ${pc.iceConnectionState} elapsed=${this.connectionElapsed()}`);
-      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed' || pc.iceConnectionState === 'failed') {
-        void this.logSelectedCandidatePair(pc, peerId);
+      if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        void this.logCandidatePairs(pc, peerId, pc.iceConnectionState);
       }
     };
 
@@ -130,7 +138,7 @@ export class PeerConnectionManager {
       this.onEvent(peerId, `${this.connectionLabel()} PeerConnection state: ${state} elapsed=${this.connectionElapsed()}`);
       if (state === 'connected') {
         if (!this.connectionEstablishedAt) this.connectionEstablishedAt = Date.now();
-        void this.logSelectedCandidatePair(pc, peerId);
+        void this.logCandidatePairs(pc, peerId, pc.iceConnectionState);
         this.onState(peerId, 'connected');
       } else if (state === 'connecting') {
         this.onState(peerId, 'connecting');
@@ -175,32 +183,36 @@ export class PeerConnectionManager {
     return pc;
   }
 
-  private async logSelectedCandidatePair(pc: RTCPeerConnection, peerId: string) {
+  private async logCandidatePairs(pc: RTCPeerConnection, peerId: string, iceState: RTCIceConnectionState) {
     try {
       const stats = await pc.getStats();
-      let selectedPair: CandidatePairStats | undefined;
+      const pairs: CandidatePairStats[] = [];
       const candidates = new Map<string, CandidateStats>();
       stats.forEach((report) => {
         if (report.type === 'candidate-pair') {
-          const pair = report as CandidatePairStats;
-          if (pair.state === 'succeeded' && pair.nominated) {
-            selectedPair = pair;
-          }
+          pairs.push({ ...report, ...(report as CandidatePairStats) } as CandidatePairStats);
         }
         if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
           candidates.set(report.id, report as CandidateStats);
         }
       });
-      if (!selectedPair) {
+      if (pairs.length === 0) {
         this.onEvent(peerId, `${this.connectionLabel()} ICE selected candidate pair unavailable`);
         return;
       }
-      const local = candidates.get(selectedPair.localCandidateId);
-      const remote = candidates.get(selectedPair.remoteCandidateId);
-      const pairProtocol = local?.protocol && remote?.protocol
-        ? `${local.protocol}/${remote.protocol}`
-        : 'unknown';
-      this.onEvent(peerId, `${this.connectionLabel()} ICE selected pair local=${formatCandidate(local)} remote=${formatCandidate(remote)} pairProtocol=${pairProtocol} state=${selectedPair.state}`);
+      this.onEvent(peerId, `${this.connectionLabel()} ICE stats snapshot state=${iceState} candidatePairs=${pairs.length}`);
+      for (const pair of pairs) {
+        const local = candidates.get(pair.localCandidateId);
+        const remote = candidates.get(pair.remoteCandidateId);
+        const rtt = pair.currentRoundTripTime === undefined && pair.totalRoundTripTime === undefined
+          ? ''
+          : ` rtt=${pair.currentRoundTripTime === undefined ? '?' : `${pair.currentRoundTripTime}s`} totalRtt=${pair.totalRoundTripTime === undefined ? '?' : `${pair.totalRoundTripTime}s`}`;
+        const errors = pair.requestsSent === undefined && pair.requestsReceived === undefined && pair.responsesSent === undefined && pair.responsesReceived === undefined
+          ? ''
+          : ` requestsSent=${pair.requestsSent ?? '?'} requestsReceived=${pair.requestsReceived ?? '?'} responsesSent=${pair.responsesSent ?? '?'} responsesReceived=${pair.responsesReceived ?? '?'}`;
+        const selected = pair.selected === true || (pair.state === 'succeeded' && pair.nominated === true);
+        this.onEvent(peerId, `${this.connectionLabel()} ICE stats state=${iceState} ${selected ? 'selected ' : ''}candidate pair id=${pair.id ?? '<unknown>'} state=${pair.state} nominated=${pair.nominated === true} selected=${selected} priority=${pair.priority ?? '?'} localCandidateId=${pair.localCandidateId} remoteCandidateId=${pair.remoteCandidateId} local=${formatCandidate(local)} remote=${formatCandidate(remote)}${rtt}${errors}${formatPairError(pair)}`);
+      }
     } catch (error) {
       this.onEvent(peerId, `${this.connectionLabel()} ICE stats unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -393,6 +405,14 @@ export class PeerConnectionManager {
     return this.dataChannel?.readyState ?? 'missing';
   }
 
+  public getConnectionId() {
+    return this.localConnectionId;
+  }
+
+  public getActiveNegotiationId() {
+    return this.activeNegotiationId;
+  }
+
   public isNegotiating() {
     return this.makingOffer
       || this.peerConnection.signalingState === 'have-local-offer'
@@ -527,6 +547,7 @@ export class PeerConnectionManager {
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {
     this.onEvent(remoteId, `${this.connectionLabel()} createOffer called state=${this.peerConnection.connectionState} signaling=${this.peerConnection.signalingState} channel=${this.dataChannel?.label ?? '<none>'}:${this.dataChannel?.id ?? '<none>'}`);
+    this.onEvent(remoteId, `${this.connectionLabel()} offer/reconnect inspection replacing=${this.needsReplacement()} negotiating=${this.isNegotiating()} ice=${this.peerConnection.iceConnectionState}`);
     this.remoteId = remoteId;
     if (this.destroyed) {
       this.onEvent(remoteId, `${this.connectionLabel()} createOffer skipped: manager is destroyed`);
@@ -565,6 +586,7 @@ export class PeerConnectionManager {
       return;
     }
     this.isOfferer = true;
+    this.activeNegotiationId = createPacketId();
     this.polite = this.localId > remoteId;
     this.makingOffer = true;
     try {
@@ -583,29 +605,46 @@ export class PeerConnectionManager {
         type: 'offer',
         from: this.localId,
         to: remoteId,
-        payload: offer
+        payload: { ...offer, negotiationId: this.activeNegotiationId }
       });
     } finally {
       this.makingOffer = false;
     }
   }
 
-  private async addIceCandidate(candidate: RTCIceCandidateInit) {
-    const details = parseCandidate(candidate.candidate ?? '');
+  private async addIceCandidate(candidate: RTCIceCandidateInit | null, negotiationId: string) {
+    const details = parseCandidate(candidate?.candidate ?? '');
     const peerId = this.remoteId ?? '<unknown>';
     this.onEvent(peerId, `Remote ICE candidate received type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port}`);
     if (this.peerConnection.remoteDescription) {
-      await this.peerConnection.addIceCandidate(candidate);
+      try {
+        await this.peerConnection.addIceCandidate(candidate);
+        this.onEvent(peerId, `ICE addIceCandidate succeeded type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port} queued=false`);
+      } catch (error) {
+        this.onEvent(peerId, `ICE addIceCandidate failed type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port} queued=false error=${formatError(error)}`);
+        throw error;
+      }
     } else {
-      this.pendingIceCandidates.push(candidate);
+      this.pendingIceCandidates.push({ negotiationId, candidate });
+      this.onEvent(peerId, `ICE addIceCandidate queued type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port} queued=true reason=remote-description-pending`);
     }
   }
 
   private async flushPendingIceCandidates() {
-    for (const candidate of this.pendingIceCandidates) {
-      await this.peerConnection.addIceCandidate(candidate);
-    }
+    const pending = this.pendingIceCandidates.filter((entry) => entry.negotiationId === this.activeNegotiationId);
     this.pendingIceCandidates = [];
+    for (const entry of pending) {
+      const candidate = entry.candidate;
+      const details = parseCandidate(candidate?.candidate ?? '');
+      const peerId = this.remoteId ?? '<unknown>';
+      try {
+        await this.peerConnection.addIceCandidate(candidate);
+        this.onEvent(peerId, `ICE addIceCandidate succeeded type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port} queued=true`);
+      } catch (error) {
+        this.onEvent(peerId, `ICE addIceCandidate failed type=${details.type} protocol=${details.protocol} address=${details.address} port=${details.port} queued=true error=${formatError(error)}`);
+        throw error;
+      }
+    }
   }
 
   public handleSignal(message: PeerSignalMessage, signallingSocket: WebSocket) {
@@ -623,6 +662,12 @@ export class PeerConnectionManager {
 
     this.remoteId = message.from;
     this.polite = this.localId > message.from;
+    const receivedNegotiationId = typeof message.payload?.negotiationId === 'string' ? message.payload.negotiationId : null;
+    this.onEvent(message.from, `${this.connectionLabel()} signalling received type=${message.type} localConnectionId=${this.localConnectionId} negotiationId=${receivedNegotiationId ?? '<missing>'} signaling=${this.peerConnection.signalingState} ice=${this.peerConnection.iceConnectionState}`);
+    if (!receivedNegotiationId) {
+      this.onEvent(message.from, `${this.connectionLabel()} signalling ignored: missing negotiationId type=${message.type}`);
+      return;
+    }
     // Only transition to 'signalling' when not already connected; ICE candidates arrive continuously
     if (this.peerConnection.connectionState !== 'connected') {
       this.onState(message.from, 'signalling');
@@ -646,9 +691,10 @@ export class PeerConnectionManager {
       }
 
       this.onEvent(message.from, `Received offer from ${message.from}`);
+      this.activeNegotiationId = receivedNegotiationId;
       this.isOfferer = false;
       this.awaitingIncomingChannel = true;
-      await this.peerConnection.setRemoteDescription(message.payload);
+      await this.peerConnection.setRemoteDescription(stripNegotiationId(message.payload) as unknown as RTCSessionDescriptionInit);
       await this.flushPendingIceCandidates();
 
       const answer = await this.peerConnection.createAnswer();
@@ -658,24 +704,33 @@ export class PeerConnectionManager {
         type: 'answer',
         from: this.localId,
         to: message.from,
-        payload: answer
+        payload: { ...answer, negotiationId: this.activeNegotiationId }
       });
     } else if (message.type === 'answer') {
+      if (receivedNegotiationId !== this.activeNegotiationId) {
+        this.onEvent(message.from, `${this.connectionLabel()} signalling ignored stale answer negotiationId=${receivedNegotiationId} active=${this.activeNegotiationId ?? '<none>'}`);
+        return;
+      }
       if (this.peerConnection.signalingState !== 'have-local-offer') {
         this.onEvent(message.from, `${this.connectionLabel()} ignoring stale answer in signalingState=${this.peerConnection.signalingState}`);
         return;
       }
       this.onEvent(message.from, `Received answer from ${message.from}`);
       try {
-        await this.peerConnection.setRemoteDescription(message.payload);
+        await this.peerConnection.setRemoteDescription(stripNegotiationId(message.payload) as unknown as RTCSessionDescriptionInit);
         await this.flushPendingIceCandidates();
         this.clearOfferRecoveryTimer();
       } catch (error) {
         this.onEvent(message.from, `${this.connectionLabel()} failed to apply answer: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else if (message.type === 'ice-candidate') {
+      if (receivedNegotiationId !== this.activeNegotiationId) {
+        this.onEvent(message.from, `${this.connectionLabel()} signalling ignored stale ICE negotiationId=${receivedNegotiationId} active=${this.activeNegotiationId ?? '<none>'}`);
+        return;
+      }
       this.onEvent(message.from, `Received ICE candidate from ${message.from}`);
-      await this.addIceCandidate(message.payload);
+      const candidate = message.payload?.candidate === null ? null : message.payload?.candidate as RTCIceCandidateInit;
+      await this.addIceCandidate(candidate, receivedNegotiationId);
     }
   }
 
@@ -701,6 +756,8 @@ export class PeerConnectionManager {
     }
     this.stopPingLoop();
     this.clearOfferRecoveryTimer();
+    this.pendingIceCandidates = [];
+    this.activeNegotiationId = null;
   }
 
   private startOfferRecoveryTimer(peerId: string) {
@@ -728,7 +785,7 @@ export class PeerConnectionManager {
   }
 
   private connectionLabel() {
-    return `${this.managerId}/${this.connectionId}`;
+    return `${this.managerId}/${this.localConnectionId}`;
   }
 
   private connectionElapsed() {
@@ -738,19 +795,37 @@ export class PeerConnectionManager {
 }
 
 type CandidatePairStats = {
+  id?: string;
   localCandidateId: string;
   remoteCandidateId: string;
   state: string;
+  priority?: number;
   protocol?: string;
   nominated?: boolean;
+  selected?: boolean;
+  currentRoundTripTime?: number;
+  totalRoundTripTime?: number;
+  requestsSent?: number;
+  requestsReceived?: number;
+  responsesSent?: number;
+  responsesReceived?: number;
+  bytesSent?: number;
+  bytesReceived?: number;
+  lastPacketSentTimestamp?: number;
+  lastPacketReceivedTimestamp?: number;
+  error?: string;
+  errorCode?: number;
 };
 
 type CandidateStats = {
+  foundation?: string;
   candidateType?: string;
   protocol?: string;
   address?: string;
   ip?: string;
   port?: number;
+  relatedAddress?: string;
+  relatedPort?: number;
 };
 
 function getCandidateType(candidate: string) {
@@ -773,5 +848,22 @@ function parseCandidate(candidate: string) {
 function formatCandidate(candidate: CandidateStats | undefined) {
   const address = candidate?.address ?? candidate?.ip ?? '<unknown>';
   const port = candidate?.port === undefined ? '<unknown>' : String(candidate.port);
-  return `${candidate?.candidateType ?? 'unknown'}:${candidate?.protocol ?? 'unknown'}@${address}:${port}`;
+  const related = candidate?.relatedAddress === undefined && candidate?.relatedPort === undefined
+    ? ''
+    : ` related=${candidate.relatedAddress ?? '<unknown>'}:${candidate.relatedPort ?? '<unknown>'}`;
+  return `${candidate?.candidateType ?? 'unknown'}:${candidate?.protocol ?? 'unknown'}@${address}:${port} foundation=${candidate?.foundation ?? 'unknown'}${related}`;
+}
+
+function formatPairError(pair: CandidatePairStats) {
+  if (pair.error === undefined && pair.errorCode === undefined) return '';
+  return ` error=${pair.error ?? 'unknown'}${pair.errorCode === undefined ? '' : `(${pair.errorCode})`}`;
+}
+
+function formatError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function stripNegotiationId(payload: Record<string, unknown>): Record<string, unknown> {
+  const { negotiationId: _negotiationId, ...description } = payload;
+  return description;
 }

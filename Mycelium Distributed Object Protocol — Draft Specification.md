@@ -211,6 +211,11 @@ A request contains at least:
     deadline
     request type
 
+The canonical wire representation uses `requested_objects`, an array of one or
+more object IDs. A legacy request may provide `object_id` for a single-object
+request; peers normalize it to a one-element `requested_objects` array. Phase 6
+does not define metadata criteria queries.
+
 `request_id` must be globally unique enough to prevent collisions.
 
 Each peer maintains a short-lived cache of recently seen request IDs.
@@ -255,6 +260,12 @@ A request for a single object can terminate as soon as a valid copy is found.
 
 A request for multiple objects must aggregate partial results.
 
+The canonical `FIND_RESPONSE` payload uses an `objects` array. An empty array
+means that the responding branch found no valid requested objects. One or more
+objects represent the valid objects found by that branch, and the response may
+be partial. Legacy single-object responses may provide `object` and are
+normalized to a one-element `objects` array.
+
 Each peer combines:
 
     objects found locally
@@ -262,6 +273,10 @@ Each peer combines:
     objects returned by child peers
 
 Duplicate objects are removed using their object IDs.
+
+Peers validate every returned object before accepting it, and discard objects
+whose IDs were not requested. The final requester validates accepted objects
+again before storing them.
 
 Example:
 

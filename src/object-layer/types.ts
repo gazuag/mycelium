@@ -38,7 +38,7 @@ export interface FindPacket {
   readonly timestamp: string;
   readonly sender: string;
   readonly recipient: string | null;
-  readonly payload: { readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string };
+  readonly payload: { readonly requested_objects: readonly string[]; readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string };
   readonly signature: string;
 }
 
@@ -50,7 +50,7 @@ export interface FindResponsePacket {
   readonly timestamp: string;
   readonly sender: string;
   readonly recipient: string | null;
-  readonly payload: { readonly object_id: string; readonly requestId: string; readonly expiresAt?: string; readonly origin?: string; readonly object?: DistributedObject };
+  readonly payload: { readonly objects: readonly DistributedObject[]; readonly object_id: string; readonly requestId: string; readonly expiresAt?: string; readonly origin?: string; readonly object?: DistributedObject };
   readonly signature: string;
 }
 
