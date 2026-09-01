@@ -637,4 +637,21 @@ describe('distributed object foundation', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].type === 'FIND_RESPONSE' && sent[0].payload.objects).toEqual([object]);
   });
+
+  it('returns partial results when four of five requested objects exist', async () => {
+    const objects = await Promise.all([1, 2, 3, 4].map((value) => createFixtureObject({ object_type: 'partial-aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value }, replication_policy: {} })));
+    const missingId = 'f'.repeat(64);
+    const returned: Array<{ objects: DistributedObject[]; reason: string }> = [];
+    const aggregation = new FindAggregation(objects.map((object) => object.object_id).concat(missingId), Date.now() + 5000, async (found, reason) => {
+      returned.push({ objects: found, reason });
+    });
+    aggregation.addChild('peer-c');
+    aggregation.addChild('peer-d');
+    await aggregation.addChildObjects('peer-c', objects.slice(0, 3));
+    expect(returned).toHaveLength(0);
+    await aggregation.addChildObjects('peer-d', [objects[3]]);
+    expect(returned).toHaveLength(1);
+    expect(returned[0].objects).toHaveLength(4);
+    expect(returned[0].reason).toBe('all-children-responded-or-failed');
+  });
 });

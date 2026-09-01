@@ -279,11 +279,13 @@ function App() {
     const now = Date.now();
     for (const [requestId, route] of findRequestRouteRef.current.entries()) {
       if (route.expiresAt <= now) {
+        addLog(`PHASE6 ROUTE CLEANUP requestId=${requestId} upstream=${route.upstreamPeer} expiresAt=${route.expiresAt} now=${now}`);
         findRequestRouteRef.current.delete(requestId);
       }
     }
     for (const [seenRequestId, expiresAt] of findRequestCacheRef.current.entries()) {
       if (expiresAt <= now) {
+        addLog(`PHASE6 CACHE CLEANUP requestId=${seenRequestId} expiresAt=${expiresAt} now=${now}`);
         findRequestCacheRef.current.delete(seenRequestId);
       }
     }
@@ -317,6 +319,7 @@ function App() {
           addLog(`reason: ${reason}`);
           addLog(`returning: ${objects.length} objects`);
           addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
+          addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${objects.length} upstream=${peerId}`);
           const response = await buildFindResponseObjectsPacket(
             identityRef.current?.id ?? 'unknown',
             peerId,
@@ -328,8 +331,11 @@ function App() {
           );
           await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
           addLog(`aggregate sent upstream to ${peerId}`);
+          addLog(`PHASE6 AGG CLEANUP BEFORE DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
           findAggregationRef.current.delete(requestId);
+          findRequestRouteRef.current.delete(requestId);
           findRequestCacheRef.current.delete(requestId);
+          addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
         });
         findAggregationRef.current.set(requestId, {
           aggregation,
@@ -338,6 +344,10 @@ function App() {
           origin: typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
           expiresAt
         });
+        findRequestRouteRef.current.set(requestId, { upstreamPeer: peerId, expiresAt: expiresAtMs });
+        addLog(`PHASE 6 aggregation state created: requestId=${requestId} upstream=${peerId} requested=${requestedObjectIds.length}`);
+        addLog(`PHASE6 AGG CREATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} upstream=${peerId} children=${nextPeers.join(',') || 'none'} requested=${requestedObjectIds.length} localHits=${localObjects.length}`);
+        addLog(`PHASE6 AGG STORED requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
         for (const nextPeer of nextPeers) aggregation.addChild(nextPeer);
         aggregation.addLocal(localObjects);
         if (!aggregation.isComplete() && requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId)) && packet.payload.ttl > 0) {
@@ -438,19 +448,29 @@ function App() {
     if (packet.type === 'FIND_RESPONSE') {
       const requestId = typeof packet.payload?.requestId === 'string' ? packet.payload.requestId : null;
       const aggregationState = requestId ? findAggregationRef.current.get(requestId) : undefined;
+      const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
+      addLog(`FIND_RESPONSE received: requestId=${requestId ?? 'unknown'} aggregationState=${aggregationState ? 'present' : 'absent'} route=${route?.upstreamPeer ?? 'none'} routePresent=${Boolean(route)}`);
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
           addLog(`child ${peerId} response received`);
           addLog(`objects: ${objects.length}`);
+          addLog(`PHASE6 CHILD RESPONSE local=${identityRef.current?.id ?? 'unknown'} from=${peerId} requestId=${requestId} objects=${objects.length} pendingBefore=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           await aggregationState.aggregation.addChildObjects(peerId, objects);
+          addLog(`PHASE6 AGG UPDATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} aggregate=${aggregationState.aggregation.aggregateSize()} pendingAfter=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           addLog(`aggregate: ${aggregationState.aggregation.aggregateSize()} unique objects`);
           addLog(`children pending: ${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
+        } else {
+          addLog(`PHASE 6 FIND response ignored: requestId=${requestId} sender=${peerId} is not a selected child pending=${aggregationState.aggregation.pendingChildren().join(',') || 'none'}`);
         }
         return;
       }
-      const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
+      addLog(`PHASE6 RESPONSE PATH CHECK requestId=${requestId ?? 'unknown'} aggregationPresent=${Boolean(aggregationState)} routePresent=${Boolean(route)} routeUpstream=${route?.upstreamPeer ?? 'none'} sender=${peerId}`);
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
+      if (Array.isArray(packet.payload?.objects)) {
+        addLog(`PHASE 6 FIND_RESPONSE ignored: no active aggregation state for requestId=${requestId ?? 'unknown'}`);
+        return;
+      }
       if (route && route.upstreamPeer !== peerId) {
         const relayed = await buildFindResponsePacket(
           identityRef.current?.id ?? 'unknown',
@@ -2429,6 +2449,16 @@ function App() {
     addLog(`PHASE 6 removed listed objects locally: ${objectIds.join(',')}`);
   }
 
+  async function handleClearObjectStore() {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    const objects = await store.query();
+    for (const object of objects) await store.delete(object.object_id);
+    await refreshObjectStore();
+    setObjectTestStatus(`Cleared ${objects.length} objects from the local object store`);
+    addLog(`OBJECT STORE cleared locally: ${objects.length} objects removed`);
+  }
+
   async function handleFindPhase6Listed() {
     if (!identity || !objectTestPeerId) return;
     const objectIds = getPhase6ObjectIds();
@@ -2710,6 +2740,7 @@ function App() {
               onRemoveListed: () => { void handleRemovePhase6Listed(); },
               onFindListed: () => { void handleFindPhase6Listed(); },
               onToggleSuppressFindResponses: () => setSuppressPhase6FindResponses((current) => !current),
+              onClearObjectStore: () => { void handleClearObjectStore(); },
               onRefresh: () => { void refreshObjectStore(); }
             } : undefined}
             onResetApp={() => {

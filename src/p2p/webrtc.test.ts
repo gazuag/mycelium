@@ -223,6 +223,52 @@ describe('PeerConnectionManager lifecycle', () => {
     expect(answer.payload.connectionId).toBeUndefined();
   });
 
+  it('resolves simultaneous offers deterministically and rejects ICE from the abandoned negotiation', async () => {
+    const aEvents: string[] = [];
+    const bEvents: string[] = [];
+    const a = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => aEvents.push(`${peerId} ${event}`), noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const b = new PeerConnectionManager(
+      'peer-b', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => bEvents.push(`${peerId} ${event}`), noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const aSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    const bSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    const aOfferSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    const bOfferSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    await a.createOffer('peer-b', aSocket);
+    await b.createOffer('peer-a', bSocket);
+    const aOffer = JSON.parse(aSocket.send.mock.calls[0][0]) as PeerSignalMessage;
+    const bOffer = JSON.parse(bSocket.send.mock.calls[0][0]) as PeerSignalMessage;
+    const aBefore = FakePeerConnection.instances[0];
+    const bBefore = FakePeerConnection.instances[1];
+    const aSetRemote = vi.spyOn(aBefore, 'setRemoteDescription');
+    const bSetRemote = vi.spyOn(bBefore, 'setRemoteDescription');
+
+    await a.handleSignal({ ...bOffer, from: 'peer-b', to: 'peer-a' }, aOfferSocket);
+    await b.handleSignal({ ...aOffer, from: 'peer-a', to: 'peer-b' }, bOfferSocket);
+    const bAnswer = JSON.parse(bOfferSocket.send.mock.calls[0][0]) as PeerSignalMessage;
+    await a.handleSignal({ ...bAnswer, from: 'peer-b', to: 'peer-a' }, aOfferSocket);
+
+    expect(aSetRemote).toHaveBeenCalledOnce();
+    expect(bSetRemote).toHaveBeenCalledOnce();
+    expect(bAnswer.payload.negotiationId).toBe(aOffer.payload.negotiationId);
+    expect(a.getActiveNegotiationId()).toBe(aOffer.payload.negotiationId);
+    expect(b.getActiveNegotiationId()).toBe(aOffer.payload.negotiationId);
+    expect(aBefore.signalingState).toBe('stable');
+    expect(bBefore.signalingState).toBe('stable');
+
+    const addIce = vi.spyOn(bBefore, 'addIceCandidate');
+    await b.handleSignal({ type: 'ice-candidate', from: 'peer-a', to: 'peer-b', payload: { negotiationId: bOffer.payload.negotiationId, candidate: { candidate: 'candidate:stale 1 udp 1 192.168.1.2 5000 typ host' } } }, bOfferSocket);
+    expect(addIce).not.toHaveBeenCalled();
+
+    expect(a.getConnectionId()).not.toBe(b.getConnectionId());
+    expect(aEvents.some((event) => event.includes('glare collision: impolite peer ignored'))).toBe(true);
+    expect(bEvents.some((event) => event.includes('glare collision: polite peer rolling back'))).toBe(true);
+  });
+
   it('does not create another channel for repeated offers', async () => {
     const manager = createManager();
     const socket = fakeSocket();

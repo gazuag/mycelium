@@ -214,6 +214,7 @@ export class FindAggregation {
 
   private async complete(reason: FindAggregationCompletionReason) {
     if (this.completed) return;
+    console.debug(`PHASE6 AGG COMPLETE reason=${reason} aggregateSize=${this.objects.size} pendingChildren=${this.pendingChildren().join(',') || 'none'}`);
     this.completed = true;
     if (this.graceTimer) clearTimeout(this.graceTimer);
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
@@ -337,8 +338,12 @@ export async function findObjects(
     const unsubscribe = transport.onPacket((responsePeerId, packet) => {
       if (settled || responsePeerId !== peerId || packet.type !== 'FIND_RESPONSE') return;
       void validateFindResponseObjects(packet, requestPacket.payload.requestId, new Set(requestedObjectIds)).then(async (objects) => {
+        console.debug(`PHASE6 ORIGIN RESPONSE RX local=${sender} from=${responsePeerId} requestId=${requestPacket.payload.requestId} objects=${objects.length} objectIds=${objects.map((object) => object.object_id).join(',') || 'none'}`);
         for (const object of objects) results.set(object.object_id, object);
-        if (results.size === requestedObjectIds.length || Date.now() >= deadlineMs) await finish();
+        if (results.size === requestedObjectIds.length || Date.now() >= deadlineMs) {
+          console.debug(`PHASE6 ORIGIN COMPLETE local=${sender} requestId=${requestPacket.payload.requestId} results=${results.size} objectIds=${[...results.values()].map((object) => object.object_id).join(',') || 'none'}`);
+          await finish();
+        }
       }).catch(reject);
     });
     const graceTimer = setTimeout(() => { void finish(); }, Math.min(gracePeriodMs, Math.max(0, deadlineMs - Date.now())));

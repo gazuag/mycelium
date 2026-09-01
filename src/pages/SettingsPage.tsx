@@ -34,6 +34,7 @@ interface SettingsPageProps {
     onRemoveListed: () => void;
     onFindListed: () => void;
     onToggleSuppressFindResponses: () => void;
+    onClearObjectStore: () => void;
     onRefresh: () => void;
   };
 }
@@ -177,6 +178,7 @@ export function SettingsPage({
             <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onSendListed}>Send listed objects</button>
             <button className="btn secondary" type="button" onClick={objectTransportTest.onRemoveListed}>Remove listed locally</button>
             <button className="btn" type="button" disabled={!objectTransportTest.selectedPeerId} onClick={objectTransportTest.onFindListed}>FIND listed objects</button>
+            <button className="btn secondary" type="button" onClick={objectTransportTest.onClearObjectStore}>Clear object store</button>
             <button className="btn secondary" type="button" onClick={objectTransportTest.onRefresh}>Refresh object store</button>
           </div>
           {objectTransportTest.status && <p className="note monospace break-word">{objectTransportTest.status}</p>}
