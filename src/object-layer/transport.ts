@@ -374,6 +374,78 @@ export function findObject(
   return resolveFindRequest(sender, peerId, objectId, ttl, transport, store);
 }
 
+// Target number of useful live replicas to aim for when an object's replication_policy omits an explicit budget.
+export const DEFAULT_REPLICATION_BUDGET = 3;
+
+export function getReplicationBudget(object: DistributedObject): number {
+  const budget = object.replication_policy?.replication_budget;
+  return typeof budget === 'number' && Number.isSafeInteger(budget) && budget >= 0 ? budget : DEFAULT_REPLICATION_BUDGET;
+}
+
+export interface ReplicationResult {
+  readonly objectId: string;
+  readonly budget: number;
+  readonly targeted: readonly string[];
+  readonly stored: readonly string[];
+  readonly skipped: readonly string[];
+}
+
+/**
+ * Pushes an object directly to up to `budget` additional connected peers so that roughly `budget` useful
+ * replicas exist across the network. This is a target replica count, not a forwarding/hop counter: each
+ * selected peer is sent the object exactly once via a direct OBJECT_STORE packet (no recursive relaying,
+ * no TTL decrement). Bounding comes from `transport.connectedPeers()` being a finite local list and from
+ * stopping once the budget is met, mirroring the existing fanout-style bounds used elsewhere in this file.
+ */
+export async function replicateObject(
+  sender: string,
+  object: DistributedObject,
+  transport: ObjectTransport,
+  signer?: PacketSigner,
+  alreadyReplicatedTo: ReadonlySet<string> = new Set(),
+  log: (message: string) => void = () => {}
+): Promise<ReplicationResult> {
+  const budget = getReplicationBudget(object);
+  const hadExplicitBudget = typeof object.replication_policy?.replication_budget === 'number';
+  log(`REPLICATION considering object_id=${object.object_id} budget=${budget}${hadExplicitBudget ? '' : ' (defaulted)'} existingReplicas=${alreadyReplicatedTo.size}`);
+
+  const remaining = Math.max(0, budget - alreadyReplicatedTo.size);
+  if (remaining === 0) {
+    log(`REPLICATION target already satisfied for object_id=${object.object_id}: existingReplicas=${alreadyReplicatedTo.size}/${budget}, stopping`);
+    return { objectId: object.object_id, budget, targeted: [], stored: [], skipped: [] };
+  }
+
+  const candidates = transport.connectedPeers().filter((peerId) => peerId !== sender);
+  const targeted: string[] = [];
+  const stored: string[] = [];
+  const skipped: string[] = [];
+
+  for (const peerId of candidates) {
+    if (stored.length >= remaining) {
+      log(`REPLICATION budget reached for object_id=${object.object_id}: newReplicas=${stored.length} existingReplicas=${alreadyReplicatedTo.size} budget=${budget}, stopping`);
+      break;
+    }
+    if (alreadyReplicatedTo.has(peerId)) {
+      log(`REPLICATION duplicate skipped object_id=${object.object_id} peer=${peerId} already holds a replica`);
+      skipped.push(peerId);
+      continue;
+    }
+    targeted.push(peerId);
+    log(`REPLICATION target selected object_id=${object.object_id} peer=${peerId}`);
+    try {
+      const packet = await buildObjectStorePacket(sender, peerId, object, signer);
+      await transport.send(peerId, packet);
+      stored.push(peerId);
+      log(`REPLICATION stored object_id=${object.object_id} on peer=${peerId} (${alreadyReplicatedTo.size + stored.length}/${budget})`);
+    } catch (error) {
+      log(`REPLICATION failed to store object_id=${object.object_id} on peer=${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  log(`REPLICATION complete object_id=${object.object_id} newReplicas=${stored.length} totalKnownReplicas=${alreadyReplicatedTo.size + stored.length} budget=${budget} candidatesConsidered=${targeted.length + skipped.length}`);
+  return { objectId: object.object_id, budget, targeted, stored, skipped };
+}
+
 export async function findObjects(
   sender: string,
   peerId: string,

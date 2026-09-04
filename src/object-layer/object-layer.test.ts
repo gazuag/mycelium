@@ -5,7 +5,7 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, receiveObjectPacket, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getReplicationBudget, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
 
@@ -740,5 +740,103 @@ describe('distributed object foundation', () => {
     expect(returned).toHaveLength(1);
     expect(returned[0].objects).toHaveLength(4);
     expect(returned[0].reason).toBe('all-children-responded-or-failed');
+  });
+
+  describe('Phase 8: replication budgets', () => {
+    function createFakeTransport(peerIds: string[]) {
+      const sent: Array<{ peerId: string; object: DistributedObject }> = [];
+      const stores = new Map<string, ObjectStore>(peerIds.map((peerId) => [peerId, createMemoryStore()]));
+      const transport = {
+        connectedPeers: () => peerIds,
+        onPacket: () => () => {},
+        send: async (peerId: string, packet: ObjectPacket) => {
+          if (packet.type !== 'OBJECT_STORE') return;
+          const peerStore = stores.get(peerId);
+          if (!peerStore) throw new Error(`unknown peer: ${peerId}`);
+          await receiveObjectPacket(packet, peerStore);
+          sent.push({ peerId, object: packet.payload.object });
+        }
+      };
+      return { transport, stores, sent };
+    }
+
+    it('uses the object\'s explicit replication_budget as a target replica count, not a hop count', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'budget-2' },
+        replication_policy: { replication_budget: 2 }
+      });
+      const { transport, stores, sent } = createFakeTransport(['peer-b', 'peer-c', 'peer-d']);
+      const logs: string[] = [];
+
+      const result = await replicateObject('peer-a', object, transport, undefined, new Set(), (message) => logs.push(message));
+
+      expect(getReplicationBudget(object)).toBe(2);
+      expect(result.budget).toBe(2);
+      // Bounded: exactly 2 peers were targeted even though 3 peers were connected (budget is a replica target, not a hop count).
+      expect(result.stored).toHaveLength(2);
+      expect(result.targeted).toEqual(result.stored);
+      expect(await stores.get('peer-b')!.get(object.object_id)).toEqual(object);
+      expect(await stores.get('peer-c')!.get(object.object_id)).toEqual(object);
+      expect(await stores.get('peer-d')!.get(object.object_id)).toBeNull();
+      expect(sent).toHaveLength(2);
+
+      expect(logs.some((line) => line.includes(`REPLICATION considering object_id=${object.object_id} budget=2`))).toBe(true);
+      expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-b`))).toBe(true);
+      expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-c`))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION budget reached') && line.includes('stopping'))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION complete') && line.includes('newReplicas=2'))).toBe(true);
+    });
+
+    it('falls back to the default replication budget for objects without an explicit policy value', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication-default',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'no-explicit-budget' },
+        replication_policy: {}
+      });
+      expect(getReplicationBudget(object)).toBe(DEFAULT_REPLICATION_BUDGET);
+
+      const { transport, sent } = createFakeTransport(['peer-b']);
+      const logs: string[] = [];
+      const result = await replicateObject('peer-a', object, transport, undefined, new Set(), (message) => logs.push(message));
+
+      expect(result.budget).toBe(DEFAULT_REPLICATION_BUDGET);
+      expect(result.stored).toEqual(['peer-b']);
+      expect(sent).toHaveLength(1);
+      expect(logs.some((line) => line.includes('(defaulted)'))).toBe(true);
+    });
+
+    it('does not re-store a duplicate on a peer that already holds the object and stops once the target is met', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication-dedup',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'dedup' },
+        replication_policy: { replication_budget: 1 }
+      });
+      const { transport, stores, sent } = createFakeTransport(['peer-b', 'peer-c']);
+
+      const first = await replicateObject('peer-a', object, transport);
+      expect(first.stored).toEqual(['peer-b']);
+      expect(sent).toHaveLength(1);
+
+      // Re-running with local knowledge that peer-b already holds a replica must not duplicate storage there,
+      // and must recognize the budget is already satisfied without contacting any other peer.
+      const logs: string[] = [];
+      const second = await replicateObject('peer-a', object, transport, undefined, new Set(first.stored), (message) => logs.push(message));
+      expect(second.stored).toHaveLength(0);
+      expect(second.targeted).toHaveLength(0);
+      expect(sent).toHaveLength(1);
+      expect(await stores.get('peer-c')!.get(object.object_id)).toBeNull();
+      expect(logs.some((line) => line.includes('already satisfied') && line.includes('stopping'))).toBe(true);
+
+      // A single peer's local store never ends up with more than one copy of the same object_id.
+      const peerBObjects = (await stores.get('peer-b')!.query()).filter((stored) => stored.object_id === object.object_id);
+      expect(peerBObjects).toHaveLength(1);
+    });
   });
 });
