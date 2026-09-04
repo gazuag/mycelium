@@ -872,7 +872,8 @@ function describeCandidate(candidateLine: string, candidate?: RTCIceCandidateIni
     return `candidate=${candidate.candidate} type=${parsed.type} protocol=${parsed.protocol} address=${parsed.address} port=${parsed.port}`;
   }
   if (typeof candidate === 'object' && 'address' in candidate && 'port' in candidate) {
-    return `candidate=${candidate.candidate ?? '<unknown>'} type=${candidate.candidateType ?? parsed.type} protocol=${candidate.protocol ?? parsed.protocol} address=${candidate.address ?? parsed.address} port=${candidate.port ?? parsed.port}`;
+    const stats = candidate as CandidateStats & { candidate?: string };
+    return `candidate=${stats.candidate ?? '<unknown>'} type=${stats.candidateType ?? parsed.type} protocol=${stats.protocol ?? parsed.protocol} address=${stats.address ?? parsed.address} port=${stats.port ?? parsed.port}`;
   }
   return `candidate=${candidateLine} type=${parsed.type} protocol=${parsed.protocol} address=${parsed.address} port=${parsed.port}`;
 }

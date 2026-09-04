@@ -3,7 +3,7 @@ import { validateObject } from './envelope';
 import type { DistributedObject, FindPacket, FindResponsePacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
-export const FIND_GRACE_PERIOD_MS = 250;
+export const FIND_GRACE_PERIOD_MS = 1000;
 export type FindAggregationCompletionReason = 'all-objects-found' | 'all-children-responded-or-failed' | 'grace-expired' | 'child-failure-grace-expired' | 'deadline-expired';
 
 export async function buildObjectStorePacket(
@@ -23,17 +23,41 @@ export async function buildFindPacket(
   requestId = createPacketId(),
   ttl = 1,
   origin?: string,
-  expiresAt = new Date(Date.now() + FIND_REQUEST_LIFETIME_MS).toISOString()
+  expiresAt = new Date(Date.now() + FIND_REQUEST_LIFETIME_MS).toISOString(),
+  query?: { author?: string; created_after?: string; created_before?: string }
 ): Promise<FindPacket> {
   const requestedObjects = Array.isArray(objectId) ? objectId : [objectId];
   return await buildPacket(sender, recipient, 'FIND', {
     requested_objects: requestedObjects,
-    object_id: requestedObjects[0],
+    object_id: requestedObjects[0] ?? '',
     requestId,
     ttl,
     expiresAt,
-    ...(origin ? { origin } : {})
+    ...(origin ? { origin } : {}),
+    ...(query?.author ? { author: query.author } : {}),
+    ...(query?.created_after ? { created_after: query.created_after } : {}),
+    ...(query?.created_before ? { created_before: query.created_before } : {})
   }, signer) as FindPacket;
+}
+
+export async function buildTimeRangeFindPacket(
+  sender: string,
+  recipient: string,
+  author: string,
+  createdAfter: string,
+  createdBefore: string,
+  signer?: PacketSigner,
+  requestId = createPacketId(),
+  ttl = 1,
+  origin?: string,
+  expiresAt = new Date(Date.now() + FIND_REQUEST_LIFETIME_MS).toISOString(),
+  objectIds: string[] = []
+): Promise<FindPacket> {
+  return buildFindPacket(sender, recipient, objectIds, signer, requestId, ttl, origin, expiresAt, {
+    author,
+    created_after: createdAfter,
+    created_before: createdBefore
+  });
 }
 
 export async function buildFindResponsePacket(
@@ -77,7 +101,7 @@ export async function buildFindResponseObjectsPacket(
 export function getFindObjectIds(packet: FindPacket): string[] | null {
   const requested = packet.payload?.requested_objects;
   if (Array.isArray(requested)) {
-    if (requested.length === 0 || requested.some((objectId) => typeof objectId !== 'string' || !/^[0-9a-f]{64}$/.test(objectId))) return null;
+    if (requested.some((objectId) => typeof objectId !== 'string' || !/^[0-9a-f]{64}$/.test(objectId))) return null;
     return [...new Set(requested)];
   }
   const legacyObjectId = packet.payload?.object_id;
@@ -86,6 +110,17 @@ export function getFindObjectIds(packet: FindPacket): string[] | null {
 
 export function selectFindPeers(connectedPeers: string[], incomingPeer: string, selfPeer: string, fanout = 2): string[] {
   return connectedPeers.filter((peerId) => peerId !== incomingPeer && peerId !== selfPeer).slice(0, fanout);
+}
+
+export function shouldRetainFindRequestRoute(
+  peerId: string,
+  route: { upstreamPeer: string; expiresAt: number } | undefined,
+  aggregationState?: { aggregation: Pick<FindAggregation, 'isComplete' | 'pendingChildren'> }
+): boolean {
+  if (!route || route.upstreamPeer === peerId) return false;
+  if (!aggregationState) return false;
+  if (aggregationState.aggregation.isComplete()) return false;
+  return aggregationState.aggregation.pendingChildren().length > 0;
 }
 
 export async function receiveObjectPacket(packet: unknown, store: ObjectStore): Promise<boolean> {
@@ -109,6 +144,25 @@ export async function receiveFindResponsePacket(packet: unknown, store: ObjectSt
   return object as DistributedObject;
 }
 
+export function getFindQueryCriteria(packet: FindPacket): { author?: string; created_after?: string; created_before?: string } | null {
+  const author = typeof packet.payload?.author === 'string' ? packet.payload.author : undefined;
+  const createdAfter = typeof packet.payload?.created_after === 'string' ? packet.payload.created_after : undefined;
+  const createdBefore = typeof packet.payload?.created_before === 'string' ? packet.payload.created_before : undefined;
+  const hasQuery = Boolean(author || createdAfter || createdBefore);
+  if (!hasQuery) return null;
+  return { author, created_after: createdAfter, created_before: createdBefore };
+}
+
+export async function filterObjectsByFindQuery(store: ObjectStore, query: { author?: string; created_after?: string; created_before?: string }): Promise<DistributedObject[]> {
+  const objects = await store.query();
+  return objects.filter((object) => {
+    if (query.author && object.author !== query.author) return false;
+    if (query.created_after && new Date(object.created_at).getTime() < new Date(query.created_after).getTime()) return false;
+    if (query.created_before && new Date(object.created_at).getTime() > new Date(query.created_before).getTime()) return false;
+    return true;
+  });
+}
+
 export async function validateFindResponseObjects(
   packet: unknown,
   expectedRequestId: string,
@@ -123,7 +177,7 @@ export async function validateFindResponseObjects(
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
     const object = candidate as DistributedObject;
-    if (!requestedObjectIds.has(object.object_id) || !(await validateObject(object))) continue;
+    if ((requestedObjectIds.size > 0 && !requestedObjectIds.has(object.object_id)) || !(await validateObject(object))) continue;
     valid.set(object.object_id, object);
   }
   return [...valid.values()];
@@ -144,7 +198,8 @@ export class FindAggregation {
     requestedObjectIds: string[],
     deadlineMs: number,
     onComplete: (objects: DistributedObject[], reason: FindAggregationCompletionReason) => Promise<void>,
-    private readonly gracePeriodMs = FIND_GRACE_PERIOD_MS
+    private readonly gracePeriodMs = FIND_GRACE_PERIOD_MS,
+    private readonly acceptAnyObjects = false
   ) {
     this.requestedObjectIds = new Set(requestedObjectIds);
     this.deadlineMs = deadlineMs;
@@ -200,13 +255,13 @@ export class FindAggregation {
 
   private addObjects(objects: DistributedObject[]) {
     for (const object of objects) {
-      if (this.requestedObjectIds.has(object.object_id)) this.objects.set(object.object_id, object);
+      if (this.acceptAnyObjects || this.requestedObjectIds.has(object.object_id)) this.objects.set(object.object_id, object);
     }
   }
 
   private async maybeComplete() {
-    if (this.objects.size === this.requestedObjectIds.size || [...this.children.values()].every((state) => state !== 'pending')) {
-      await this.complete(this.objects.size === this.requestedObjectIds.size
+    if ((!this.acceptAnyObjects && this.objects.size === this.requestedObjectIds.size) || (this.children.size > 0 && [...this.children.values()].every((state) => state !== 'pending'))) {
+      await this.complete(!this.acceptAnyObjects && this.objects.size === this.requestedObjectIds.size
         ? 'all-objects-found'
         : 'all-children-responded-or-failed');
     }
@@ -228,7 +283,7 @@ export async function respondToFindPacket(
   send: (packet: FindResponsePacket) => Promise<void>,
   sender: string,
   requestCache = new Map<string, number>(),
-  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; }) => Promise<void>
+  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: { author?: string; created_after?: string; created_before?: string } }) => Promise<void>
 ): Promise<boolean> {
   if (!isMyceliumPacket(packet) || packet.type !== 'FIND') return false;
   const objectIds = getFindObjectIds(packet as FindPacket);
@@ -246,15 +301,33 @@ export async function respondToFindPacket(
   }
   if (requestCache.has(requestId)) return false;
   requestCache.set(requestId, deadlineMs);
-  if (objectIds.length > 1) {
+  const queryCriteria = getFindQueryCriteria(packet as FindPacket);
+  if (objectIds.length > 1 || queryCriteria) {
     const localObjects: DistributedObject[] = [];
-    for (const requestedObjectId of objectIds) {
-      const localObject = await store.get(requestedObjectId);
-      if (localObject && await validateObject(localObject)) localObjects.push(localObject);
+    if (queryCriteria) {
+      const matchedObjects = await filterObjectsByFindQuery(store, queryCriteria);
+      for (const object of matchedObjects) {
+        if (await validateObject(object)) localObjects.push(object);
+      }
+    } else {
+      for (const requestedObjectId of objectIds) {
+        const localObject = await store.get(requestedObjectId);
+        if (localObject && await validateObject(localObject)) localObjects.push(localObject);
+      }
     }
     if (ttl > 0 && forwardRequest) {
       try {
-        await forwardRequest({ objectId: objectIds[0], objectIds, localObjects, requestId, ttl: ttl - 1, fromPeer: packet.sender, origin, expiresAt });
+        await forwardRequest({
+          objectId: objectIds[0] ?? localObjects[0]?.object_id ?? '',
+          objectIds: queryCriteria ? localObjects.map((object) => object.object_id) : objectIds,
+          localObjects,
+          requestId,
+          ttl: ttl - 1,
+          fromPeer: packet.sender,
+          origin,
+          expiresAt,
+          query: queryCriteria ?? undefined
+        });
       } catch (error) {
         requestCache.delete(requestId);
         throw error;
@@ -278,7 +351,7 @@ export async function respondToFindPacket(
 
   if (typeof forwardRequest === 'function') {
     try {
-      await forwardRequest({ objectId, requestId, ttl: ttl - 1, fromPeer: packet.sender, origin, expiresAt });
+      await forwardRequest({ objectId, requestId, ttl: ttl - 1, fromPeer: packet.sender, origin, expiresAt, query: undefined });
       return true;
     } catch (error) {
       requestCache.delete(requestId);
@@ -296,7 +369,7 @@ export function findObject(
   objectId: string,
   transport: ObjectTransport,
   store: ObjectStore,
-  ttl = 1
+  ttl = 2
 ): Promise<DistributedObject | null> {
   return resolveFindRequest(sender, peerId, objectId, ttl, transport, store);
 }
@@ -377,7 +450,19 @@ async function resolveFindRequest(
     let settled = false;
     const unsubscribe = transport.onPacket((responsePeerId, packet) => {
       if (settled || responsePeerId !== peerId || packet.type !== 'FIND_RESPONSE'
-        || packet.payload.object_id !== objectId || packet.payload.requestId !== requestPacket.payload.requestId) return;
+        || packet.payload.requestId !== requestPacket.payload.requestId) return;
+      const responseObjects = Array.isArray(packet.payload.objects)
+        ? packet.payload.objects
+        : packet.payload.object ? [packet.payload.object] : [];
+      const object = responseObjects.find((candidate) => candidate?.object_id === objectId);
+      if (!object) {
+        if (packet.payload.object_id !== objectId) return;
+        settled = true;
+        clearTimeout(expirationTimer);
+        unsubscribe();
+        resolve(null);
+        return;
+      }
       if (Date.now() >= requestDeadlineMs) {
         settled = true;
         clearTimeout(expirationTimer);
@@ -388,7 +473,14 @@ async function resolveFindRequest(
       settled = true;
       clearTimeout(expirationTimer);
       unsubscribe();
-      void receiveFindResponsePacket(packet, store, requestPacket.payload.requestId).then(resolve, reject);
+      void validateObject(object).then(async (valid) => {
+        if (!valid) {
+          resolve(null);
+          return;
+        }
+        await store.put(object);
+        resolve(object);
+      }).catch(reject);
     });
     const expirationTimer = setTimeout(() => {
       if (settled) return;

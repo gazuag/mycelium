@@ -23,7 +23,7 @@ interface SettingsPageProps {
     objectIds: string;
     suppressFindResponses: boolean;
     status: string;
-    objects: Array<{ object_id: string; object_type: string; author: string; payload: unknown }>;
+    objects: Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>;
     onPeerChange: (peerId: string) => void;
     onObjectIdsChange: (objectIds: string) => void;
     onCreateSet: () => void;
@@ -35,6 +35,26 @@ interface SettingsPageProps {
     onFindListed: () => void;
     onToggleSuppressFindResponses: () => void;
     onClearObjectStore: () => void;
+    onRefresh: () => void;
+  };
+  phase7Test?: {
+    author: string;
+    startTime: string;
+    endTime: string;
+    status: string;
+    requestId: string;
+    objectIds: string;
+    selectedObjectId: string;
+    objects: Array<{ object_id: string; created_at: string; author: string }>;
+    onAuthorChange: (value: string) => void;
+    onStartTimeChange: (value: string) => void;
+    onEndTimeChange: (value: string) => void;
+    onSelectedObjectIdChange: (value: string) => void;
+    onCreateSet: () => void;
+    onUseCurrentObjectIds: () => void;
+    onRunNarrow: () => void;
+    onRunBroad: () => void;
+    onRunSingleObjectFind: () => void;
     onRefresh: () => void;
   };
 }
@@ -55,7 +75,8 @@ export function SettingsPage({
   signallingStatus,
   connectedPeers,
   syncStatus,
-  objectTransportTest
+  objectTransportTest,
+  phase7Test
 }: SettingsPageProps) {
   const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
     pingPong: false,
@@ -188,9 +209,61 @@ export function SettingsPage({
               <div>{object.object_type}</div>
               <div>{object.object_id}</div>
               <div>author: {object.author}</div>
+              <div>created_at: {object.created_at}</div>
               <div>payload: {JSON.stringify(object.payload)}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {phase7Test && (
+        <div className="card">
+          <h3>Phase 7 time-range query test</h3>
+          <p className="note">Use the same browser peer as B and distribute the created objects across A/B/C before running the query.</p>
+          <div className="row">
+            <label>
+              Author public key
+              <input value={phase7Test.author} onChange={(event) => phase7Test.onAuthorChange(event.target.value)} placeholder="B peer fingerprint" />
+            </label>
+            <label>
+              Start time T1
+              <input value={phase7Test.startTime} onChange={(event) => phase7Test.onStartTimeChange(event.target.value)} placeholder="10:03" />
+            </label>
+            <label>
+              End time T2
+              <input value={phase7Test.endTime} onChange={(event) => phase7Test.onEndTimeChange(event.target.value)} placeholder="10:09" />
+            </label>
+          </div>
+          <div className="row">
+            <button className="btn" type="button" onClick={phase7Test.onCreateSet}>Create 3 signed objects</button>
+            <button className="btn secondary" type="button" onClick={phase7Test.onUseCurrentObjectIds}>Use current object IDs</button>
+            <button className="btn" type="button" onClick={phase7Test.onRunNarrow}>Run narrow query: 10:03 &lt; created_at &lt; 10:09</button>
+            <button className="btn" type="button" onClick={phase7Test.onRunBroad}>Run broad query: 10:00 &lt; created_at &lt; 10:11</button>
+            <button className="btn secondary" type="button" onClick={phase7Test.onRefresh}>Refresh object store</button>
+          </div>
+          <label>
+            Object IDs
+            <textarea rows={4} value={phase7Test.objectIds} readOnly placeholder="Phase 7 object IDs" />
+          </label>
+          <label>
+            Single-object FIND ID
+            <input value={phase7Test.selectedObjectId} onChange={(event) => phase7Test.onSelectedObjectIdChange(event.target.value)} placeholder="64-char object ID" />
+          </label>
+          <div className="row">
+            <button className="btn" type="button" onClick={phase7Test.onRunSingleObjectFind}>Run single-object FIND(object_id)</button>
+          </div>
+          {phase7Test.requestId && <p className="note monospace break-word">Request ID: {phase7Test.requestId}</p>}
+          {phase7Test.status && <p className="note monospace break-word">{phase7Test.status}</p>}
+          <p className="note">Matched objects:</p>
+          {phase7Test.objects.length === 0 ? <p className="note">No results yet.</p> : (
+            <ul>
+              {phase7Test.objects.map((object) => (
+                <li key={object.object_id} className="note monospace break-word">
+                  {object.object_id} — author={object.author} — created_at={object.created_at}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

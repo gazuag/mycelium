@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { ConnectionState } from '../types';
+import { fingerprintToHumanName } from '../utils/fingerprintNames';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -6,6 +8,7 @@ interface AppHeaderProps {
   connectionStatus: ConnectionState;
   signallingStatus: string;
   connectedPeers: number;
+  connectedPeerIds: string[];
   syncStatus: string;
   myFingerprint?: string;
   unreadCount?: number;
@@ -21,6 +24,7 @@ export function AppHeader({
   connectionStatus,
   signallingStatus,
   connectedPeers,
+  connectedPeerIds,
   syncStatus,
   myFingerprint,
   unreadCount = 0,
@@ -29,6 +33,7 @@ export function AppHeader({
   onOpenPeopleInbox,
   onRefresh
 }: AppHeaderProps & { onRefresh?: () => void }) {
+  const [peersExpanded, setPeersExpanded] = useState(false);
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
   const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
@@ -50,9 +55,28 @@ export function AppHeader({
       </div>
 
       <div className={`app-header-body ${collapsed ? 'collapsed' : ''}`}>
-        <div className={`network-status ${tone}`}>
-          <span className="status-light" aria-hidden="true" />
-          <strong>{summary}</strong>
+        <div className={`network-status-wrap ${peersExpanded ? 'expanded' : ''}`}>
+          <button
+            className={`network-status ${tone}`}
+            onClick={() => setPeersExpanded((expanded) => !expanded)}
+            aria-expanded={peersExpanded}
+            aria-controls="connected-peer-list"
+          >
+            <span className="status-light" aria-hidden="true" />
+            <strong>{summary}</strong>
+            <span className="network-status-arrow" aria-hidden="true">{peersExpanded ? '▲' : '▼'}</span>
+          </button>
+          {peersExpanded ? (
+            <div id="connected-peer-list" className="connected-peer-list">
+              <strong>Open peer connections</strong>
+              {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
+                <div className="connected-peer" key={peerId}>
+                  <span>{fingerprintToHumanName(peerId)}</span>
+                  <code>{peerId}</code>
+                </div>
+              )) : <span className="connected-peer-empty">No open data channels</span>}
+            </div>
+          ) : null}
         </div>
 
         <div className="app-header-actions">

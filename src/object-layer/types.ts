@@ -30,6 +30,12 @@ export interface ObjectStorePacket {
   readonly signature: string;
 }
 
+export interface FindQueryCriteria {
+  readonly author?: string;
+  readonly created_after?: string;
+  readonly created_before?: string;
+}
+
 export interface FindPacket {
   readonly protocol: 'mycelium';
   readonly version: 1;
@@ -38,7 +44,7 @@ export interface FindPacket {
   readonly timestamp: string;
   readonly sender: string;
   readonly recipient: string | null;
-  readonly payload: { readonly requested_objects: readonly string[]; readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string };
+  readonly payload: { readonly requested_objects: readonly string[]; readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string; readonly author?: string; readonly created_after?: string; readonly created_before?: string };
   readonly signature: string;
 }
 

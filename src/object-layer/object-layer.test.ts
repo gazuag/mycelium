@@ -5,7 +5,7 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, findObject, FindAggregation, getFindObjectIds, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects } from './transport';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, receiveObjectPacket, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
 
@@ -550,6 +550,85 @@ describe('distributed object foundation', () => {
     expect(getFindObjectIds(legacy)).toEqual([objectIds[0]]);
   });
 
+  it('supports time-range author queries across multiple peers while preserving existing FIND(object_id) behavior', async () => {
+    const peerBKeys = await generateIdentityKeyPair();
+    const peerBAuthor = await exportPublicKey(peerBKeys.publicKey);
+    const peerBIdentity = createObjectIdentity({ id: 'peer-b', publicKey: peerBAuthor, privateKey: await exportPrivateKey(peerBKeys.privateKey) });
+    const peerXKeys = await generateIdentityKeyPair();
+    const peerXAuthor = await exportPublicKey(peerXKeys.publicKey);
+    const peerXIdentity = createObjectIdentity({ id: 'peer-x', publicKey: peerXAuthor, privateKey: await exportPrivateKey(peerXKeys.privateKey) });
+
+    const inRangePeerA = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:00:00.000Z', payload: { pair: 'a' }, replication_policy: {} }, peerBIdentity);
+    const inRangePeerC = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:05:00.000Z', payload: { pair: 'c' }, replication_policy: {} }, peerBIdentity);
+    const outOfRange = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:20:00.000Z', payload: { pair: 'out' }, replication_policy: {} }, peerBIdentity);
+    const otherAuthor = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:03:00.000Z', payload: { pair: 'other' }, replication_policy: {} }, peerXIdentity);
+
+    const peerAStore = createMemoryStore();
+    const peerCStore = createMemoryStore();
+    const queryStore = createMemoryStore();
+    await peerAStore.put(inRangePeerA);
+    await peerAStore.put(outOfRange);
+    await peerCStore.put(inRangePeerC);
+    await peerCStore.put(outOfRange);
+    await queryStore.put(otherAuthor);
+
+    const queryPacket = await buildTimeRangeFindPacket(
+      'peer-a',
+      'peer-c',
+      peerBAuthor,
+      '2026-08-25T00:00:00.000Z',
+      '2026-08-25T00:10:00.000Z',
+      undefined,
+      'time-range-request',
+      1,
+      'peer-a',
+      new Date(Date.now() + 5000).toISOString(),
+      [inRangePeerA.object_id, inRangePeerC.object_id]
+    );
+
+    const responseObjects = await validateFindResponseObjects(await buildFindResponseObjectsPacket(
+      'peer-c',
+      'peer-a',
+      'time-range-request',
+      [inRangePeerA, inRangePeerC, outOfRange],
+      undefined,
+      'peer-a'
+    ), 'time-range-request', new Set([inRangePeerA.object_id, inRangePeerC.object_id]));
+
+    expect(responseObjects.map((object) => object.object_id)).toEqual([inRangePeerA.object_id, inRangePeerC.object_id]);
+
+    const aggregate = new FindAggregation([inRangePeerA.object_id, inRangePeerC.object_id], Date.now() + 5000, async () => undefined);
+    aggregate.addChild('peer-a');
+    aggregate.addChild('peer-c');
+    await aggregate.addChildObjects('peer-a', [inRangePeerA]);
+    await aggregate.addChildObjects('peer-c', [inRangePeerC, inRangePeerC]);
+    expect(aggregate.aggregateSize()).toBe(2);
+    expect(await filterObjectsByFindQuery(peerAStore, { author: peerBAuthor, created_after: '2026-08-25T00:00:00.000Z', created_before: '2026-08-25T00:10:00.000Z' })).toEqual([inRangePeerA]);
+    expect(await filterObjectsByFindQuery(peerCStore, { author: peerBAuthor, created_after: '2026-08-25T00:00:00.000Z', created_before: '2026-08-25T00:10:00.000Z' })).toEqual([inRangePeerC]);
+    expect(await filterObjectsByFindQuery(peerCStore, { author: peerBAuthor, created_after: '2026-08-25T00:05:00.000Z', created_before: '2026-08-25T00:05:00.000Z' })).toEqual([inRangePeerC]);
+
+    let packetHandler: ((peerId: string, packet: ObjectPacket) => void) | null = null;
+    const transport = {
+      connectedPeers: () => ['peer-c'],
+      onPacket: (handler: (peerId: string, packet: ObjectPacket) => void) => {
+        packetHandler = handler;
+        return () => { packetHandler = null; };
+      },
+      send: async (_peerId: string, packet: ObjectPacket) => {
+        if (packet.type === 'FIND' && packetHandler) {
+          const response = await buildFindResponsePacket('peer-c', 'peer-a', packet.payload.object_id, packet.payload.requestId, inRangePeerC, undefined, 'peer-a');
+          packetHandler('peer-c', response);
+        }
+      }
+    };
+
+    await expect(findObject('peer-a', 'peer-c', inRangePeerC.object_id, transport, peerAStore)).resolves.toEqual(inRangePeerC);
+    expect(queryPacket.payload.author).toBe(peerBAuthor);
+    expect(queryPacket.payload.created_after).toBe('2026-08-25T00:00:00.000Z');
+    expect(queryPacket.payload.created_before).toBe('2026-08-25T00:10:00.000Z');
+    expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
+  });
+
   it('aggregates local and child results, deduplicating strictly by object ID', async () => {
     const first = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
     const second = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
@@ -636,6 +715,14 @@ describe('distributed object foundation', () => {
     await aggregation.addChildObjects('peer-d', []);
     expect(sent).toHaveLength(1);
     expect(sent[0].type === 'FIND_RESPONSE' && sent[0].payload.objects).toEqual([object]);
+  });
+
+  it('keeps relayed FIND routes alive while the request is still aggregating child responses', () => {
+    const aggregation = new FindAggregation(['a'.repeat(64), 'b'.repeat(64)], Date.now() + 5000, async () => undefined);
+    aggregation.addChild('peer-c');
+
+    expect(shouldRetainFindRequestRoute('peer-c', { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 }, { aggregation })).toBe(true);
+    expect(shouldRetainFindRequestRoute('peer-a', { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 }, undefined)).toBe(false);
   });
 
   it('returns partial results when four of five requested objects exist', async () => {

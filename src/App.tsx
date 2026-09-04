@@ -18,7 +18,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, createObjectIdentity, createSignedObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
@@ -40,7 +40,7 @@ function classifyLogEntry(entry: string): LogCategory {
   if (/\b(PING|PONG|ping loop|keep.?alive)\b/i.test(entry)) return 'pingPong';
   if (/\bDISCOVERY\b|discovery/i.test(entry)) return 'discovery';
   if (/\bICE\b|candidate pair|candidate-pair/i.test(entry)) return 'ice';
-  if (/\b(OBJECT|FIND|generic object)\b|PHASE 6/i.test(entry)) return 'objectStorage';
+  if (/\b(OBJECT|FIND|generic object)\b|PHASE ?[67]/i.test(entry)) return 'objectStorage';
   if (/\b(chat|message|messages)\b/i.test(entry)) return 'chat';
   if (/\b(post|posts|feed|recommendation|home updates)\b/i.test(entry)) return 'postRequests';
   return 'general';
@@ -113,6 +113,7 @@ function App() {
   const chatContactIdRef = useRef<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
+  const [connectedPeerIds, setConnectedPeerIds] = useState<string[]>([]);
   const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
   const [remoteId, setRemoteId] = useState('');
   const [message, setMessage] = useState('');
@@ -161,7 +162,14 @@ function App() {
   const [objectTestIds, setObjectTestIds] = useState('');
   const [suppressPhase6FindResponses, setSuppressPhase6FindResponses] = useState(false);
   const [objectTestLastId, setObjectTestLastId] = useState<string | null>(null);
-  const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; payload: unknown }>>([]);
+  const [phase7Author, setPhase7Author] = useState('');
+  const [phase7StartTime, setPhase7StartTime] = useState('10:03');
+  const [phase7EndTime, setPhase7EndTime] = useState('10:09');
+  const [phase7QueryStatus, setPhase7QueryStatus] = useState('');
+  const [phase7SelectedObjectId, setPhase7SelectedObjectId] = useState('');
+  const [phase7Results, setPhase7Results] = useState<Array<{ object_id: string; created_at: string; author: string }>>([]);
+  const [phase7RequestId, setPhase7RequestId] = useState('');
+  const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>>([]);
   const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
   const selectedContactIdRef = useRef<string | null>(null);
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
@@ -219,6 +227,20 @@ function App() {
   useEffect(() => {
     suppressPhase6FindResponsesRef.current = suppressPhase6FindResponses;
   }, [suppressPhase6FindResponses]);
+
+  useEffect(() => {
+    const refreshConnectedPeers = () => {
+      const next = (objectTransportRef.current?.connectedPeers() ?? []).sort();
+      setConnectedPeerIds((previous) => (
+        previous.length === next.length && previous.every((peerId, index) => peerId === next[index])
+          ? previous
+          : next
+      ));
+    };
+    refreshConnectedPeers();
+    const timer = window.setInterval(refreshConnectedPeers, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
@@ -290,9 +312,14 @@ function App() {
       }
     }
     if (packet.type === 'FIND') {
+      const queryFields = packet.payload as { author?: string; created_after?: string; created_before?: string };
+      const isPhase7Query = Boolean(queryFields.author || queryFields.created_after || queryFields.created_before);
+      if (isPhase7Query) {
+        addLog(`PHASE7 QUERY RECEIVED requestId=${packet.payload.requestId} peer=${peerId} author=${queryFields.author ?? 'unknown'} lower=${queryFields.created_after ?? 'none'} upper=${queryFields.created_before ?? 'none'}`);
+      }
       addLog(`FIND ${String(packet.payload.requestId).slice(0, 12)} received`);
       const requestedObjectIds = getFindObjectIds(packet);
-      if (requestedObjectIds && requestedObjectIds.length > 1) {
+      if (requestedObjectIds && (requestedObjectIds.length > 1 || isPhase7Query)) {
         if (suppressPhase6FindResponsesRef.current) {
           addLog(`PHASE 6 FIND response suppressed for deterministic partial test: requestId=${packet.payload.requestId}`);
           return;
@@ -302,10 +329,16 @@ function App() {
         const expiresAtMs = Date.parse(expiresAt);
         if (!requestId || Number.isNaN(expiresAtMs) || now >= expiresAtMs || findRequestCacheRef.current.has(requestId)) return;
         findRequestCacheRef.current.set(requestId, expiresAtMs);
-        const localObjects = (await Promise.all(requestedObjectIds.map(async (objectId) => {
-          const object = await store.get(objectId);
-          return object && await validateObject(object) ? object : null;
-        }))).filter((object): object is NonNullable<typeof object> => object !== null);
+        const localObjects = isPhase7Query
+          ? await filterObjectsByFindQuery(store, {
+            author: queryFields.author,
+            created_after: queryFields.created_after,
+            created_before: queryFields.created_before
+          })
+          : (await Promise.all(requestedObjectIds.map(async (objectId) => {
+            const object = await store.get(objectId);
+            return object && await validateObject(object) ? object : null;
+          }))).filter((object): object is NonNullable<typeof object> => object !== null);
         const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
         const nextPeers = selectFindPeers(connectedPeers, peerId, identityRef.current?.id ?? '', 2);
         const aggregationStartedAt = Date.now();
@@ -336,7 +369,7 @@ function App() {
           findRequestRouteRef.current.delete(requestId);
           findRequestCacheRef.current.delete(requestId);
           addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
-        });
+        }, undefined, isPhase7Query);
         findAggregationRef.current.set(requestId, {
           aggregation,
           requestedObjectIds: new Set(requestedObjectIds),
@@ -350,9 +383,13 @@ function App() {
         addLog(`PHASE6 AGG STORED requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
         for (const nextPeer of nextPeers) aggregation.addChild(nextPeer);
         aggregation.addLocal(localObjects);
-        if (!aggregation.isComplete() && requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId)) && packet.payload.ttl > 0) {
+        if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
-            const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt);
+            const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt, isPhase7Query ? {
+              author: queryFields.author,
+              created_after: queryFields.created_after,
+              created_before: queryFields.created_before
+            } : undefined);
             try {
               await objectTransportRef.current?.send(nextPeer, forwardedPacket);
               addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
@@ -361,10 +398,8 @@ function App() {
               aggregation.failChild(nextPeer);
             }
           }
-          aggregation.startGracePeriod();
         } else {
           for (const nextPeer of nextPeers) aggregation.failChild(nextPeer);
-          aggregation.startGracePeriod();
         }
         return;
       }
@@ -380,6 +415,7 @@ function App() {
         async (response) => {
           addLog(`OBJECT FIND_RESPONSE generated: requestId=${response.payload.requestId} object=${response.payload.object ? 'present' : 'missing'} to=${peerId}`);
           const route = response.payload.requestId ? findRequestRouteRef.current.get(response.payload.requestId) : undefined;
+          const aggregationState = response.payload.requestId ? findAggregationRef.current.get(response.payload.requestId) : undefined;
           if (route && route.upstreamPeer !== peerId && typeof response.payload.origin === 'string') {
             const relayed = await buildFindResponsePacket(
               identityRef.current?.id ?? 'unknown',
@@ -391,7 +427,11 @@ function App() {
               response.payload.origin,
               response.payload.expiresAt
             );
-            findRequestRouteRef.current.delete(response.payload.requestId);
+            if (!shouldRetainFindRequestRoute(peerId, route, aggregationState)) {
+              findRequestRouteRef.current.delete(response.payload.requestId);
+            } else {
+              addLog(`OBJECT FIND_RESPONSE route retained: requestId=${response.payload.requestId} sender=${peerId} remainingChildren=${aggregationState?.aggregation.pendingChildren().join(', ') || 'none'}`);
+            }
             addLog(`OBJECT FIND_RESPONSE relayed: requestId=${response.payload.requestId} ${peerId} -> ${route.upstreamPeer}`);
             await objectTransportRef.current?.send(route.upstreamPeer, relayed);
             return;
@@ -400,7 +440,7 @@ function App() {
         },
         identityRef.current?.id ?? 'unknown',
         findRequestCacheRef.current,
-        async ({ objectId, requestId, ttl, fromPeer, origin, expiresAt }) => {
+        async ({ objectId, requestId, ttl, fromPeer, origin, expiresAt, query }) => {
           addLog(`OBJECT FIND local lookup missed: requestId=${requestId} object=${objectId} ttl=${ttl + 1}`);
           const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
           const nextPeers = connectedPeers.filter((candidate) => candidate !== fromPeer && candidate !== identityRef.current?.id);
@@ -423,12 +463,13 @@ function App() {
           const forwardedPacket = await buildFindPacket(
             identityRef.current?.id ?? 'unknown',
             nextPeer,
-            objectId,
+            query ? [] : objectId,
             undefined,
             requestId,
             ttl,
             origin,
-            expiresAt
+            expiresAt,
+            query
           );
           findRequestRouteRef.current.set(requestId, { upstreamPeer: fromPeer, expiresAt: Date.parse(expiresAt) });
           addLog(`OBJECT FIND forwarded: requestId=${requestId} ${fromPeer} -> ${nextPeer} ttl=${ttl} expiresAt=${expiresAt}`);
@@ -453,10 +494,16 @@ function App() {
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          const queryFields = packet.payload as { author?: string; created_after?: string; created_before?: string };
+          const isPhase7Query = Boolean(queryFields.author || queryFields.created_after || queryFields.created_before);
+          if (isPhase7Query) {
+            addLog(`PHASE7 CHILD RESPONSE requestId=${requestId} from=${peerId} objects=${objects.map((object) => object.object_id).join(', ') || 'none'} aggregate=${aggregationState.aggregation.aggregateSize() + objects.length}`);
+          }
           addLog(`child ${peerId} response received`);
           addLog(`objects: ${objects.length}`);
           addLog(`PHASE6 CHILD RESPONSE local=${identityRef.current?.id ?? 'unknown'} from=${peerId} requestId=${requestId} objects=${objects.length} pendingBefore=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           await aggregationState.aggregation.addChildObjects(peerId, objects);
+          aggregationState.aggregation.startGracePeriod();
           addLog(`PHASE6 AGG UPDATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} aggregate=${aggregationState.aggregation.aggregateSize()} pendingAfter=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           addLog(`aggregate: ${aggregationState.aggregation.aggregateSize()} unique objects`);
           addLog(`children pending: ${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
@@ -467,22 +514,31 @@ function App() {
       }
       addLog(`PHASE6 RESPONSE PATH CHECK requestId=${requestId ?? 'unknown'} aggregationPresent=${Boolean(aggregationState)} routePresent=${Boolean(route)} routeUpstream=${route?.upstreamPeer ?? 'none'} sender=${peerId}`);
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
-      if (Array.isArray(packet.payload?.objects)) {
-        addLog(`PHASE 6 FIND_RESPONSE ignored: no active aggregation state for requestId=${requestId ?? 'unknown'}`);
-        return;
-      }
       if (route && route.upstreamPeer !== peerId) {
-        const relayed = await buildFindResponsePacket(
-          identityRef.current?.id ?? 'unknown',
-          route.upstreamPeer,
-          packet.payload.object_id,
-          requestId!,
-          packet.payload.object,
-          undefined,
-          typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-          typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
-        );
-        findRequestRouteRef.current.delete(requestId!);
+        const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
+        const relayed = Array.isArray(packet.payload.objects) && !packet.payload.object
+          ? await buildFindResponseObjectsPacket(
+            identityRef.current?.id ?? 'unknown',
+            route.upstreamPeer,
+            requestId!,
+            [...packet.payload.objects],
+            undefined,
+            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+          )
+          : await buildFindResponsePacket(
+            identityRef.current?.id ?? 'unknown',
+            route.upstreamPeer,
+            packet.payload.object_id,
+            requestId!,
+            packet.payload.object,
+            undefined,
+            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+          );
+        if (!shouldRetainRoute) {
+          findRequestRouteRef.current.delete(requestId!);
+        }
         addLog(`OBJECT FIND_RESPONSE relayed: requestId=${requestId} ${peerId} -> ${route.upstreamPeer}`);
         await objectTransportRef.current?.send(route.upstreamPeer, relayed);
       } else if (!route) {
@@ -500,7 +556,7 @@ function App() {
 
   const refreshObjectStore = async () => {
     const objects = await objectStoreRef.current?.query();
-    setObjectStoreObjects((objects ?? []) as Array<{ object_id: string; object_type: string; author: string; payload: unknown }>);
+    setObjectStoreObjects((objects ?? []) as Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>);
   };
 
   useEffect(() => {
@@ -744,6 +800,10 @@ function App() {
   };
 
   const ensurePeerManager = (peerId: string) => {
+    if (!identity?.id || peerId === identity.id) {
+      if (peerId === identity?.id) addLog(`Ignoring self peer manager request for ${peerId}`);
+      return null;
+    }
     const existing = peerManagersRef.current[peerId];
     if (existing) {
       if (!existing.needsReplacement()) {
@@ -990,6 +1050,15 @@ function App() {
     return manager;
   };
 
+  const requestPeerOffer = (peerId: string, manager: PeerConnectionManager, socket: WebSocket) => {
+    if (!identity?.id || peerId === identity.id) return;
+    if (identity.id > peerId) {
+      addLog(`Waiting for ${peerId} to initiate the peer connection`);
+      return;
+    }
+    void manager.createOffer(peerId, socket);
+  };
+
   const registerMessageAckTimeout = (peerId: string, transportMessageId: string, chatMessageId: string, text: string) => {
     scheduleMessageAckTimeout(outboundAckTimersRef.current, outboundChatMessageIdsRef.current, transportMessageId, chatMessageId, async () => {
       addLog(`Direct-message ACK timeout fired for ${peerId} message ${transportMessageId}`);
@@ -1004,7 +1073,7 @@ function App() {
       const socket = signallingSocketRef.current;
       const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && manager) {
-        manager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, manager, socket);
       }
     });
   };
@@ -1040,7 +1109,7 @@ function App() {
       if (shouldReconnect) {
         const freshManager = ensurePeerManager(peerId);
         if (freshManager) {
-          freshManager.createOffer(peerId, socket);
+          requestPeerOffer(peerId, freshManager, socket);
         }
       }
     });
@@ -1186,6 +1255,10 @@ function App() {
         }
 
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
+          if (message.from === identityRef.current?.id) {
+            addLog(`Ignoring signalling message from self: ${message.type}`);
+            return;
+          }
           const manager = ensurePeerManager(message.from);
           if (manager) {
             await manager.handleSignal(message, socket);
@@ -1241,7 +1314,7 @@ function App() {
 
         if (shouldReconnect && !manager.isNegotiating() && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
           addLog(`Reconnect attempt to ${contact.fingerprint}`);
-          manager.createOffer(contact.fingerprint, socket);
+          requestPeerOffer(contact.fingerprint, manager, socket);
         }
       });
     }, 30000);
@@ -1348,7 +1421,7 @@ function App() {
     const socket = signallingSocketRef.current;
     const manager = ensurePeerManager(fingerprint);
     if (socket && socket.readyState === WebSocket.OPEN && manager) {
-      manager.createOffer(fingerprint, socket);
+      requestPeerOffer(fingerprint, manager, socket);
       addLog(`Attempting connection to ${fingerprint}`);
     } else {
       addLog('Peer added. Waiting for signalling connection to connect.');
@@ -1380,7 +1453,7 @@ function App() {
       if (manager.isDataChannelOpen()) {
         manager.sendMetadata(buildPeerMetadata(fingerprint, updated.followed));
       } else {
-        void manager.createOffer(fingerprint, socket);
+        requestPeerOffer(fingerprint, manager, socket);
       }
     }
     addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint || updated.publicKey}`);
@@ -1698,7 +1771,7 @@ function App() {
         } else if (contact.online) {
           const channelState = manager.getDataChannelState();
           if (channelState === 'closed' || channelState === 'missing') {
-            manager.createOffer(contact.fingerprint, socket);
+            requestPeerOffer(contact.fingerprint, manager, socket);
             addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
           }
         }
@@ -2062,7 +2135,7 @@ function App() {
     setSelectedContactId(normalizedRemoteId);
     setChatContactId(normalizedRemoteId);
     addLog(`Starting call to ${normalizedRemoteId}`);
-    manager.createOffer(normalizedRemoteId, socket);
+    requestPeerOffer(normalizedRemoteId, manager, socket);
   }
 
   async function handleSelectContact(peerId: string) {
@@ -2076,7 +2149,7 @@ function App() {
     const manager = ensurePeerManager(peerId);
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
     if (socket && socket.readyState === WebSocket.OPEN && manager && !targetContact?.connected) {
-      manager.createOffer(peerId, socket);
+      requestPeerOffer(peerId, manager, socket);
       addLog(`Opening chat and connecting to ${peerId}`);
     }
   }
@@ -2130,7 +2203,7 @@ function App() {
 
     if (canRequestProfile) {
       if (!resolvedContact.connected && !manager.isDataChannelOpen() && socket) {
-        manager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, manager, socket);
       }
       manager.requestProfile();
       manager.sendRequestPosts(null, 200);
@@ -2138,7 +2211,7 @@ function App() {
     }
 
     if (socket && socket.readyState === WebSocket.OPEN && manager && !resolvedContact.connected) {
-      manager.createOffer(peerId, socket);
+      requestPeerOffer(peerId, manager, socket);
       setProfileNotice(`Profile information for ${peerId.slice(0, 12)} is unavailable at the moment.`);
       return;
     }
@@ -2212,7 +2285,7 @@ function App() {
       const socket = signallingSocketRef.current;
       const lazyManager = manager ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && lazyManager) {
-        lazyManager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, lazyManager, socket);
         addLog(`Queued message and requested data channel to ${peerId}`);
       }
       addLog(`Queued direct message for ${peerId}`);
@@ -2343,7 +2416,7 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
       await refreshObjectStore();
       addLog(`FIND TEST: removed local copy ${objectId}; querying ${peerId}`);
-      const found = await findObject(identity.id, peerId, objectId, transport, store);
+      const found = await findObject(identity.id, peerId, objectId, transport, store, 2);
       if (!found) {
         setObjectTestStatus(`FIND TEST: FAIL - peer returned no object for ${objectId}`);
         addLog(`FIND TEST: FAIL - no object returned for ${objectId}`);
@@ -2367,7 +2440,7 @@ function App() {
     if (!identity || !peerId || !store || !transport) return;
     const missingObjectId = await sha256(`mycelium.find-missing-test:${identity.id}:${Date.now()}:${Math.random()}`);
     try {
-      const found = await findObject(identity.id, peerId, missingObjectId, transport, store);
+      const found = await findObject(identity.id, peerId, missingObjectId, transport, store, 2);
       const localCopy = await store.get(missingObjectId);
       if (found || localCopy) {
         setObjectTestStatus(`FIND MISSING TEST: FAIL - unexpected object returned for ${missingObjectId}`);
@@ -2413,6 +2486,99 @@ function App() {
       const message = error instanceof Error ? error.message : String(error);
       setObjectTestStatus(`Phase 6 setup failed: ${message}`);
       addLog(`PHASE 6 setup failed: ${message}`);
+    }
+  }
+
+  async function handleCreatePhase7Set() {
+    if (!identity) return;
+    try {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const objectIdentity = createObjectIdentity(identity);
+      const timestamps = ['2026-08-25T10:00:00.000Z', '2026-08-25T10:05:00.000Z', '2026-08-25T10:10:00.000Z'];
+      const objects = await Promise.all(timestamps.map(async (createdAt, index) => createSignedObject({
+        object_type: 'mycelium.phase7-browser-test',
+        created_at: createdAt,
+        payload: { object_number: index + 1, test: 'phase7-time-range-query' },
+        replication_policy: {}
+      }, objectIdentity)));
+      for (const object of objects) await store.put(object);
+      setObjectTestIds(objects.map((object) => object.object_id).join('\n'));
+      setPhase7Author(objects[0]?.author ?? '');
+      setPhase7StartTime('10:03');
+      setPhase7EndTime('10:09');
+      setPhase7SelectedObjectId(objects[0]?.object_id ?? '');
+      setPhase7Results(objects.map((object) => ({ object_id: object.object_id, created_at: object.created_at, author: object.author })));
+      await refreshObjectStore();
+      setPhase7QueryStatus('Created the three Phase 7 signed objects for peer B. Use the existing send controls to distribute them across peers A/B/C.');
+      addLog(`PHASE7 CREATE requestId=manual-batch author=${identity.id} objects=${objects.map((object) => `${object.object_id}@${object.created_at}`).join(', ')}`);
+      setObjectTestStatus('Created three Phase 7 test objects for peer B.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhase7QueryStatus(`Phase 7 setup failed: ${message}`);
+      addLog(`PHASE7 CREATE failed: ${message}`);
+    }
+  }
+
+  async function handleRunPhase7Query(mode: 'narrow' | 'broad') {
+    if (!identity || !objectTestPeerId) {
+      setPhase7QueryStatus('Select a peer before running the Phase 7 query.');
+      return;
+    }
+    const author = phase7Author || identity.publicKey;
+    const lowerBound = mode === 'narrow' ? '2026-08-25T10:03:00.000Z' : '2026-08-25T10:00:00.000Z';
+    const upperBound = mode === 'narrow' ? '2026-08-25T10:09:00.000Z' : '2026-08-25T10:11:00.000Z';
+    const requestId = `phase7-query-${Date.now()}`;
+    const transport = objectTransportRef.current;
+    if (!transport) {
+      setPhase7QueryStatus('Object transport is unavailable.');
+      return;
+    }
+    const observed = new Map<string, { object_id: string; created_at: string; author: string }>();
+    const unsubscribe = transport.onPacket((peerId, packet) => {
+      if (packet.type !== 'FIND_RESPONSE' || packet.payload.requestId !== requestId) return;
+      const objects = Array.isArray(packet.payload.objects) ? packet.payload.objects : packet.payload.object ? [packet.payload.object] : [];
+      for (const object of objects) {
+        if (!object || typeof object !== 'object') continue;
+        const candidate = object as { object_id: string; created_at: string; author: string };
+        if (candidate.object_id) observed.set(candidate.object_id, candidate);
+      }
+    });
+
+    setPhase7RequestId(requestId);
+    setPhase7QueryStatus(`Running Phase 7 query... requestId=${requestId}`);
+    addLog(`PHASE7 QUERY START requestId=${requestId} author=${author} peer=${objectTestPeerId} start=${lowerBound} end=${upperBound}`);
+    const packet = await buildTimeRangeFindPacket(identity.id, objectTestPeerId, author, lowerBound, upperBound, undefined, requestId, 2, identity.id, new Date(Date.now() + 5000).toISOString());
+    await transport.send(objectTestPeerId, packet);
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    unsubscribe();
+    const results = [...observed.values()].filter((object) => object.author === author && new Date(object.created_at) >= new Date(lowerBound) && new Date(object.created_at) <= new Date(upperBound));
+    const uniqueResults = [...new Map(results.map((object) => [object.object_id, object])).values()];
+    setPhase7Results(uniqueResults);
+    setPhase7QueryStatus(`Phase 7 result: ${uniqueResults.length} object(s) returned for ${author} ${lowerBound} -> ${upperBound}: ${uniqueResults.map((object) => object.object_id).join(', ') || 'none'}`);
+    addLog(`PHASE7 QUERY DONE requestId=${requestId} author=${author} peer=${objectTestPeerId} lower=${lowerBound} upper=${upperBound} returned=${uniqueResults.length} ids=${uniqueResults.map((object) => object.object_id).join(', ') || 'none'}`);
+    if (uniqueResults.length > 0) {
+      addLog(`PHASE7 FINAL RETURN requestId=${requestId} ids=${uniqueResults.map((object) => object.object_id).join(', ')}`);
+    }
+  }
+
+  async function handleFindPhase7SingleObject() {
+    const transport = objectTransportRef.current;
+    const store = objectStoreRef.current;
+    const objectId = phase7SelectedObjectId || objectTestLastId || objectTestIds.split(/\s+/).filter(Boolean)[0];
+    if (!identity || !objectTestPeerId || !transport || !store || !objectId) {
+      setPhase7QueryStatus('Select a peer and a valid object ID before running the single-object FIND.');
+      return;
+    }
+    try {
+      const found = await findObject(identity.id, objectTestPeerId, objectId, transport, store, 2);
+      const status = found ? `Single-object FIND returned ${found.object_id}` : `Single-object FIND returned no object for ${objectId}`;
+      setPhase7QueryStatus(status);
+      addLog(`PHASE7 SINGLE FIND requestId=single-${Date.now()} peer=${objectTestPeerId} object=${objectId} result=${found ? found.object_id : 'none'}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhase7QueryStatus(`Single-object FIND failed: ${message}`);
+      addLog(`PHASE7 SINGLE FIND failed: ${message}`);
     }
   }
 
@@ -2486,7 +2652,7 @@ function App() {
     addLog(`Sent post ${post.id} to peer ${selectedContactId}`);
   }
 
-  const connectedPeersCount = contacts.filter((contact) => contact.connected).length;
+  const connectedPeersCount = connectedPeerIds.length;
   const syncStatus = signallingStatus === 'connected' ? 'synced' : signallingStatus;
   const activeProfileContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
   const myProfileContact = useMemo<Contact | undefined>(() => {
@@ -2533,6 +2699,7 @@ function App() {
         connectionStatus={connectionStatus}
         signallingStatus={signallingStatus}
         connectedPeers={connectedPeersCount}
+        connectedPeerIds={connectedPeerIds}
         syncStatus={syncStatus}
         myFingerprint={identity?.id}
         unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
@@ -2741,6 +2908,26 @@ function App() {
               onFindListed: () => { void handleFindPhase6Listed(); },
               onToggleSuppressFindResponses: () => setSuppressPhase6FindResponses((current) => !current),
               onClearObjectStore: () => { void handleClearObjectStore(); },
+              onRefresh: () => { void refreshObjectStore(); }
+            } : undefined}
+            phase7Test={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
+              author: phase7Author,
+              startTime: phase7StartTime,
+              endTime: phase7EndTime,
+              status: phase7QueryStatus,
+              requestId: phase7RequestId,
+              objectIds: objectTestIds,
+              objects: phase7Results,
+              selectedObjectId: phase7SelectedObjectId,
+              onAuthorChange: setPhase7Author,
+              onStartTimeChange: setPhase7StartTime,
+              onEndTimeChange: setPhase7EndTime,
+              onSelectedObjectIdChange: setPhase7SelectedObjectId,
+              onCreateSet: () => { void handleCreatePhase7Set(); },
+              onUseCurrentObjectIds: () => setObjectTestIds(objectTestIds),
+              onRunNarrow: () => { void handleRunPhase7Query('narrow'); },
+              onRunBroad: () => { void handleRunPhase7Query('broad'); },
+              onRunSingleObjectFind: () => { void handleFindPhase7SingleObject(); },
               onRefresh: () => { void refreshObjectStore(); }
             } : undefined}
             onResetApp={() => {

@@ -132,6 +132,52 @@ input {
   font-size: 0.95rem;
 }
 
+.network-status-wrap {
+  position: relative;
+}
+
+.network-status {
+  width: 100%;
+  text-align: left;
+}
+
+.network-status-arrow {
+  margin-left: auto;
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.connected-peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.35rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(39, 180, 115, 0.3);
+  border-radius: 14px;
+  background: rgba(39, 180, 115, 0.08);
+}
+
+.connected-peer {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.connected-peer code {
+  color: #c6d1c9;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.connected-peer-empty {
+  color: #c6d1c9;
+  font-size: 0.9rem;
+}
+
 .network-status.good {
   background: rgba(39, 180, 115, 0.12);
   border-color: rgba(39, 180, 115, 0.3);
