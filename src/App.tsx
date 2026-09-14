@@ -18,7 +18,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, createObjectIdentity, createSignedObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, createObjectIdentity, createSignedObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
@@ -312,8 +312,8 @@ function App() {
       }
     }
     if (packet.type === 'FIND') {
-      const queryFields = packet.payload as { author?: string; created_after?: string; created_before?: string };
-      const isPhase7Query = Boolean(queryFields.author || queryFields.created_after || queryFields.created_before);
+      const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; since?: string; limit?: number; order?: 'created_at_desc' };
+      const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
       if (isPhase7Query) {
         addLog(`PHASE7 QUERY RECEIVED requestId=${packet.payload.requestId} peer=${peerId} author=${queryFields.author ?? 'unknown'} lower=${queryFields.created_after ?? 'none'} upper=${queryFields.created_before ?? 'none'}`);
       }
@@ -331,9 +331,13 @@ function App() {
         findRequestCacheRef.current.set(requestId, expiresAtMs);
         const localObjects = isPhase7Query
           ? await filterObjectsByFindQuery(store, {
+            object_type: queryFields.object_type,
             author: queryFields.author,
             created_after: queryFields.created_after,
-            created_before: queryFields.created_before
+            created_before: queryFields.created_before,
+            since: queryFields.since,
+            limit: queryFields.limit,
+            order: queryFields.order
           })
           : (await Promise.all(requestedObjectIds.map(async (objectId) => {
             const object = await store.get(objectId);
@@ -386,9 +390,13 @@ function App() {
         if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
             const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt, isPhase7Query ? {
+              object_type: queryFields.object_type,
               author: queryFields.author,
               created_after: queryFields.created_after,
-              created_before: queryFields.created_before
+              created_before: queryFields.created_before,
+              since: queryFields.since,
+              limit: queryFields.limit,
+              order: queryFields.order
             } : undefined);
             try {
               await objectTransportRef.current?.send(nextPeer, forwardedPacket);
@@ -494,8 +502,8 @@ function App() {
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
-          const queryFields = packet.payload as { author?: string; created_after?: string; created_before?: string };
-          const isPhase7Query = Boolean(queryFields.author || queryFields.created_after || queryFields.created_before);
+          const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; since?: string; limit?: number; order?: 'created_at_desc' };
+          const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
           if (isPhase7Query) {
             addLog(`PHASE7 CHILD RESPONSE requestId=${requestId} from=${peerId} objects=${objects.map((object) => object.object_id).join(', ') || 'none'} aggregate=${aggregationState.aggregation.aggregateSize() + objects.length}`);
           }
@@ -1537,13 +1545,21 @@ function App() {
 
     if (replyTo) {
       const targetPost = posts.find((post) => post.id === replyTo);
-      const targetPeer = targetPost?.author;
-      if (targetPeer) {
-        const targetManager = peerManagersRef.current[targetPeer];
-        if (targetManager && targetManager.isDataChannelOpen()) {
-          targetManager.sendSignedPost(stored);
-          addLog(`Pushed reply ${stored.id} to ${targetPeer}`);
-        }
+      const targetPeer = targetPost
+        ? await resolvePostAuthorFingerprint(targetPost.author)
+        : undefined;
+      if (targetPost && targetPeer && identity) {
+        const replyIdentity = createObjectIdentity(identity);
+        const replyObject = await createSignedObject({
+          object_type: 'mycelium.reply',
+          created_at: new Date().toISOString(),
+          payload: { post: signed } as any,
+          replication_policy: {}
+        }, replyIdentity);
+        const replyResult = await sendReplyToAuthor(identity.id, replyObject, objectTransportRef.current!, targetPeer, (packet) => signString(identity.privateKey, canonicalize(packet)));
+        addLog(replyResult.sent
+          ? `Pushed reply object ${replyObject.object_id} to ${targetPeer}`
+          : `Reply object ${replyObject.object_id} author ${targetPeer} is not connected`);
       }
     }
 

@@ -3,7 +3,13 @@ import type { ConnectionState, PeerMetadata, SignedPost } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
 import type { ObjectPacket } from '../object-layer/types';
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const TURN_URL = import.meta.env.VITE_TURN_URL || 'turn:openrelay.metered.ca:80';
+const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || 'openrelayproject';
+const TURN_CREDENTIAL = import.meta.env.VITE_TURN_CREDENTIAL || 'openrelayproject';
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: [TURN_URL, 'turn:openrelay.metered.ca:443?transport=tcp'], username: TURN_USERNAME, credential: TURN_CREDENTIAL }
+];
 const PING_INTERVAL_MS = 30000;
 const OFFER_RECOVERY_TIMEOUT_MS = 10000;
 let nextManagerId = 1;

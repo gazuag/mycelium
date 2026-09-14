@@ -5,7 +5,7 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getReplicationBudget, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
 
@@ -629,6 +629,36 @@ describe('distributed object foundation', () => {
     expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
   });
 
+  it('supports object-type filtering, descending ordering, limits, and exclusive since cursors', async () => {
+    const store = createMemoryStore();
+    const newestPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:03:00.000Z', payload: { value: 'newest' }, replication_policy: {} });
+    const olderPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:02:00.000Z', payload: { value: 'older' }, replication_policy: {} });
+    const oldestPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { value: 'oldest' }, replication_policy: {} });
+    const reply = await createFixtureObject({ object_type: 'mycelium.reply', author: '', created_at: '2026-08-25T00:04:00.000Z', payload: { value: 'reply' }, replication_policy: {} });
+    await Promise.all([newestPost, olderPost, oldestPost, reply].map((object) => store.put(object)));
+
+    const packet = await buildFindPacket('peer-a', 'peer-b', [], undefined, 'feed-query', 1, 'peer-a', new Date(Date.now() + 5000).toISOString(), {
+      object_type: 'mycelium.post',
+      since: '2026-08-25T00:01:00.000Z',
+      limit: 1,
+      order: 'created_at_desc'
+    });
+    expect(getFindQueryCriteria(packet)).toEqual({
+      object_type: 'mycelium.post',
+      author: undefined,
+      created_after: undefined,
+      created_before: undefined,
+      since: '2026-08-25T00:01:00.000Z',
+      limit: 1,
+      order: 'created_at_desc'
+    });
+
+    const results = await filterObjectsByFindQuery(store, getFindQueryCriteria(packet)!);
+    expect(results.map((object) => object.payload)).toEqual([{ value: 'newest' }]);
+    expect(results).not.toContainEqual(reply);
+    expect(await filterObjectsByFindQuery(store, { object_type: 'mycelium.post', order: 'created_at_desc' })).toEqual([newestPost, olderPost, oldestPost]);
+  });
+
   it('aggregates local and child results, deduplicating strictly by object ID', async () => {
     const first = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
     const second = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
@@ -837,6 +867,54 @@ describe('distributed object foundation', () => {
       // A single peer's local store never ends up with more than one copy of the same object_id.
       const peerBObjects = (await stores.get('peer-b')!.query()).filter((stored) => stored.object_id === object.object_id);
       expect(peerBObjects).toHaveLength(1);
+    });
+
+    it('sends one reply object directly to a connected author peer', async () => {
+      const replyObject = await createFixtureObject({
+        object_type: 'phase8-reply',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'reply' },
+        replication_policy: {}
+      });
+      const sent: ObjectPacket[] = [];
+      const transport = {
+        connectedPeers: () => ['author-peer'],
+        onPacket: () => () => {},
+        send: async (peerId: string, packet: ObjectPacket) => {
+          sent.push(packet);
+          expect(peerId).toBe('author-peer');
+        }
+      };
+      const trace = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+      const result = await sendReplyToAuthor('reply-peer', replyObject, transport, 'author-peer');
+
+      expect(result).toEqual({ objectId: replyObject.object_id, authorPeerId: 'author-peer', reachable: true, sent: true });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ type: 'OBJECT_STORE', sender: 'reply-peer', recipient: 'author-peer', payload: { object: replyObject } });
+      expect(trace).toHaveBeenCalledWith(`REPLY author connected - sent object_id=${replyObject.object_id} peer=author-peer`);
+      trace.mockRestore();
+    });
+
+    it('reports an unavailable author without sending or retrying', async () => {
+      const replyObject = await createFixtureObject({
+        object_type: 'phase8-reply-unreachable',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'reply' },
+        replication_policy: {}
+      });
+      const send = vi.fn(async () => undefined);
+      const transport = { connectedPeers: () => ['other-peer'], onPacket: () => () => {}, send };
+      const trace = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+      const result = await sendReplyToAuthor('reply-peer', replyObject, transport, 'author-peer');
+
+      expect(result).toEqual({ objectId: replyObject.object_id, authorPeerId: 'author-peer', reachable: false, sent: false });
+      expect(send).not.toHaveBeenCalled();
+      expect(trace).toHaveBeenCalledWith(`REPLY author not connected - skipped object_id=${replyObject.object_id} peer=author-peer`);
+      trace.mockRestore();
     });
   });
 });

@@ -1,6 +1,6 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
 import { validateObject } from './envelope';
-import type { DistributedObject, FindPacket, FindResponsePacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
+import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
 export const FIND_GRACE_PERIOD_MS = 1000;
@@ -24,7 +24,7 @@ export async function buildFindPacket(
   ttl = 1,
   origin?: string,
   expiresAt = new Date(Date.now() + FIND_REQUEST_LIFETIME_MS).toISOString(),
-  query?: { author?: string; created_after?: string; created_before?: string }
+  query?: FindQueryCriteria
 ): Promise<FindPacket> {
   const requestedObjects = Array.isArray(objectId) ? objectId : [objectId];
   return await buildPacket(sender, recipient, 'FIND', {
@@ -34,9 +34,13 @@ export async function buildFindPacket(
     ttl,
     expiresAt,
     ...(origin ? { origin } : {}),
+    ...(query?.object_type ? { object_type: query.object_type } : {}),
     ...(query?.author ? { author: query.author } : {}),
     ...(query?.created_after ? { created_after: query.created_after } : {}),
-    ...(query?.created_before ? { created_before: query.created_before } : {})
+    ...(query?.created_before ? { created_before: query.created_before } : {}),
+    ...(query?.since ? { since: query.since } : {}),
+    ...(query?.limit === undefined ? {} : { limit: query.limit }),
+    ...(query?.order ? { order: query.order } : {})
   }, signer) as FindPacket;
 }
 
@@ -144,23 +148,35 @@ export async function receiveFindResponsePacket(packet: unknown, store: ObjectSt
   return object as DistributedObject;
 }
 
-export function getFindQueryCriteria(packet: FindPacket): { author?: string; created_after?: string; created_before?: string } | null {
+export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | null {
+  const objectType = typeof packet.payload?.object_type === 'string' ? packet.payload.object_type : undefined;
   const author = typeof packet.payload?.author === 'string' ? packet.payload.author : undefined;
   const createdAfter = typeof packet.payload?.created_after === 'string' ? packet.payload.created_after : undefined;
   const createdBefore = typeof packet.payload?.created_before === 'string' ? packet.payload.created_before : undefined;
-  const hasQuery = Boolean(author || createdAfter || createdBefore);
+  const since = typeof packet.payload?.since === 'string' ? packet.payload.since : undefined;
+  const limit = typeof packet.payload?.limit === 'number' && Number.isSafeInteger(packet.payload.limit) && packet.payload.limit > 0
+    ? packet.payload.limit
+    : undefined;
+  const order = packet.payload?.order === 'created_at_desc' ? packet.payload.order : undefined;
+  const hasQuery = Boolean(objectType || author || createdAfter || createdBefore || since || limit !== undefined || order);
   if (!hasQuery) return null;
-  return { author, created_after: createdAfter, created_before: createdBefore };
+  return { object_type: objectType, author, created_after: createdAfter, created_before: createdBefore, since, limit, order };
 }
 
-export async function filterObjectsByFindQuery(store: ObjectStore, query: { author?: string; created_after?: string; created_before?: string }): Promise<DistributedObject[]> {
+export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQueryCriteria): Promise<DistributedObject[]> {
   const objects = await store.query();
-  return objects.filter((object) => {
+  const filtered = objects.filter((object) => {
+    if (query.object_type && object.object_type !== query.object_type) return false;
     if (query.author && object.author !== query.author) return false;
     if (query.created_after && new Date(object.created_at).getTime() < new Date(query.created_after).getTime()) return false;
     if (query.created_before && new Date(object.created_at).getTime() > new Date(query.created_before).getTime()) return false;
+    if (query.since && new Date(object.created_at).getTime() <= new Date(query.since).getTime()) return false;
     return true;
   });
+  if (query.order === 'created_at_desc') {
+    filtered.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+  }
+  return query.limit === undefined ? filtered : filtered.slice(0, query.limit);
 }
 
 export async function validateFindResponseObjects(
@@ -283,7 +299,7 @@ export async function respondToFindPacket(
   send: (packet: FindResponsePacket) => Promise<void>,
   sender: string,
   requestCache = new Map<string, number>(),
-  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: { author?: string; created_after?: string; created_before?: string } }) => Promise<void>
+  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: FindQueryCriteria }) => Promise<void>
 ): Promise<boolean> {
   if (!isMyceliumPacket(packet) || packet.type !== 'FIND') return false;
   const objectIds = getFindObjectIds(packet as FindPacket);
@@ -388,6 +404,37 @@ export interface ReplicationResult {
   readonly targeted: readonly string[];
   readonly stored: readonly string[];
   readonly skipped: readonly string[];
+}
+
+export interface ReplyDeliveryResult {
+  readonly objectId: string;
+  readonly authorPeerId: string;
+  readonly reachable: boolean;
+  readonly sent: boolean;
+}
+
+export async function sendReplyToAuthor(
+  sender: string,
+  replyObject: DistributedObject,
+  transport: ObjectTransport,
+  authorPeerId: string,
+  signer?: PacketSigner
+): Promise<ReplyDeliveryResult> {
+  const result = {
+    objectId: replyObject.object_id,
+    authorPeerId,
+    reachable: transport.connectedPeers().includes(authorPeerId),
+    sent: false
+  };
+  if (!result.reachable) {
+    console.debug(`REPLY author not connected - skipped object_id=${replyObject.object_id} peer=${authorPeerId}`);
+    return result;
+  }
+
+  const packet = await buildObjectStorePacket(sender, authorPeerId, replyObject, signer);
+  await transport.send(authorPeerId, packet);
+  console.debug(`REPLY author connected - sent object_id=${replyObject.object_id} peer=${authorPeerId}`);
+  return { ...result, sent: true };
 }
 
 /**
