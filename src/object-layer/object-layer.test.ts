@@ -106,6 +106,67 @@ describe('distributed object foundation', () => {
     expect(await validateDistributedObject(objectWithUnsupportedPayload)).toBe(false);
   });
 
+  describe('Stage 2b: mycelium.post objects', () => {
+    it('creates a post object with the expected immutable type and fields', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'hello', tags: ['phase2b'] },
+        replication_policy: {}
+      });
+
+      expect(object.object_type).toBe('mycelium.post');
+      expect(object.payload).toEqual({ content: 'hello', tags: ['phase2b'] });
+      expect(object.created_at).toBe('2026-08-25T00:00:00.000Z');
+      expect(object.author).toBeTruthy();
+    });
+
+    it('validates the DistributedObject signature for post content', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'signed content', tags: [] },
+        replication_policy: {}
+      });
+
+      expect(await validateObject(object)).toBe(true);
+      expect(await validateObject({ ...object, payload: { content: 'tampered', tags: [] } })).toBe(false);
+    });
+
+    it('stores reply_to inside the post payload when present', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'reply', tags: [], reply_to: 'parent-post-id' },
+        replication_policy: {}
+      });
+
+      expect(object.payload).toEqual({ content: 'reply', tags: [], reply_to: 'parent-post-id' });
+      expect(await validateObject(object)).toBe(true);
+    });
+
+    it('excludes mutable and local legacy fields from the signed post object', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'immutable', tags: [] },
+        replication_policy: {}
+      });
+
+      expect(object).not.toHaveProperty('replyCount');
+      expect(object).not.toHaveProperty('reaction');
+      expect(object).not.toHaveProperty('valid');
+      expect(object).not.toHaveProperty('source');
+      expect(object).not.toHaveProperty('receivedAt');
+      expect(object).not.toHaveProperty('authorFingerprint');
+      expect(object.payload).toEqual({ content: 'immutable', tags: [] });
+    });
+  });
+
   it('stores, deduplicates, queries, and deletes objects locally', async () => {
     const object = await createFixtureObject({
       object_type: 'example',

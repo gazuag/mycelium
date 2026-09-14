@@ -1526,9 +1526,24 @@ function App() {
     if (!identity) return;
     const content = newPostContent.trim();
     if (!content) return;
-    const id = await sha256(identity.publicKey + Date.now().toString());
     const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
-    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, content, tags, { replyTo });
+    const objectIdentity = createObjectIdentity(identity);
+    const postObject = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: new Date().toISOString(),
+      payload: {
+        content,
+        tags,
+        ...(replyTo ? { reply_to: replyTo } : {})
+      },
+      replication_policy: {}
+    }, objectIdentity);
+    const objectStore = objectStoreRef.current;
+    if (!objectStore) throw new Error('Object store is unavailable');
+    await objectStore.put(postObject);
+
+    // Legacy projection remains temporary until direct-send and discovery migrate.
+    const signed = await createSignedPost(await sha256(identity.publicKey + Date.now().toString()), identity.publicKey, identity.privateKey, content, tags, { replyTo });
     const stored: StoredPost = {
       ...signed,
       source: 'local',
@@ -1537,9 +1552,7 @@ function App() {
       replyCount: 0,
       authorFingerprint: identity.id
     };
-    await savePost(stored);
-    setPosts((prev) => [stored, ...prev]);
-    addLog('Created local post');
+    addLog(`Created and stored object post ${postObject.object_id}`);
     setNewPostContent('');
     setNewPostTags('');
 
