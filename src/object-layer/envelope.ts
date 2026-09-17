@@ -1,6 +1,6 @@
 import { canonicalize } from '../p2p/protocol';
 import { sha256, verifySignedString } from '../crypto/identity';
-import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity, ObjectSignatureVerifier } from './types';
+import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity, ObjectSignatureVerifier, RecommendationAction, RecommendationObject } from './types';
 
 export type ImmutableObjectContent = Omit<DistributedObject, 'object_id' | 'signature'>;
 
@@ -44,6 +44,32 @@ export async function createSignedObject(content: ObjectContent, identity: Objec
     object_id: objectId,
     signature
   };
+}
+
+export async function createSignedRecommendationObject(
+  postId: string,
+  action: RecommendationAction,
+  sequence: number,
+  identity: ObjectIdentity
+): Promise<RecommendationObject> {
+  return await createSignedObject({
+    object_type: 'mycelium.recommendation',
+    created_at: new Date().toISOString(),
+    sequence,
+    payload: { post_id: postId, action, sequence },
+    replication_policy: {}
+  }, identity) as RecommendationObject;
+}
+
+export function isRecommendationObject(object: DistributedObject): object is RecommendationObject {
+  if (object.object_type !== 'mycelium.recommendation') return false;
+  if (typeof object.sequence !== 'number' || !Number.isSafeInteger(object.sequence) || object.sequence < 1) return false;
+  if (!object.payload || typeof object.payload !== 'object' || Array.isArray(object.payload)) return false;
+  const payload = object.payload as Record<string, unknown>;
+  return typeof payload.post_id === 'string'
+    && /^[0-9a-f]{64}$/.test(payload.post_id)
+    && (payload.action === 'recommend' || payload.action === 'withdraw')
+    && payload.sequence === object.sequence;
 }
 
 export async function validateObject(value: unknown, identity?: ObjectIdentity): Promise<boolean> {

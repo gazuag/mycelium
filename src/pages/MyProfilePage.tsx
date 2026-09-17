@@ -1,12 +1,13 @@
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
-import type { Contact, StoredPost } from '../types';
+import type { Contact } from '../types';
+import type { LocalPostView } from '../object-layer';
 import { BlockedPeerList } from '../components/BlockedPeerList';
 
 interface MyProfilePageProps {
   identityId: string;
   publicKey: string;
   contacts: Contact[];
-  posts: StoredPost[];
+  posts: LocalPostView[];
   nickname: string;
   bio: string;
   blockedPeers: string[];

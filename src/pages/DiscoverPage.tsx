@@ -1,25 +1,25 @@
-import type { Contact, StoredPost } from '../types';
+import type { Contact } from '../types';
+import type { LocalPostView } from '../object-layer';
 import { FollowButton } from '../components/FollowButton';
 import { PostCard } from '../components/PostCard';
 import { BlockButton } from '../components/BlockButton';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface DiscoverPageProps {
-  discoveryPosts: StoredPost[];
+  discoveryPosts: LocalPostView[];
   contacts: Contact[];
   myPeerId?: string;
   myPublicKey?: string;
   onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
   onFollow: (publicKey: string) => void;
-  onLike: (postId: string) => void;
-  onDislike: (postId: string) => void;
-  onHide?: (postId: string) => void;
+  onLike: (objectId: string) => void;
+  onDislike: (objectId: string) => void;
+  onHide?: (objectId: string) => void;
   onBlock: (peerId: string) => void;
-  onSave: (post: StoredPost) => void;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock, onSave }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -38,24 +38,24 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
         <div className="feed-list">
           {discoveryPosts.map((post) => {
             const matchedContact = contacts.find((contact) =>
-              contact.fingerprint === post.author || contact.publicKey === post.author
+              contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author
             );
-            const authorFingerprint = post.authorFingerprint || matchedContact?.fingerprint || post.author;
+            const authorFingerprint = post.authorFingerprint || matchedContact?.fingerprint || post.object.author;
             const authorName = matchedContact
               ? displayNameOrFallback(matchedContact.displayName, authorFingerprint)
               : post.authorDisplayName?.trim() || displayNameOrFallback(undefined, authorFingerprint);
 
             return (
               <PostCard
-                key={post.id}
+                key={post.object.object_id}
                 post={post}
                 authorName={authorName}
                 authorId={authorFingerprint}
                 onAuthorClick={() => onAuthorClick(authorFingerprint)}
-                onLike={() => onLike(post.id)}
-                onDislike={() => onDislike(post.id)}
+                onLike={() => onLike(post.object.object_id)}
+                onDislike={() => onDislike(post.object.object_id)}
                 onReply={() => {} }
-                isOwnPost={authorFingerprint === myPeerId || post.author === myPublicKey}
+                isOwnPost={authorFingerprint === myPeerId || post.object.author === myPublicKey}
                 showDislikeButton={false}
                 footerActions={
                   <div className="discover-actions">

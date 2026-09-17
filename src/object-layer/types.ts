@@ -18,6 +18,49 @@ export interface DistributedObject {
   readonly replication_policy: ReplicationPolicy;
 }
 
+export type PostObject = DistributedObject & { readonly object_type: 'mycelium.post' };
+
+export type RecommendationObject = DistributedObject & { readonly object_type: 'mycelium.recommendation' };
+
+export type RecommendationAction = 'recommend' | 'withdraw';
+
+export interface LocalPostView {
+  readonly object: PostObject;
+  readonly authorFingerprint: string;
+  readonly authorDisplayName?: string;
+  readonly source?: 'local' | 'peer' | 'discovery';
+  readonly reaction?: 'like' | 'dislike';
+  readonly isRecommendation?: boolean;
+  readonly recommendedBy?: string;
+  readonly notInterested?: boolean;
+  readonly hidden?: boolean;
+}
+
+export type LocalPostMetadata = Omit<LocalPostView, 'object' | 'authorFingerprint'> & {
+  readonly object_id: string;
+  readonly authorFingerprint: string;
+};
+
+export interface LocalPostMetadataStore {
+  put(metadata: LocalPostMetadata): Promise<void>;
+  get(objectId: string): Promise<LocalPostMetadata | null>;
+  delete(objectId: string): Promise<void>;
+  query(): Promise<LocalPostMetadata[]>;
+}
+
+export interface RecommendationSequenceStore {
+  next(author: string): Promise<number>;
+}
+
+export interface RecommendationSummary {
+  readonly post_id: string;
+  readonly active_recommenders: readonly string[];
+  readonly active_recommender_count: number;
+  readonly followed_recommenders: readonly string[];
+  readonly followed_recommender_count: number;
+  readonly recommended_by_me: boolean;
+}
+
 export interface ObjectStorePacket {
   readonly protocol: 'mycelium';
   readonly version: 1;
@@ -27,6 +70,18 @@ export interface ObjectStorePacket {
   readonly sender: string;
   readonly recipient: string | null;
   readonly payload: { readonly object: DistributedObject };
+  readonly signature: string;
+}
+
+export interface ObjectBatchPacket {
+  readonly protocol: 'mycelium';
+  readonly version: 1;
+  readonly id: string;
+  readonly type: 'OBJECT_BATCH';
+  readonly timestamp: string;
+  readonly sender: string;
+  readonly recipient: string | null;
+  readonly payload: { readonly objects: readonly DistributedObject[] };
   readonly signature: string;
 }
 
@@ -64,7 +119,7 @@ export interface FindResponsePacket {
   readonly signature: string;
 }
 
-export type ObjectPacket = ObjectStorePacket | FindPacket | FindResponsePacket;
+export type ObjectPacket = ObjectStorePacket | ObjectBatchPacket | FindPacket | FindResponsePacket;
 
 export interface ObjectTransport {
   connectedPeers(): string[];

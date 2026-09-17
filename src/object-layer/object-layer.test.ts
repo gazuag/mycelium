@@ -2,12 +2,14 @@ import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString } from '../crypto/identity';
-import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
+import { canonicalizeObjectContent, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
-import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
+import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, upsertLocalPostView } from './post-state';
+import { RecommendationIndex } from './recommendations';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, queryFeedObjectsForPeer, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
-import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
+import type { DistributedObject, ObjectPacket, ObjectStore, PostObject } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -186,6 +188,232 @@ describe('distributed object foundation', () => {
     expect(await store.get(object.object_id)).toBeNull();
   });
 
+  it('constructs a LocalPostView directly from a PostObject', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'canonical local post', tags: ['stage4a'] },
+      replication_policy: {}
+    });
+
+    const view = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+    expect(view.object).toBe(object);
+    expect(view.authorFingerprint).toBe('aa:bb:cc:dd:ee:ff:00:11');
+    expect(view.source).toBe('local');
+    expect(view.object.payload).toEqual({ content: 'canonical local post', tags: ['stage4a'] });
+  });
+
+  it('updates local post state immediately without a network round trip', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'available immediately', tags: [] },
+      replication_policy: {}
+    });
+    const view = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+
+    const nextState = upsertLocalPostView([], view);
+    expect(nextState).toEqual([view]);
+    expect(nextState[0].object.object_id).toBe(object.object_id);
+  });
+
+  it('keeps a newly created view visible when it is inserted into post state', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'created now', tags: [] },
+      replication_policy: {}
+    });
+    const localView = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+
+    expect(upsertLocalPostView([], localView)).toEqual([localView]);
+  });
+
+  it('preserves an incoming object when hydration resolves after it', async () => {
+    const incomingObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'incoming' }, replication_policy: {} });
+    const hydratedObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'hydrated' }, replication_policy: {} });
+    const incoming = createLocalPostView(incomingObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'peer' });
+    const hydrated = createLocalPostView(hydratedObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:22', { source: 'local' });
+
+    expect(mergeLocalPostViews([incoming], [hydrated]).map((view) => view.object.object_id)).toEqual([hydratedObject.object_id, incomingObject.object_id]);
+  });
+
+  it('keeps an earlier discovery post when a later fetch omits it', async () => {
+    const earlierObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'earlier' }, replication_policy: {} });
+    const laterObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'later' }, replication_policy: {} });
+    const earlier = createLocalPostView(earlierObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
+    const later = createLocalPostView(laterObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
+
+    expect(mergeLocalPostViews([earlier], [later]).map((view) => view.object.object_id)).toEqual([laterObject.object_id, earlierObject.object_id]);
+  });
+
+  it('promotes a discovery-only liked post into the main post state', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'discover then like' }, replication_policy: {} });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery', reaction: 'like', isRecommendation: true, recommendedBy: 'my-id' });
+
+    expect(upsertLocalPostView([], liked)[0].recommendedBy).toBe('my-id');
+  });
+
+  it('preserves local like metadata when the same object is received again', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked object' }, replication_policy: {} });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { reaction: 'like', isRecommendation: true, recommendedBy: 'my-id', notInterested: false });
+    const received = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'peer' });
+
+    const merged = upsertLocalPostView([liked], received);
+    expect(merged[0]).toMatchObject({ reaction: 'like', isRecommendation: true, recommendedBy: 'my-id', source: 'peer' });
+  });
+
+  it('persists local post metadata by object_id', async () => {
+    const store = new IndexedDbLocalPostMetadataStore();
+    const metadata = {
+      object_id: 'a'.repeat(64),
+      authorFingerprint: 'aa:bb:cc:dd:ee:ff:00:11',
+      source: 'local' as const
+    };
+
+    await store.put(metadata);
+    expect(await store.get(metadata.object_id)).toEqual(metadata);
+    expect(await store.query()).toContainEqual(metadata);
+  });
+
+  it('creates valid recommendation objects with increasing sequences and withdrawal', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const privateKey = await exportPrivateKey(keys.privateKey);
+    const identity = createObjectIdentity({ id: 'recommendation-author', publicKey: author, privateKey });
+    const sequenceStore = new IndexedDbRecommendationSequenceStore();
+    const first = await createSignedRecommendationObject('a'.repeat(64), 'recommend', await sequenceStore.next(author), identity);
+    const second = await createSignedRecommendationObject('a'.repeat(64), 'recommend', await sequenceStore.next(author), identity);
+    const withdrawn = await createSignedRecommendationObject('a'.repeat(64), 'withdraw', await sequenceStore.next(author), identity);
+
+    expect(first.sequence).toBe(1);
+    expect(second.sequence).toBe(2);
+    expect(withdrawn.sequence).toBe(3);
+    expect((first.payload as Record<string, unknown>).action).toBe('recommend');
+    expect((withdrawn.payload as Record<string, unknown>).action).toBe('withdraw');
+    expect(isRecommendationObject(first)).toBe(true);
+    expect(await validateDistributedObject(first)).toBe(true);
+    expect(await validateDistributedObject(second)).toBe(true);
+    expect(await validateDistributedObject(withdrawn)).toBe(true);
+  });
+
+  it('reduces recommendations by author and post, keeping the highest sequence despite out-of-order arrival', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const privateKey = await exportPrivateKey(keys.privateKey);
+    const identity = createObjectIdentity({ id: 'reducer-author', publicKey: author, privateKey });
+    const older = await createSignedRecommendationObject('b'.repeat(64), 'recommend', 1, identity);
+    const withdrawn = await createSignedRecommendationObject('b'.repeat(64), 'withdraw', 3, identity);
+    const middle = await createSignedRecommendationObject('b'.repeat(64), 'recommend', 2, identity);
+    const index = new RecommendationIndex();
+
+    index.add(withdrawn);
+    index.add(older);
+    index.add(middle);
+
+    expect(index.getSummary('b'.repeat(64)).active_recommender_count).toBe(0);
+  });
+
+  it('computes followed recommenders and local-user recommendation state', async () => {
+    const makeIdentity = async (id: string) => {
+      const keys = await generateIdentityKeyPair();
+      return createObjectIdentity({ id, publicKey: await exportPublicKey(keys.publicKey), privateKey: await exportPrivateKey(keys.privateKey) });
+    };
+    const local = await makeIdentity('local');
+    const followed = await makeIdentity('followed');
+    const other = await makeIdentity('other');
+    const postId = 'c'.repeat(64);
+    const index = new RecommendationIndex();
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, local));
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, followed));
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, other));
+
+    const summary = index.getSummary(postId, [followed.publicKey], local.publicKey);
+    expect(summary.active_recommender_count).toBe(3);
+    expect(summary.followed_recommender_count).toBe(1);
+    expect(summary.followed_recommenders).toEqual([followed.publicKey]);
+    expect(summary.recommended_by_me).toBe(true);
+  });
+
+  it('includes only the sender authored recommendations in a feed batch query', async () => {
+    const senderKeys = await generateIdentityKeyPair();
+    const sender = await exportPublicKey(senderKeys.publicKey);
+    const senderPrivateKey = await exportPrivateKey(senderKeys.privateKey);
+    const senderIdentity = createObjectIdentity({ id: 'sender', publicKey: sender, privateKey: senderPrivateKey });
+    const otherKeys = await generateIdentityKeyPair();
+    const other = await exportPublicKey(otherKeys.publicKey);
+    const otherPrivateKey = await exportPrivateKey(otherKeys.privateKey);
+    const otherIdentity = createObjectIdentity({ id: 'other', publicKey: other, privateKey: otherPrivateKey });
+    const store = createMemoryStore();
+    const post = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'post' }, replication_policy: {} }, otherIdentity);
+    const ownRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, senderIdentity);
+    const otherRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, otherIdentity);
+    await Promise.all([post, ownRecommendation, otherRecommendation].map((object) => store.put(object)));
+
+    const results = await queryFeedObjectsForPeer(store, sender, { limit: 20 });
+    expect(results).toContainEqual(post);
+    expect(results).toContainEqual(ownRecommendation);
+    expect(results).not.toContainEqual(otherRecommendation);
+  });
+
+  it('stores a recommendation even when its referenced post is unknown', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.recommendation',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      sequence: 1,
+      payload: { post_id: 'f'.repeat(64), action: 'recommend', sequence: 1 },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [object]);
+    const store = createMemoryStore();
+
+    await expect(receiveObjectBatchPacket(packet, store)).resolves.toEqual([object]);
+    expect(await store.get(object.object_id)).toEqual(object);
+  });
+
+  it('hydrates every mycelium.post even when no metadata record exists', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'no metadata' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+
+    const views = await hydratePostViews(objectStore, metadataStore);
+    expect(views).toHaveLength(1);
+    expect(views[0]).toMatchObject({ source: 'peer', authorFingerprint: object.author });
+    expect(views[0].object.object_id).toBe(object.object_id);
+  });
+
+  it('restores interaction metadata across fresh hydration', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataRecords = [localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { reaction: 'like', recommendedBy: 'my-id', isRecommendation: true }))];
+    const metadataStore = { put: async () => undefined, get: async () => metadataRecords[0], delete: async () => undefined, query: async () => metadataRecords };
+
+    const hydrated = await hydratePostViews(objectStore, metadataStore);
+    expect(hydrated[0]).toMatchObject({ reaction: 'like', recommendedBy: 'my-id', isRecommendation: true });
+  });
+
+  it('reports hydration failures instead of silently returning an unexplained empty result', async () => {
+    const error = new Error('metadata unavailable');
+    const objectStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => { throw error; } };
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+    const errors: unknown[] = [];
+
+    await expect(hydratePostViews(objectStore, metadataStore, (reported) => errors.push(reported))).resolves.toEqual([]);
+    expect(errors).toEqual([error]);
+  });
+
+  it('creates reply payloads with only the canonical parent reference', () => {
+    const payload = createReplyObjectPayload('parent-object-id');
+    expect(payload).toEqual({ reply_to: 'parent-object-id' });
+    expect(payload).not.toHaveProperty('post');
+  });
+
   it('delivers a generic object through the transport adapter and stores it at the receiver', async () => {
     const object = await createFixtureObject({
       object_type: 'transport-test',
@@ -221,6 +449,37 @@ describe('distributed object foundation', () => {
     expect(await store.get(object.object_id)).toEqual(object);
     expect(await store.query({ object_id: object.object_id })).toEqual([object]);
     expect(transport.connectedPeers()).toEqual(['peer-b']);
+  });
+
+  it('round-trips canonical objects in a batch, deduplicating by object_id', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'batch object' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [object, object]);
+    const store = createMemoryStore();
+
+    const received = await receiveObjectBatchPacket(packet, store);
+    expect(received.map((item) => item.object_id)).toEqual([object.object_id, object.object_id]);
+    expect((await store.query()).map((item) => item.object_id)).toEqual([object.object_id]);
+  });
+
+  it('rejects a tampered object in a canonical object batch', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'tamper target' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [{ ...object, payload: { content: 'tampered' } }]);
+    const store = createMemoryStore();
+
+    await expect(receiveObjectBatchPacket(packet, store)).resolves.toEqual([]);
+    await expect(store.query()).resolves.toEqual([]);
   });
 
   it('rejects malformed and tampered object packets without storing them', async () => {
@@ -688,36 +947,6 @@ describe('distributed object foundation', () => {
     expect(queryPacket.payload.created_after).toBe('2026-08-25T00:00:00.000Z');
     expect(queryPacket.payload.created_before).toBe('2026-08-25T00:10:00.000Z');
     expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
-  });
-
-  it('supports object-type filtering, descending ordering, limits, and exclusive since cursors', async () => {
-    const store = createMemoryStore();
-    const newestPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:03:00.000Z', payload: { value: 'newest' }, replication_policy: {} });
-    const olderPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:02:00.000Z', payload: { value: 'older' }, replication_policy: {} });
-    const oldestPost = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { value: 'oldest' }, replication_policy: {} });
-    const reply = await createFixtureObject({ object_type: 'mycelium.reply', author: '', created_at: '2026-08-25T00:04:00.000Z', payload: { value: 'reply' }, replication_policy: {} });
-    await Promise.all([newestPost, olderPost, oldestPost, reply].map((object) => store.put(object)));
-
-    const packet = await buildFindPacket('peer-a', 'peer-b', [], undefined, 'feed-query', 1, 'peer-a', new Date(Date.now() + 5000).toISOString(), {
-      object_type: 'mycelium.post',
-      since: '2026-08-25T00:01:00.000Z',
-      limit: 1,
-      order: 'created_at_desc'
-    });
-    expect(getFindQueryCriteria(packet)).toEqual({
-      object_type: 'mycelium.post',
-      author: undefined,
-      created_after: undefined,
-      created_before: undefined,
-      since: '2026-08-25T00:01:00.000Z',
-      limit: 1,
-      order: 'created_at_desc'
-    });
-
-    const results = await filterObjectsByFindQuery(store, getFindQueryCriteria(packet)!);
-    expect(results.map((object) => object.payload)).toEqual([{ value: 'newest' }]);
-    expect(results).not.toContainEqual(reply);
-    expect(await filterObjectsByFindQuery(store, { object_type: 'mycelium.post', order: 'created_at_desc' })).toEqual([newestPost, olderPost, oldestPost]);
   });
 
   it('aggregates local and child results, deduplicating strictly by object ID', async () => {

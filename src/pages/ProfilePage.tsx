@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Contact, StoredPost } from '../types';
+import type { Contact } from '../types';
+import type { LocalPostView } from '../object-layer';
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
@@ -9,16 +10,16 @@ const PROFILE_LOAD_STEP = 50;
 
 interface ProfilePageProps {
   contact: Contact;
-  posts: StoredPost[];
-  likedPosts: StoredPost[];
+  posts: LocalPostView[];
+  likedPosts: LocalPostView[];
   myPeerId?: string;
   onFollowToggle?: () => void;
   onBlock?: () => void;
   onMessage?: () => void;
   onAuthorClick: (peerId: string) => void;
-  onLike: (postId: string) => void;
-  onDislike: (postId: string) => void;
-  onHide?: (postId: string) => void;
+  onLike: (objectId: string) => void;
+  onDislike: (objectId: string) => void;
+  onHide?: (objectId: string) => void;
   notice?: string | null;
   isOwnProfile?: boolean;
   profileSettings?: React.ReactNode;
@@ -54,11 +55,11 @@ export function ProfilePage({
   }, [contact.fingerprint, posts.length, likedPosts.length]);
 
   const sortedPosts = useMemo(
-    () => [...posts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
+    () => [...posts].sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime()),
     [posts]
   );
   const sortedLikedPosts = useMemo(
-    () => [...likedPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
+    () => [...likedPosts].sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime()),
     [likedPosts]
   );
   const activeItems = activeTab === 'posts' ? sortedPosts : sortedLikedPosts;
@@ -111,16 +112,16 @@ export function ProfilePage({
           <div className="feed-list">
             {visibleItems.map((post) => (
               <PostCard
-                key={post.id}
+                key={post.object.object_id}
                 post={post}
                 authorName={displayNameOrFallback(
                   post.authorDisplayName || (post.authorFingerprint === contact.fingerprint ? contact.displayName : undefined),
-                  post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author)
+                  post.authorFingerprint
                 )}
-                authorId={post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author)}
-                onAuthorClick={() => onAuthorClick(post.authorFingerprint || (post.author === contact.publicKey ? contact.fingerprint : post.author))}
-                onLike={() => onLike(post.id)}
-                onDislike={() => onDislike(post.id)}
+                authorId={post.authorFingerprint}
+                onAuthorClick={() => onAuthorClick(post.authorFingerprint)}
+                onLike={() => onLike(post.object.object_id)}
+                onDislike={() => onDislike(post.object.object_id)}
                 onHide={onHide}
                 onReply={() => {} }
                 isOwnPost={isOwnProfile}

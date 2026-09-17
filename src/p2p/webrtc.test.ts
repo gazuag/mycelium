@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { ObjectPacket } from '../object-layer/types';
+import type { DistributedObject, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
 import { PeerConnectionManager } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
@@ -336,6 +336,48 @@ describe('PeerConnectionManager lifecycle', () => {
 
     expect(manager.getDataChannelState()).toBe('open');
     expect(FakePeerConnection.createDataChannelCalls).toBe(1);
+  });
+
+  it('sends canonical object packets and ignores removed legacy post payloads', async () => {
+    const receivedObjects: DistributedObject[] = [];
+    const receivedBatches: DistributedObject[][] = [];
+    const manager = new PeerConnectionManager(
+      'peer-a', noop, noop, noop, (_peerId, object) => receivedObjects.push(object), noop, noop,
+      (_peerId, objects) => receivedBatches.push(objects), noop, noop, noop, noop, noop,
+      undefined, undefined, undefined, undefined
+    );
+    const peerConnection = FakePeerConnection.instances[0];
+    const socket = fakeSocket();
+    await manager.createOffer('peer-b', socket);
+    await manager.handleSignal(signal('answer'), socket);
+    const channel = peerConnection.lastDataChannel!;
+    channel.readyState = 'open';
+    channel.onopen?.();
+
+    const object = {
+      object_id: 'a'.repeat(64),
+      object_type: 'mycelium.post',
+      author: 'author',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'wire object' },
+      replication_policy: {},
+      signature: 'object-signature'
+    } as DistributedObject;
+    manager.sendObject(object);
+    manager.sendObjectsBatch([object]);
+    await Promise.resolve();
+
+    const sentTypes = channel.send.mock.calls.map(([payload]) => JSON.parse(payload).type);
+    expect(sentTypes).toContain('OBJECT_STORE');
+    expect(sentTypes).toContain('OBJECT_BATCH');
+    expect(sentTypes).not.toContain('POST');
+    expect(sentTypes).not.toContain('POST_BATCH');
+
+    channel.onmessage?.({ data: JSON.stringify({ type: 'signed-post', post: object }) } as MessageEvent);
+    channel.onmessage?.({ data: JSON.stringify({ type: 'posts-batch', posts: [object] }) } as MessageEvent);
+    channel.onmessage?.({ data: JSON.stringify({ type: 'request-posts', since: null }) } as MessageEvent);
+    expect(receivedObjects).toEqual([]);
+    expect(receivedBatches).toEqual([]);
   });
 
   it('keeps an answerer waiting for ondatachannel after signalling returns to stable', async () => {

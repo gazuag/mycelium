@@ -1,11 +1,10 @@
-import { Contact, SignedPost, SignedProfile, StoredPost } from '../types';
+import { Contact, SignedProfile } from '../types';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
-const POST_STORE = 'posts';
 const DISCOVERY_STORE = 'discovery_interactions';
 const QUEUE_STORE = 'message_queue';
 const DIRECT_CHAT_STORE = 'direct_chat_messages';
@@ -25,11 +24,7 @@ export async function openDatabase() {
       if (!db.objectStoreNames.contains(PROFILE_STORE)) {
         db.createObjectStore(PROFILE_STORE, { keyPath: 'author' });
       }
-      if (!db.objectStoreNames.contains(POST_STORE)) {
-        const store = db.createObjectStore(POST_STORE, { keyPath: 'id' });
-        store.createIndex('receivedAt', 'receivedAt');
-        store.createIndex('seen', 'seen');
-      }
+      if (db.objectStoreNames.contains('posts')) db.deleteObjectStore('posts');
       if (!db.objectStoreNames.contains(DISCOVERY_STORE)) {
         db.createObjectStore(DISCOVERY_STORE, { keyPath: 'id' });
       }
@@ -133,39 +128,6 @@ export async function loadProfile(author: string): Promise<SignedProfile | null>
     const store = tx.objectStore(PROFILE_STORE);
     const request = store.get(author);
     request.onsuccess = () => resolve(request.result ?? null);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function savePost(post: StoredPost) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(POST_STORE, 'readwrite');
-    const store = tx.objectStore(POST_STORE);
-    store.put(post);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function deletePost(postId: string) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(POST_STORE, 'readwrite');
-    const store = tx.objectStore(POST_STORE);
-    store.delete(postId);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function loadPosts(): Promise<StoredPost[]> {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(POST_STORE, 'readonly');
-    const store = tx.objectStore(POST_STORE);
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result as StoredPost[]);
     request.onerror = () => reject(request.error);
   });
 }
@@ -293,7 +255,7 @@ export async function clearAllLocalData() {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(
-      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, POST_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE],
+      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE],
       'readwrite'
     );
 
@@ -301,7 +263,6 @@ export async function clearAllLocalData() {
       tx.objectStore(IDENTITY_STORE),
       tx.objectStore(CONTACT_STORE),
       tx.objectStore(PROFILE_STORE),
-      tx.objectStore(POST_STORE),
       tx.objectStore(DISCOVERY_STORE),
       tx.objectStore(QUEUE_STORE),
       tx.objectStore(DIRECT_CHAT_STORE)

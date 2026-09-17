@@ -80,13 +80,19 @@ def init_db() -> sqlite3.Connection:
             CREATE TABLE discovery_posts (
                 id TEXT PRIMARY KEY,
                 received_at TEXT NOT NULL,
-                post_json TEXT NOT NULL,
+                object_json TEXT NOT NULL,
                 author TEXT NOT NULL,
                 tags TEXT
             )
         ''')
         conn.execute('CREATE INDEX idx_received_at ON discovery_posts(received_at)')
         conn.commit()
+    else:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(discovery_posts)')}
+        if 'object_json' not in columns:
+            conn.execute('ALTER TABLE discovery_posts ADD COLUMN object_json TEXT')
+            conn.execute('UPDATE discovery_posts SET object_json = post_json WHERE object_json IS NULL')
+            conn.commit()
     return conn
 
 DB_CONN = init_db()
@@ -119,7 +125,7 @@ def build_discovery_result_packet(posts, request_id: Optional[str] = None, recip
         'recipient': recipient,
         'payload': {
             'requestId': request_id,
-            'posts': posts,
+            'objects': posts,
         },
         'signature': 'server-unsigned-v1'
     }
@@ -128,12 +134,12 @@ def build_discovery_result_packet(posts, request_id: Optional[str] = None, recip
 def load_discovery_posts(limit: int, tag: Optional[str]):
     if tag:
         cursor = DB_CONN.execute(
-            'SELECT post_json FROM discovery_posts WHERE tags LIKE ? ORDER BY RANDOM() LIMIT ?',
+            'SELECT object_json FROM discovery_posts WHERE tags LIKE ? ORDER BY RANDOM() LIMIT ?',
             (f'%{tag}%', limit)
         )
     else:
         cursor = DB_CONN.execute(
-            'SELECT post_json FROM discovery_posts ORDER BY RANDOM() LIMIT ?',
+            'SELECT object_json FROM discovery_posts ORDER BY RANDOM() LIMIT ?',
             (limit,)
         )
     rows = cursor.fetchall()
@@ -144,36 +150,42 @@ async def handle_discovery_get(message: dict, websocket: WebSocketServerProtocol
     query = message.get('payload', {}) if isinstance(message.get('payload'), dict) else {}
     limit = min(int(query.get('limit', MAX_DISCOVERY_BATCH_SIZE)), MAX_DISCOVERY_BATCH_SIZE)
     tag = query.get('tag')
-    posts = load_discovery_posts(limit, tag if isinstance(tag, str) else None)
-    result = build_discovery_result_packet(posts, request_id=message.get('id'), recipient=message.get('sender'))
+    objects = load_discovery_posts(limit, tag if isinstance(tag, str) else None)
+    result = build_discovery_result_packet(objects, request_id=message.get('id'), recipient=message.get('sender'))
     await websocket.send(json.dumps(result))
-    logging.info('Sent %d discovery posts to %s', len(posts), message.get('sender', '<unknown>'))
+    logging.info('Sent %d discovery objects to %s', len(objects), message.get('sender', '<unknown>'))
 
 
 async def handle_discovery_publish(message: dict) -> None:
-    raw_post_json = json.dumps(message)
-    if len(raw_post_json) > MAX_POST_SIZE:
-        logging.warning('DISCOVERY_PUBLISH payload too large, ignoring')
-        return
     inner_payload = message.get('payload', {}) if isinstance(message.get('payload'), dict) else {}
-    post_payload = inner_payload.get('post')
-    if not isinstance(post_payload, dict):
-        logging.warning('DISCOVERY_PUBLISH missing post payload')
+    object_payload = inner_payload.get('object')
+    if not isinstance(object_payload, dict):
+        logging.warning('DISCOVERY_PUBLISH missing object payload')
         return
-    required_keys = {'protocol', 'version', 'type', 'id', 'author', 'timestamp', 'content', 'tags', 'signature'}
-    if not required_keys.issubset(post_payload.keys()):
-        logging.warning('DISCOVERY_PUBLISH missing required fields: %s', required_keys - post_payload.keys())
+    raw_object_json = json.dumps(object_payload)
+    if len(raw_object_json) > MAX_POST_SIZE:
+        logging.warning('DISCOVERY_PUBLISH object too large, ignoring')
         return
-    post_id = post_payload['id']
+    required_keys = {'object_id', 'object_type', 'author', 'created_at', 'payload', 'signature'}
+    if not required_keys.issubset(object_payload.keys()):
+        logging.warning('DISCOVERY_PUBLISH missing object fields: %s', required_keys - object_payload.keys())
+        return
+    object_id = object_payload['object_id']
+    author = object_payload['author']
+    object_content = object_payload['payload']
+    if not isinstance(object_id, str) or not object_id or not isinstance(author, str) or not author or not isinstance(object_content, dict):
+        logging.warning('DISCOVERY_PUBLISH invalid object envelope, ignoring')
+        return
     received_at = datetime.utcnow().isoformat() + 'Z'
-    tags = ','.join(post_payload.get('tags', []))
+    object_tags = object_content.get('tags', [])
+    tags = ','.join(tag for tag in object_tags if isinstance(tag, str)) if isinstance(object_tags, list) else ''
     DB_CONN.execute(
-        'INSERT OR REPLACE INTO discovery_posts (id, received_at, post_json, author, tags) VALUES (?, ?, ?, ?, ?)',
-        (post_id, received_at, json.dumps(post_payload), post_payload['author'], tags)
+        'INSERT OR REPLACE INTO discovery_posts (id, received_at, object_json, author, tags) VALUES (?, ?, ?, ?, ?)',
+        (object_id, received_at, raw_object_json, author, tags)
     )
     DB_CONN.commit()
     await prune_discovery_posts()
-    logging.info('Stored discovery post %s from %s tags=%s', post_id, post_payload['author'], tags)
+    logging.info('Stored discovery object %s from %s tags=%s', object_id, author, tags)
 
 
 async def handle_client(websocket: WebSocketServerProtocol) -> None:

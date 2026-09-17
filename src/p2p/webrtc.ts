@@ -1,7 +1,7 @@
 import type { PeerSignalMessage, SignalMessage } from './signalling';
-import type { ConnectionState, PeerMetadata, SignedPost } from '../types';
+import type { ConnectionState, PeerMetadata } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
-import type { ObjectPacket } from '../object-layer/types';
+import type { DistributedObject, ObjectPacket } from '../object-layer/types';
 
 const TURN_URL = import.meta.env.VITE_TURN_URL || 'turn:openrelay.metered.ca:80';
 const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || 'openrelayproject';
@@ -25,10 +25,10 @@ export class PeerConnectionManager {
   private polite = false;
   private onState: (peerId: string, state: ConnectionState) => void;
   private onData: (peerId: string, message: string) => void;
-  private onPost: (peerId: string, post: SignedPost) => void;
+  private onObject: (peerId: string, object: DistributedObject) => void;
   private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
   private onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void;
-  private onPostsBatch: (peerId: string, posts: SignedPost[], recommendations?: SignedPost[]) => void;
+  private onObjectsBatch: (peerId: string, objects: DistributedObject[]) => void;
   private onSignal: (message: SignalMessage) => void;
   private onOpen: (peerId: string) => void;
   private onClose: (peerId: string) => void;
@@ -59,10 +59,10 @@ export class PeerConnectionManager {
     onState: (peerId: string, state: ConnectionState) => void,
     onData: (peerId: string, message: string) => void,
     onSignal: (message: SignalMessage) => void,
-    onPost: (peerId: string, post: SignedPost) => void,
+    onObject: (peerId: string, object: DistributedObject) => void,
     onMetadata: (peerId: string, metadata: PeerMetadata) => void,
     onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void,
-    onPostsBatch: (peerId: string, posts: SignedPost[], recommendations?: SignedPost[]) => void,
+    onObjectsBatch: (peerId: string, objects: DistributedObject[]) => void,
     onOpen: (peerId: string) => void,
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
@@ -76,10 +76,10 @@ export class PeerConnectionManager {
     this.localId = localId;
     this.onState = onState;
     this.onData = onData;
-    this.onPost = onPost;
+    this.onObject = onObject;
     this.onMetadata = onMetadata;
     this.onRequestPosts = onRequestPosts;
-    this.onPostsBatch = onPostsBatch;
+    this.onObjectsBatch = onObjectsBatch;
     this.onSignal = onSignal;
     this.onOpen = onOpen;
     this.onClose = onClose;
@@ -278,20 +278,8 @@ export class PeerConnectionManager {
             this.onMessageAck(peerId, parsed.messageId);
             return;
           }
-          if (parsed?.type === 'signed-post' && parsed.post) {
-            this.onPost(peerId, parsed.post);
-            return;
-          }
           if (parsed?.type === 'metadata' && parsed.metadata) {
             this.onMetadata(peerId, parsed.metadata);
-            return;
-          }
-          if (parsed?.type === 'request-posts') {
-            this.onRequestPosts(peerId, typeof parsed.since === 'string' ? parsed.since : null, Number(parsed.limit ?? 100));
-            return;
-          }
-          if (parsed?.type === 'posts-batch' && Array.isArray(parsed.posts)) {
-            this.onPostsBatch(peerId, parsed.posts, Array.isArray(parsed.recommendations) ? parsed.recommendations : undefined);
             return;
           }
         } catch {
@@ -305,7 +293,20 @@ export class PeerConnectionManager {
   private handleMyceliumPacket(packet: any) {
     const peerId = this.remoteId ?? packet.sender ?? '<unknown>';
     switch (packet.type) {
-      case 'OBJECT_STORE':
+      case 'OBJECT_STORE': {
+        const object = packet.payload?.object;
+        if (object && typeof object === 'object' && !Array.isArray(object)) {
+          this.onObject(peerId, object as DistributedObject);
+        }
+        return;
+      }
+      case 'OBJECT_BATCH': {
+        const objects = packet.payload?.objects;
+        if (Array.isArray(objects)) {
+          this.onObjectsBatch(peerId, objects as DistributedObject[]);
+        }
+        return;
+      }
       case 'FIND':
       case 'FIND_RESPONSE': {
         this.onObjectPacket?.(peerId, packet as ObjectPacket);
@@ -373,21 +374,6 @@ export class PeerConnectionManager {
           typeof packet.payload?.since === 'string' ? packet.payload.since : null,
           Number(packet.payload?.limit ?? 100)
         );
-        return;
-      }
-      case 'POST_BATCH': {
-        const posts = packet.payload?.posts;
-        const recommendations = packet.payload?.recommendations;
-        if (Array.isArray(posts)) {
-          this.onPostsBatch(peerId, posts as SignedPost[], Array.isArray(recommendations) ? recommendations as SignedPost[] : undefined);
-        }
-        return;
-      }
-      case 'POST': {
-        const post = packet.payload?.post;
-        if (post) {
-          this.onPost(peerId, post as SignedPost);
-        }
         return;
       }
       case 'GOODBYE': {
@@ -514,12 +500,8 @@ export class PeerConnectionManager {
     return messageId;
   }
 
-  public sendSignedPost(post: SignedPost) {
-    if (this.remoteSupportsMyp) {
-      void this.sendPacket('POST', { post });
-      return;
-    }
-    this.sendLegacyPayload('signed-post', { post });
+  public sendObject(object: DistributedObject) {
+    void this.sendPacket('OBJECT_STORE', { object });
   }
 
   public sendMetadata(metadata: PeerMetadata) {
@@ -536,22 +518,11 @@ export class PeerConnectionManager {
   }
 
   public sendRequestPosts(since: string | null = null, limit = 100) {
-    if (this.remoteSupportsMyp) {
-      void this.sendPacket('POST_REQUEST', {
-        since,
-        limit
-      });
-      return;
-    }
-    this.sendLegacyPayload('request-posts', { since, limit });
+    void this.sendPacket('POST_REQUEST', { since, limit });
   }
 
-  public sendPostsBatch(posts: SignedPost[], recommendations: SignedPost[] = []) {
-    if (this.remoteSupportsMyp) {
-      void this.sendPacket('POST_BATCH', { posts, recommendations });
-      return;
-    }
-    this.sendLegacyPayload('posts-batch', { posts, recommendations });
+  public sendObjectsBatch(objects: DistributedObject[]) {
+    void this.sendPacket('OBJECT_BATCH', { objects });
   }
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {

@@ -4,9 +4,8 @@ import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2
 import { PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deletePost, deleteDirectChatMessage } from './storage/idb';
-import { createSignedPost, verifySignedPost } from './crypto/signed';
-import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
+import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
+import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
@@ -18,10 +17,10 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, buildTimeRangeFindPacket, createObjectIdentity, createSignedObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
-import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
+import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
 
 interface IdentityRecord {
   key: string;
@@ -104,7 +103,7 @@ function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
-  const postsRef = useRef<StoredPost[]>([]);
+  const postViewsRef = useRef<LocalPostView[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
   const outboundAckTimersRef = useRef<Record<string, number>>({});
   const outboundChatMessageIdsRef = useRef<Record<string, string>>({});
@@ -126,7 +125,7 @@ function App() {
   const [messageQueue, setMessageQueue] = useState<Record<string, QueuedMessage[]>>({});
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [posts, setPosts] = useState<StoredPost[]>([]);
+  const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [page, setPage] = useState<PageKey>('home');
   const [profileContactId, setProfileContactId] = useState<string | null>(null);
   const [chatContactId, setChatContactId] = useState<string | null>(null);
@@ -152,7 +151,7 @@ function App() {
     chat: 0,
     settings: 0
   });
-  const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
+  const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
   const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
@@ -175,6 +174,9 @@ function App() {
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
+  const localPostMetadataStoreRef = useRef<LocalPostMetadataStore | null>(null);
+  const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
+  const recommendationIndexRef = useRef(new RecommendationIndex());
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
@@ -183,6 +185,12 @@ function App() {
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore();
+  }
+  if (!localPostMetadataStoreRef.current) {
+    localPostMetadataStoreRef.current = new IndexedDbLocalPostMetadataStore();
+  }
+  if (!recommendationSequenceStoreRef.current) {
+    recommendationSequenceStoreRef.current = new IndexedDbRecommendationSequenceStore();
   }
   if (!objectTransportRef.current) {
     objectTransportRef.current = new PeerConnectionObjectTransport(() => peerManagersRef.current);
@@ -205,8 +213,32 @@ function App() {
   }, [contacts]);
 
   useEffect(() => {
-    postsRef.current = posts;
-  }, [posts]);
+    postViewsRef.current = postViews;
+  }, [postViews]);
+
+  useEffect(() => {
+    const objectStore = objectStoreRef.current;
+    const metadataStore = localPostMetadataStoreRef.current;
+    if (!objectStore || !metadataStore) return;
+    void hydratePostViews(objectStore, metadataStore, (error) => {
+      addLog(`Post hydration failed: ${error instanceof Error ? error.message : String(error)}`);
+    }).then((hydratedViews) => {
+      setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
+    });
+  }, []);
+
+  useEffect(() => {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    void store.query({ object_type: 'mycelium.recommendation' }).then((objects) => {
+      recommendationIndexRef.current.rebuild(objects);
+    });
+  }, []);
+
+  const getRecommendationSummary = (postId: string): RecommendationSummary => {
+    const followedAuthors = contactsRef.current.filter((contact) => contact.followed).map((contact) => contact.publicKey);
+    return recommendationIndexRef.current.getSummary(postId, followedAuthors, identityRef.current?.publicKey);
+  };
 
   useEffect(() => {
     messageQueueRef.current = messageQueue;
@@ -873,24 +905,24 @@ function App() {
           socket.send(JSON.stringify(signal));
         }
       },
-      async (peer: string, post: SignedPost) => {
+      async (peer: string, object: DistributedObject) => {
         if (!isCurrentManager(peer)) return;
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} post ignored`);
           return;
         }
-        const valid = await verifySignedPost(post);
-        const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
-        const stored: StoredPost = {
-          ...post,
-          source: 'peer',
-          receivedAt: new Date().toISOString(),
-          valid,
-          authorFingerprint
-        };
-        await savePost(stored);
-        setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
-        addLog(`Received ${valid ? 'verified' : 'invalid'} post from ${peer}`);
+        if (!(await validateObject(object))) {
+          addLog(`Rejected invalid object from ${peer}`);
+          return;
+        }
+        await objectStoreRef.current?.put(object);
+        recommendationIndexRef.current.add(object);
+        const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+        const view = object.object_type === 'mycelium.post'
+          ? createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' })
+          : null;
+        if (view) setPostViews((prev) => upsertLocalPostView(prev, view));
+        addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
       (peer: string, metadata: PeerMetadata) => {
         if (!isCurrentManager(peer)) return;
@@ -911,77 +943,43 @@ function App() {
           return;
         }
 
-        const sinceMs = since ? Date.parse(since) : 0;
-        const feedPosts = postsRef.current
-          .filter((post) => !isBlockedPost(post))
-          .filter((post) => {
-            const authorFingerprint = post.authorFingerprint ?? post.author;
-            return authorFingerprint === identityRef.current?.id
-              || post.author === identityRef.current?.publicKey
-              || contactsRef.current.some((contact) => contact.followed && (contact.fingerprint === authorFingerprint || contact.publicKey === post.author));
-          })
-          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, Math.max(1, limit));
-
-        const recommendations = postsRef.current
-          .filter((post) => post.isRecommendation && post.recommendedBy)
-          .filter((post) => !isBlockedPost(post))
-          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, Math.max(1, limit));
+        const store = objectStoreRef.current;
+        const feedObjects = store && identityRef.current
+          ? await queryFeedObjectsForPeer(store, identityRef.current.publicKey, { since, limit: Math.max(1, limit) })
+          : [];
 
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendPostsBatch(feedPosts, recommendations);
-          addLog(`Sent ${feedPosts.length} posts and ${recommendations.length} recommendations to ${peer}`);
+          manager.sendObjectsBatch(feedObjects);
+          addLog(`Sent ${feedObjects.length} canonical posts to ${peer}`);
         }
       },
-      async (peer: string, posts: SignedPost[], recommendations: SignedPost[] = []) => {
+      async (peer: string, objects: DistributedObject[]) => {
         if (!isCurrentManager(peer)) return;
-        const uniqueById = new Map<string, StoredPost>();
-        const allPosts = [...posts, ...recommendations];
-
-        for (const post of allPosts) {
-          const valid = await verifySignedPost(post);
-          const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
-          const stored: StoredPost = {
-            ...post,
-            source: 'peer',
-            receivedAt: new Date().toISOString(),
-            valid,
-            authorFingerprint,
-            isRecommendation: recommendations.some((recommendation) => recommendation.id === post.id),
-            recommendedBy: recommendations.some((recommendation) => recommendation.id === post.id) ? peer : undefined
-          };
-          uniqueById.set(stored.id, stored);
-        }
-
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} batch ignored`);
           return;
         }
 
-        for (const stored of uniqueById.values()) {
-          await savePost(stored);
+        const uniqueById = new Map<string, DistributedObject>();
+        for (const object of objects) {
+          if (await validateObject(object)) uniqueById.set(object.object_id, object);
+        }
+        const receivedViews: LocalPostView[] = [];
+        for (const object of uniqueById.values()) {
+          await objectStoreRef.current?.put(object);
+          recommendationIndexRef.current.add(object);
+          const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+          if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
         }
 
-        setPosts((prev) => {
-          const merged = new Map<string, StoredPost>();
-          for (const existing of prev) {
-            merged.set(existing.id, existing);
-          }
-          for (const next of uniqueById.values()) {
-            merged.set(next.id, next);
-          }
-          return [...merged.values()].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        });
+        setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
         // Only advance the cursor when something was actually received, and use the newest
         // post timestamp (not wall-clock now) so an empty/partial batch never causes older,
         // not-yet-synced posts to become permanently unreachable on future requests.
-        if (allPosts.length > 0) {
-          const latestTimestamp = allPosts.reduce(
-            (latest, post) => Math.max(latest, new Date(post.timestamp).getTime()),
+        if (uniqueById.size > 0) {
+          const latestTimestamp = [...uniqueById.values()].reduce(
+            (latest, object) => Math.max(latest, new Date(object.created_at).getTime()),
             0
           );
           const cursorKey = `myceliumHomeSync:${peer}`;
@@ -991,7 +989,7 @@ function App() {
             localStorage.setItem(cursorKey, new Date(latestTimestamp).toISOString());
           }
         }
-        addLog(`Received ${allPosts.length} posts and recommendations from ${peer}`);
+        addLog(`Received ${uniqueById.size} canonical posts from ${peer}`);
       },
       async (peer: string) => {
         if (!isCurrentManager(peer)) return;
@@ -1184,8 +1182,6 @@ function App() {
     async function loadLocalData() {
       const cs = await loadContacts();
       setContacts(dedupeContactsByFingerprint(cs || []));
-      const ps = await loadPosts();
-      setPosts(ps || []);
       const loadedDirectMessages = await loadDirectChatMessages();
       const groupedDirectMessages = loadedDirectMessages.reduce((acc, message) => {
         acc[message.peerId] = [
@@ -1473,52 +1469,59 @@ function App() {
     addLog(`Removed contact`);
   }
 
-  const handleHidePost = (postId: string) => {
+  const handleHidePost = async (postId: string) => {
     setHiddenPostIds((prev) => {
       const next = new Set(prev);
       next.add(postId);
       localStorage.setItem('hiddenPosts', JSON.stringify(Array.from(next)));
       return next;
     });
+    const target = postViews.find((post) => post.object.object_id === postId);
+    if (target) {
+      await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
+      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+    }
   };
 
-  const handleHideDiscoveryPost = (postId: string) => {
+  const handleHideDiscoveryPost = async (postId: string) => {
     setHiddenDiscoveryIds((prev) => {
       const next = new Set(prev);
       next.add(postId);
       localStorage.setItem('hiddenDiscovery', JSON.stringify(Array.from(next)));
       return next;
     });
-  };
-
-  const handleLikePost = async (postId: string) => {
-    const target = discoveryPosts.find((post) => post.id === postId) ?? posts.find((post) => post.id === postId);
-    if (target && identity && target.author !== identity.id && target.author !== identity.publicKey) {
-      const isLiked = target.reaction === 'like' && target.recommendedBy === identity.id;
-      const next = {
-        ...target,
-        reaction: isLiked ? undefined : 'like' as const,
-        isRecommendation: !isLiked,
-        recommendedBy: isLiked ? undefined : identity.id
-      } as StoredPost;
-      setPosts((prev) => {
-        const hasPost = prev.some((post) => post.id === postId);
-        return hasPost ? prev.map((post) => (post.id === postId ? { ...post, ...next } : post)) : [next, ...prev];
-      });
-      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      await savePost(next);
-      addLog(`Liked post ${postId}`);
+    const target = discoveryPosts.find((post) => post.object.object_id === postId);
+    if (target) {
+      await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
+      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
     }
   };
 
-  const handleDislikePost = async (postId: string) => {
-    const target = posts.find((post) => post.id === postId) ?? discoveryPosts.find((post) => post.id === postId);
+  const handleLikePost = async (objectId: string) => {
+    const target = discoveryPosts.find((post) => post.object.object_id === objectId) ?? postViews.find((post) => post.object.object_id === objectId);
+    if (target && identity && target.object.author !== identity.publicKey) {
+      const isLiked = target.reaction === 'like' && target.recommendedBy === identity.id;
+      const next = { ...target, reaction: isLiked ? undefined : 'like' as const, isRecommendation: !isLiked, recommendedBy: isLiked ? undefined : identity.id };
+      const sequence = await recommendationSequenceStoreRef.current!.next(identity.publicKey);
+      const recommendation = await createSignedRecommendationObject(objectId, isLiked ? 'withdraw' : 'recommend', sequence, createObjectIdentity(identity));
+      await objectStoreRef.current?.put(recommendation);
+      recommendationIndexRef.current.add(recommendation);
+      setPostViews((prev) => upsertLocalPostView(prev, next));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      addLog(`Liked post ${objectId}`);
+    }
+  };
+
+  const handleDislikePost = async (objectId: string) => {
+    const target = postViews.find((post) => post.object.object_id === objectId) ?? discoveryPosts.find((post) => post.object.object_id === objectId);
     if (target) {
-      const next = { ...target, reaction: 'dislike', notInterested: true } as StoredPost;
-      setPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      await savePost(next);
-      addLog(`Disliked post ${postId}`);
+      const next = { ...target, reaction: 'dislike' as const, notInterested: true };
+      setPostViews((prev) => upsertLocalPostView(prev, next));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      addLog(`Disliked post ${objectId}`);
     }
   };
 
@@ -1537,36 +1540,30 @@ function App() {
         ...(replyTo ? { reply_to: replyTo } : {})
       },
       replication_policy: {}
-    }, objectIdentity);
+    }, objectIdentity) as PostObject;
     const objectStore = objectStoreRef.current;
     if (!objectStore) throw new Error('Object store is unavailable');
     await objectStore.put(postObject);
 
-    // Legacy projection remains temporary until direct-send and discovery migrate.
-    const signed = await createSignedPost(await sha256(identity.publicKey + Date.now().toString()), identity.publicKey, identity.privateKey, content, tags, { replyTo });
-    const stored: StoredPost = {
-      ...signed,
-      source: 'local',
-      receivedAt: new Date().toISOString(),
-      valid: true,
-      replyCount: 0,
-      authorFingerprint: identity.id
-    };
+    const localPostView = createLocalPostView(postObject, identity.id, { source: 'local' });
+    setPostViews((prev) => upsertLocalPostView(prev, localPostView));
+    await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
+
     addLog(`Created and stored object post ${postObject.object_id}`);
     setNewPostContent('');
     setNewPostTags('');
 
     if (replyTo) {
-      const targetPost = posts.find((post) => post.id === replyTo);
+      const targetPost = postViews.find((post) => post.object.object_id === replyTo);
       const targetPeer = targetPost
-        ? await resolvePostAuthorFingerprint(targetPost.author)
+        ? targetPost.authorFingerprint
         : undefined;
       if (targetPost && targetPeer && identity) {
         const replyIdentity = createObjectIdentity(identity);
         const replyObject = await createSignedObject({
           object_type: 'mycelium.reply',
           created_at: new Date().toISOString(),
-          payload: { post: signed } as any,
+          payload: createReplyObjectPayload(replyTo),
           replication_policy: {}
         }, replyIdentity);
         const replyResult = await sendReplyToAuthor(identity.id, replyObject, objectTransportRef.current!, targetPeer, (packet) => signString(identity.privateKey, canonicalize(packet)));
@@ -1579,8 +1576,8 @@ function App() {
     Object.entries(peerManagersRef.current).forEach(([peerId, manager]) => {
       const contact = contacts.find((c) => c.fingerprint === peerId);
       if (contact?.followed && contact.connected && manager) {
-        manager.sendSignedPost(stored);
-        addLog(`Shared post with connected followed peer ${peerId}`);
+        manager.sendObject(postObject);
+        addLog(`Shared canonical post ${postObject.object_id} with connected followed peer ${peerId}`);
       }
     });
 
@@ -1588,8 +1585,8 @@ function App() {
       const socket = signallingSocketRef.current;
       if (socket && socket.readyState === WebSocket.OPEN) {
         try {
-          await publishPost(signed, socket);
-          addLog('Published post to discovery');
+          await publishObject(postObject, socket);
+          addLog('Published canonical object to discovery');
         } catch (err: any) {
           addLog(`Discovery publish failed: ${err.message}`);
         }
@@ -1600,8 +1597,8 @@ function App() {
   }
 
   const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
-  const isBlockedPost = (post: StoredPost) => blockedPeerSet.has(post.author) || Boolean(post.authorFingerprint && blockedPeerSet.has(post.authorFingerprint));
-  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !isBlockedPost(post));
+  const isBlockedPost = (post: LocalPostView) => blockedPeerSet.has(post.object.author) || blockedPeerSet.has(post.authorFingerprint);
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.object.object_id) && !isBlockedPost(post));
 
   const visibleContacts = useMemo(
     () => contacts.filter((contact) => {
@@ -1613,44 +1610,43 @@ function App() {
   );
 
   const discoverFeedPosts = useMemo(() => {
-    return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
   }, [visibleDiscoveryPosts]);
 
   const visibleHomePosts = useMemo(() => {
     const followedContacts = contacts.filter((contact) => contact.followed);
-    const isByFollowedAuthor = (post: StoredPost) => {
-      const authorFingerprint = post.authorFingerprint ?? post.author;
-      return followedContacts.some((contact) => contact.fingerprint === authorFingerprint || contact.publicKey === post.author);
+    const isByFollowedAuthor = (post: LocalPostView) => {
+      return followedContacts.some((contact) => contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author);
     };
 
-    const authoredByFollowed = posts
-      .filter((post) => !hiddenPostIds.has(post.id))
+    const authoredByFollowed = postViews
+      .filter((post) => !hiddenPostIds.has(post.object.object_id))
       .filter((post) => !isBlockedPost(post))
       .filter((post) => isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
 
-    const likedByFollowed = posts
-      .filter((post) => !hiddenPostIds.has(post.id))
+    const likedByFollowed = postViews
+      .filter((post) => !hiddenPostIds.has(post.object.object_id))
       .filter((post) => !isBlockedPost(post))
       .filter((post) => post.reaction === 'like')
-      .filter((post) => post.author && post.author !== 'local' && isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      .filter((post) => isByFollowedAuthor(post))
+      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
 
     const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes);
     const totalItems = 30;
     const authoredQuota = Math.floor((totalItems * myProfile.feedMix.followedAuthors) / totalRatio);
     const likedQuota = Math.max(0, totalItems - authoredQuota);
 
-    const selected: StoredPost[] = [];
+    const selected: LocalPostView[] = [];
     const seen = new Set<string>();
 
-    const take = (source: StoredPost[], maxItems: number) => {
+    const take = (source: LocalPostView[], maxItems: number) => {
       let remaining = maxItems;
       for (const item of source) {
         if (selected.length >= totalItems || remaining <= 0) break;
-        if (seen.has(item.id)) continue;
+        if (seen.has(item.object.object_id)) continue;
         selected.push(item);
-        seen.add(item.id);
+        seen.add(item.object.object_id);
         remaining -= 1;
       }
     };
@@ -1659,30 +1655,30 @@ function App() {
     take(likedByFollowed, likedQuota);
 
     const fallback = [...authoredByFollowed, ...likedByFollowed]
-      .filter((item) => !seen.has(item.id))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      .filter((item) => !seen.has(item.object.object_id))
+      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
 
     for (const item of fallback) {
       if (selected.length >= totalItems) break;
       selected.push(item);
-      seen.add(item.id);
+      seen.add(item.object.object_id);
     }
 
-    return selected.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [posts, hiddenPostIds, contacts, myProfile.feedMix]);
+    return selected.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
+  }, [postViews, hiddenPostIds, contacts, myProfile.feedMix]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
   const profilePosts = profileContactId
-    ? posts
+    ? postViews
       // post.author is the raw public key, not the fingerprint - match on authorFingerprint too
-      .filter((post) => profileAuthorIds.has(post.authorFingerprint ?? post.author) || profileAuthorIds.has(post.author))
+      .filter((post) => profileAuthorIds.has(post.authorFingerprint) || profileAuthorIds.has(post.object.author))
       .filter((post) => !isBlockedPost(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
-    ? posts.filter((post) => post.recommendedBy === profileContactId && !isBlockedPost(post)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? postViews.filter((post) => post.recommendedBy === profileContactId && !isBlockedPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
   const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
@@ -1727,8 +1723,8 @@ function App() {
       return nextProfile;
     });
     setContacts((prev) => prev.filter((candidate) => candidate.fingerprint !== peerId));
-    setPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
-    setDiscoveryPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
+    setPostViews((prev) => prev.filter((post) => post.authorFingerprint !== peerId && post.object.author !== peerId));
+    setDiscoveryPosts((prev) => prev.filter((post) => post.object.author !== peerId && post.authorFingerprint !== peerId));
     setDirectChats((prev) => {
       const next = { ...prev };
       delete next[peerId];
@@ -1821,84 +1817,32 @@ function App() {
     addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(socket, 20);
-      const verifiedPosts = await Promise.all(items.map(async (post) => {
-        const cachedPost = posts.find((cached) => cached.id === post.id);
-        try {
-          const valid = await verifySignedPost(post);
+      const verifiedPosts = (await Promise.all(items.map(async (object) => {
+          if (object.object_type !== 'mycelium.post' || !(await validateObject(object))) return null;
+          const cachedPost = discoveryPosts.find((cached) => cached.object.object_id === object.object_id)
+            ?? postViews.find((cached) => cached.object.object_id === object.object_id);
           const knownContact = contactsRef.current.find((contact) =>
-            contact.fingerprint === post.author || contact.publicKey === post.author
+            contact.fingerprint === object.author || contact.publicKey === object.author
           );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
+          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-          return {
-            ...post,
-            ...(cachedPost ? {
-              reaction: cachedPost.reaction,
-              isRecommendation: cachedPost.isRecommendation,
-              recommendedBy: cachedPost.recommendedBy,
-              authorFingerprint: cachedPost.authorFingerprint,
-              authorDisplayName: cachedPost.authorDisplayName
-            } : {}),
-            source: 'discovery' as const,
-            receivedAt: new Date().toISOString(),
-            valid,
-            authorFingerprint,
-            authorDisplayName: authorDisplayName || undefined
-          };
-        } catch {
-          const knownContact = contactsRef.current.find((contact) =>
-            contact.fingerprint === post.author || contact.publicKey === post.author
-          );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
-          const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-          return {
-            ...post,
-            ...(cachedPost ? {
-              reaction: cachedPost.reaction,
-              isRecommendation: cachedPost.isRecommendation,
-              recommendedBy: cachedPost.recommendedBy,
-              authorFingerprint: cachedPost.authorFingerprint,
-              authorDisplayName: cachedPost.authorDisplayName
-            } : {}),
-            source: 'discovery' as const,
-            receivedAt: new Date().toISOString(),
-            valid: false,
-            authorFingerprint,
-            authorDisplayName: authorDisplayName || undefined
-          };
-        }
-      }));
-      setDiscoveryPosts(verifiedPosts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
+          return createLocalPostView(object as PostObject, authorFingerprint, {
+              source: 'discovery',
+              reaction: cachedPost?.reaction,
+              isRecommendation: cachedPost?.isRecommendation,
+              recommendedBy: cachedPost?.recommendedBy,
+              authorDisplayName: authorDisplayName || cachedPost?.authorDisplayName
+          });
+      }))).filter((view): view is LocalPostView => view !== null);
+      setDiscoveryPosts((prev) => {
+        const merged = mergeLocalPostViews(prev, verifiedPosts);
+        return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
+      });
       addLog(`Fetched ${verifiedPosts.length} discovery posts`);
     } catch (err: any) {
       const message = err?.message || String(err);
       addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);
     }
-  }
-
-  async function handleSaveDiscoveryPost(post: SignedPost) {
-    if (blockedPeersRef.current.has(post.author)) {
-      addLog(`Blocked peer ${post.author} discovery post ignored`);
-      return;
-    }
-    const valid = await verifySignedPost(post);
-    const knownContact = contactsRef.current.find((contact) =>
-      contact.fingerprint === post.author || contact.publicKey === post.author
-    );
-    const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
-    const stored: StoredPost = {
-      ...post,
-      source: 'discovery',
-      receivedAt: new Date().toISOString(),
-      valid,
-      authorFingerprint,
-      authorDisplayName: resolveAuthorDisplayName(authorFingerprint, knownContact) || undefined
-    };
-    await addKnownPeer(post.author);
-    await savePost(stored);
-    setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
-    await saveDiscoveryInteraction({ id: post.id, type: 'saved', timestamp: new Date().toISOString() });
-    addLog(`Saved discovery post locally (${valid ? 'verified' : 'invalid'})`);
   }
 
   async function handleCreateIdentity() {
@@ -2048,24 +1992,16 @@ function App() {
   }
 
   async function handleClearOldPeerCache() {
-    const confirmed = window.confirm('Clear cached peer posts and messages older than one week? This keeps your identity, contacts, and local posts.');
+    const confirmed = window.confirm('Clear cached peer messages older than one week? This keeps your identity, contacts, and local posts.');
     if (!confirmed) return;
 
     const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const remotePosts = await loadPosts();
-    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local' && new Date(post.receivedAt).getTime() <= cutoff);
-    for (const post of stalePeerPosts) {
-      await deletePost(post.id);
-    }
-
     const chatEntries = await loadDirectChatMessages();
     const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine && new Date(entry.timestamp).getTime() <= cutoff);
     for (const entry of stalePeerMessages) {
       await deleteDirectChatMessage(entry.id);
     }
 
-    const refreshedPosts = await loadPosts();
-    setPosts(refreshedPosts);
     const refreshedChats = await loadDirectChatMessages();
     const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
       acc[message.peerId] = [
@@ -2081,18 +2017,12 @@ function App() {
     }, {} as Record<string, ChatEntry[]>);
     setDirectChats(groupedDirectMessages);
 
-    addLog(`Cleared peer cache older than 7 days (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+    addLog(`Cleared peer cache older than 7 days (0 posts, ${stalePeerMessages.length} messages)`);
   }
 
   async function handleClearAllPeerCache() {
-    const confirmed = window.confirm('Clear all cached peer messages and posts? This will not delete your identity, contacts, or your own posts.');
+    const confirmed = window.confirm('Clear all cached peer messages? This will not delete your identity, contacts, or your own posts.');
     if (!confirmed) return;
-
-    const remotePosts = await loadPosts();
-    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local');
-    for (const post of stalePeerPosts) {
-      await deletePost(post.id);
-    }
 
     const chatEntries = await loadDirectChatMessages();
     const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine);
@@ -2100,8 +2030,6 @@ function App() {
       await deleteDirectChatMessage(entry.id);
     }
 
-    const refreshedPosts = await loadPosts();
-    setPosts(refreshedPosts);
     const refreshedChats = await loadDirectChatMessages();
     const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
       acc[message.peerId] = [
@@ -2117,7 +2045,7 @@ function App() {
     }, {} as Record<string, ChatEntry[]>);
     setDirectChats(groupedDirectMessages);
 
-    addLog(`Cleared all peer cache entries (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+    addLog(`Cleared all peer cache entries (0 posts, ${stalePeerMessages.length} messages)`);
   }
 
   async function handleClearIdentity() {
@@ -2142,7 +2070,7 @@ function App() {
 
     setIdentity(null);
     setContacts([]);
-    setPosts([]);
+    setPostViews([]);
     setDiscoveryPosts([]);
     setDirectChats({});
     setMessageQueue({});
@@ -2673,12 +2601,14 @@ function App() {
     }
   }
 
-  function handleSendPostToPeer(post: StoredPost) {
+  async function handleSendPostToPeer(post: LocalPostView) {
     if (!selectedContactId) return;
     const manager = peerManagersRef.current[selectedContactId];
     if (!manager || selectedContactId !== activePeerId) return;
-    manager.sendSignedPost(post);
-    addLog(`Sent post ${post.id} to peer ${selectedContactId}`);
+    const object = await objectStoreRef.current?.get(post.object.object_id);
+    if (!object) return;
+    manager.sendObject(object);
+    addLog(`Sent canonical object ${object.object_id} to peer ${selectedContactId}`);
   }
 
   const connectedPeersCount = connectedPeerIds.length;
@@ -2790,7 +2720,6 @@ function App() {
             onDislike={handleDislikePost}
             onHide={handleHideDiscoveryPost}
             onBlock={handleBlockPeer}
-            onSave={handleSaveDiscoveryPost}
           />
         )}
 
@@ -2814,8 +2743,8 @@ function App() {
         {page === 'myProfile' && myProfileContact && (
           <ProfilePage
             contact={myProfileContact}
-            posts={posts.filter((post) => post.author === identity?.id || post.author === identity?.publicKey || post.authorFingerprint === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
-            likedPosts={posts.filter((post) => post.recommendedBy === identity?.id && post.author !== identity?.id && post.author !== identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            posts={postViews.filter((post) => post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            likedPosts={postViews.filter((post) => post.recommendedBy === identity?.id && post.object.author !== identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -2910,7 +2839,7 @@ function App() {
             identityId={identity?.id ?? ''}
             publicKey={identity?.publicKey ?? ''}
             contacts={contacts.length}
-            posts={posts.length}
+            posts={postViews.length}
             logs={logs}
             onClearLogs={() => setLogs([])}
             signalEndpoint={signalEndpoint}

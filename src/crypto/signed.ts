@@ -1,22 +1,5 @@
 import { importPrivateKey, importPublicKey } from './identity';
-import type { SignedPost, SignedProfile } from '../types';
-
-function canonicalizePost(post: Omit<SignedPost, 'signature'>): string {
-  return JSON.stringify({
-    protocol: post.protocol,
-    version: post.version,
-    type: post.type,
-    id: post.id,
-    author: post.author,
-    timestamp: post.timestamp,
-    content: post.content,
-    tags: post.tags,
-    reaction: post.reaction ?? undefined,
-    repostOf: post.repostOf ?? undefined,
-    originalAuthor: post.originalAuthor ?? undefined,
-    replyTo: post.replyTo ?? undefined
-  });
-}
+import type { SignedProfile } from '../types';
 
 function canonicalizeProfile(profile: Omit<SignedProfile, 'signature'>): string {
   return JSON.stringify({
@@ -51,55 +34,6 @@ async function verifyData(publicKeyBase64: string, data: string, signatureBase64
     signature,
     new TextEncoder().encode(data)
   );
-}
-
-export async function createSignedPost(
-  id: string,
-  authorKey: string,
-  privateKey: string,
-  content: string,
-  tags: string[],
-  options: { reaction?: 'like' | 'dislike'; repostOf?: string; originalAuthor?: string; replyTo?: string } = {}
-): Promise<SignedPost> {
-  const post: Omit<SignedPost, 'signature'> = {
-    protocol: 'mycelium',
-    version: 1,
-    type: 'post',
-    id,
-    author: authorKey,
-    timestamp: new Date().toISOString(),
-    content,
-    tags,
-    reaction: options.reaction,
-    repostOf: options.repostOf,
-    originalAuthor: options.originalAuthor,
-    replyTo: options.replyTo
-  };
-
-  const canonical = canonicalizePost(post);
-  const signature = await signData(privateKey, canonical);
-  return { ...post, signature };
-}
-
-export async function verifySignedPost(post: SignedPost): Promise<boolean> {
-  if (post.protocol !== 'mycelium' || post.type !== 'post' || post.version !== 1) {
-    return false;
-  }
-  const canonical = canonicalizePost({
-    protocol: post.protocol,
-    version: post.version,
-    type: post.type,
-    id: post.id,
-    author: post.author,
-    timestamp: post.timestamp,
-    content: post.content,
-    tags: post.tags,
-    reaction: post.reaction,
-    repostOf: post.repostOf,
-    originalAuthor: post.originalAuthor,
-    replyTo: post.replyTo
-  });
-  return verifyData(post.author, canonical, post.signature);
 }
 
 export async function createSignedProfile(

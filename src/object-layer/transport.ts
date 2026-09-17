@@ -1,6 +1,6 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
 import { validateObject } from './envelope';
-import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
+import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
 export const FIND_GRACE_PERIOD_MS = 1000;
@@ -13,6 +13,32 @@ export async function buildObjectStorePacket(
   signer?: PacketSigner
 ): Promise<ObjectPacket> {
   return await buildPacket(sender, recipient, 'OBJECT_STORE', { object }, signer) as ObjectStorePacket;
+}
+
+export async function buildObjectBatchPacket(
+  sender: string,
+  recipient: string,
+  objects: DistributedObject[],
+  signer?: PacketSigner
+): Promise<ObjectBatchPacket> {
+  return await buildPacket(sender, recipient, 'OBJECT_BATCH', { objects }, signer) as ObjectBatchPacket;
+}
+
+export async function queryFeedObjectsForPeer(
+  store: ObjectStore,
+  author: string,
+  options: { since?: string | null; limit?: number } = {}
+): Promise<DistributedObject[]> {
+  const query = {
+    since: options.since ?? undefined,
+    limit: typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined,
+    order: 'created_at_desc' as const
+  };
+  const [posts, recommendations] = await Promise.all([
+    filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.post' }),
+    filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.recommendation', author })
+  ]);
+  return [...posts, ...recommendations].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 }
 
 export async function buildFindPacket(
@@ -135,6 +161,19 @@ export async function receiveObjectPacket(packet: unknown, store: ObjectStore): 
 
   await store.put(object as DistributedObject);
   return true;
+}
+
+export async function receiveObjectBatchPacket(packet: unknown, store: ObjectStore): Promise<DistributedObject[]> {
+  if (!isMyceliumPacket(packet) || packet.type !== 'OBJECT_BATCH') return [];
+  const objects = packet.payload?.objects;
+  if (!Array.isArray(objects)) return [];
+  const validObjects: DistributedObject[] = [];
+  for (const object of objects) {
+    if (!object || typeof object !== 'object' || Array.isArray(object) || !(await validateObject(object))) continue;
+    await store.put(object as DistributedObject);
+    validObjects.push(object as DistributedObject);
+  }
+  return validObjects;
 }
 
 export async function receiveFindResponsePacket(packet: unknown, store: ObjectStore, expectedRequestId?: string): Promise<DistributedObject | null> {

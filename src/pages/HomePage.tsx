@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import type { Contact, StoredPost } from '../types';
+import type { Contact } from '../types';
+import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface HomePageProps {
-  posts: StoredPost[];
+  posts: LocalPostView[];
   contacts: Contact[];
   postText: string;
   onPostTextChange: (value: string) => void;
@@ -12,10 +13,10 @@ interface HomePageProps {
   onRefreshPosts: () => Promise<void> | void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
-  onLike: (postId: string) => void;
-  onDislike: (postId: string) => void;
-  onReply: (postId: string, content?: string, publishToDiscovery?: boolean) => void;
-  onHide: (postId: string) => void;
+  onLike: (objectId: string) => void;
+  onDislike: (objectId: string) => void;
+  onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
+  onHide: (objectId: string) => void;
   isRefreshing?: boolean;
 }
 
@@ -99,12 +100,12 @@ export function HomePage({
       ) : (
         <div className="feed-list">
           {visiblePosts.map((post) => {
-            const authorFingerprint = post.authorFingerprint ?? post.author;
+            const authorFingerprint = post.authorFingerprint;
             const matchingContact = contacts.find((contact) =>
-              contact.fingerprint === authorFingerprint || contact.publicKey === post.author
+              contact.fingerprint === authorFingerprint || contact.publicKey === post.object.author
             );
             const authorName = matchingContact
-              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.author)
+              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.object.author)
               : displayNameOrFallback(post.authorDisplayName, authorFingerprint);
             const recommendationLabel = post.isRecommendation && post.recommendedBy
               ? `Recommended by ${displayNameOrFallback(
@@ -117,23 +118,24 @@ export function HomePage({
                 ? 'Recommended'
                 : undefined;
 
-            const isReplying = replyingToPostId === post.id;
-            const replyText = replyDrafts[post.id] ?? '';
+            const objectId = post.object.object_id;
+            const isReplying = replyingToPostId === objectId;
+            const replyText = replyDrafts[objectId] ?? '';
 
             return (
               <PostCard
-                key={post.id}
+                key={objectId}
                 post={post}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 onAuthorClick={onAuthorClick}
-                onLike={() => onLike(post.id)}
-                onDislike={() => { onDislike(post.id); onHide(post.id); }}
+                onLike={() => onLike(objectId)}
+                onDislike={() => { onDislike(objectId); onHide(objectId); }}
                 onHide={onHide}
                 onReply={() => {
-                  setReplyingToPostId((prev) => (prev === post.id ? null : post.id));
-                  if (replyingToPostId !== post.id) {
-                    setReplyDrafts((drafts) => ({ ...drafts, [post.id]: drafts[post.id] ?? '' }));
+                  setReplyingToPostId((prev) => (prev === objectId ? null : objectId));
+                  if (replyingToPostId !== objectId) {
+                    setReplyDrafts((drafts) => ({ ...drafts, [objectId]: drafts[objectId] ?? '' }));
                   }
                 }}
                 recommendationLabel={recommendationLabel}
@@ -141,7 +143,7 @@ export function HomePage({
                   <>
                     <textarea
                       value={replyText}
-                      onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [post.id]: event.target.value }))}
+                      onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
                       placeholder="Write a reply..."
                     />
                     <label className="checkbox-row">
@@ -157,10 +159,10 @@ export function HomePage({
                         className="btn"
                         type="button"
                         onClick={() => {
-                          const text = (replyDrafts[post.id] ?? '').trim();
+                          const text = (replyDrafts[objectId] ?? '').trim();
                           if (!text) return;
-                          onReply(post.id, text, replyPublishToDiscovery);
-                          setReplyDrafts((drafts) => ({ ...drafts, [post.id]: '' }));
+                          onReply(objectId, text, replyPublishToDiscovery);
+                          setReplyDrafts((drafts) => ({ ...drafts, [objectId]: '' }));
                           setReplyingToPostId(null);
                         }}
                         disabled={!replyText.trim()}
@@ -172,7 +174,7 @@ export function HomePage({
                         type="button"
                         onClick={() => {
                           setReplyingToPostId(null);
-                          setReplyDrafts((drafts) => ({ ...drafts, [post.id]: '' }));
+                          setReplyDrafts((drafts) => ({ ...drafts, [objectId]: '' }));
                         }}
                       >
                         Cancel

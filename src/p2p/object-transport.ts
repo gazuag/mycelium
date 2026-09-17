@@ -30,7 +30,7 @@ export class PeerConnectionObjectTransport implements ObjectTransport {
   }
 
   handlePacket(peerId: string, packet: unknown): void {
-    if (!isMyceliumPacket(packet) || !['OBJECT_STORE', 'FIND', 'FIND_RESPONSE'].includes(packet.type)) return;
+    if (!isMyceliumPacket(packet) || !['OBJECT_STORE', 'OBJECT_BATCH', 'FIND', 'FIND_RESPONSE'].includes(packet.type)) return;
     this.handlers.forEach((handler) => handler(peerId, packet as MyceliumPacket & ObjectPacket));
   }
 }

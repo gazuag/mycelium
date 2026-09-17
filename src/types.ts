@@ -1,7 +1,5 @@
 export type ConnectionState = 'idle' | 'signalling' | 'connecting' | 'connected' | 'disconnected';
 
-export type FeedSource = 'local' | 'peer' | 'discovery';
-
 export interface Contact {
   publicKey: string;
   fingerprint: string;
@@ -27,22 +25,6 @@ export interface PeerMetadata {
   tags?: string[];
 }
 
-export interface SignedPost {
-  protocol: 'mycelium';
-  version: 1;
-  type: 'post';
-  id: string;
-  author: string;
-  timestamp: string;
-  content: string;
-  tags: string[];
-  reaction?: 'like' | 'dislike';
-  repostOf?: string;
-  originalAuthor?: string;
-  replyTo?: string;
-  signature: string;
-}
-
 export interface SignedProfile {
   protocol: 'mycelium';
   version: 1;
@@ -54,22 +36,6 @@ export interface SignedProfile {
   bio?: string;
   tags?: string[];
   signature: string;
-}
-
-export interface StoredPost extends SignedPost {
-  source: FeedSource;
-  receivedAt: string;
-  valid?: boolean;
-  saved?: boolean;
-  liked?: boolean;
-  disliked?: boolean;
-  notInterested?: boolean;
-  seen?: boolean;
-  authorFingerprint?: string;
-  authorDisplayName?: string;
-  isRecommendation?: boolean;
-  recommendedBy?: string;
-  replyCount?: number;
 }
 
 export interface QueuedMessage {

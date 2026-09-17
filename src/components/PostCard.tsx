@@ -1,16 +1,17 @@
-import type { StoredPost } from '../types';
+import type { LocalPostView } from '../object-layer';
+import { postContent, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
 
 interface PostCardProps {
-  post: StoredPost;
+  post: LocalPostView;
   authorName: string;
   authorId: string;
   onAuthorClick: (peerId: string) => void;
   onLike: () => void;
   onDislike: () => void;
-  onHide?: (postId: string) => void;
+  onHide?: (objectId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
@@ -47,24 +48,24 @@ export function PostCard({
             {keyLabel ? <span className="note">{keyLabel}</span> : null}
           </button>
         </div>
-        <span className="note">{new Date(post.timestamp).toLocaleString()}</span>
+        <span className="note">{new Date(post.object.created_at).toLocaleString()}</span>
       </div>
 
       {recommendationLabel ? (
         <div className="recommendation-badge">{recommendationLabel}</div>
       ) : null}
 
-      <p className="post-content">{post.content}</p>
+      <p className="post-content">{postContent(post)}</p>
 
-      {post.tags.length > 0 ? (
-        <div className="post-tags">{post.tags.map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
+      {postTags(post).length > 0 ? (
+        <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
       ) : null}
 
       <div className="post-card-actions">
         <div className="post-actions">
           <LikeButton isLiked={post.reaction === 'like'} onToggle={onLike} disabled={isOwnPost} />
           {showDislikeButton && post.reaction !== 'like' ? (
-            <HideButton postId={post.id} onHide={onHide ?? (() => onDislike())} />
+            <HideButton postId={post.object.object_id} onHide={onHide ?? (() => onDislike())} />
           ) : null}
           <button className="chip" onClick={() => onReply()} type="button">Reply</button>
         </div>
