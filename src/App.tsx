@@ -16,6 +16,8 @@ import { ChatPage } from './pages/ChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
+import { HiddenPostList } from './components/HiddenPostList';
+import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
 import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
@@ -133,6 +135,8 @@ function App() {
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
+  const [blockedPeersOpen, setBlockedPeersOpen] = useState(false);
+  const [hiddenPostsOpen, setHiddenPostsOpen] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const blockedPeersRef = useRef<Set<string>>(new Set());
   const [myProfile, setMyProfile] = useState({
@@ -1496,6 +1500,28 @@ function App() {
     }
   };
 
+  const handleUnhidePost = async (postId: string) => {
+    setHiddenPostIds((prev) => {
+      const next = new Set(prev);
+      next.delete(postId);
+      localStorage.setItem('hiddenPosts', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    setHiddenDiscoveryIds((prev) => {
+      const next = new Set(prev);
+      next.delete(postId);
+      localStorage.setItem('hiddenDiscovery', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    const target = postViews.find((post) => post.object.object_id === postId);
+    if (target) {
+      const next = { ...target, hidden: false };
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      setPostViews((prev) => upsertLocalPostView(prev, next));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+    }
+  };
+
   const handleHideDiscoveryPost = async (postId: string) => {
     setHiddenDiscoveryIds((prev) => {
       const next = new Set(prev);
@@ -1614,7 +1640,8 @@ function App() {
 
   const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
   const isBlockedPost = (post: LocalPostView) => blockedPeerSet.has(post.object.author) || blockedPeerSet.has(post.authorFingerprint);
-  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.object.object_id) && !isBlockedPost(post));
+  const isHiddenPost = (post: LocalPostView) => hiddenPostIds.has(post.object.object_id) || hiddenDiscoveryIds.has(post.object.object_id) || post.hidden === true;
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
 
   const visibleContacts = useMemo(
     () => contacts.filter((contact) => {
@@ -1634,7 +1661,7 @@ function App() {
       ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
       ...(identity ? [identity.id, identity.publicKey] : [])
     ]);
-    const computedHomePosts = selectFollowedPosts(postViews, followedAuthorKeys)
+    const computedHomePosts = selectFollowedPosts(postViews.filter((post) => !isHiddenPost(post)), followedAuthorKeys)
       .map((post) => ({
         ...post,
         homeFeedSource: 'followed' as const,
@@ -1642,7 +1669,7 @@ function App() {
       }));
     addLog(`Home feed computed: ${computedHomePosts.length} visible posts (${postViews.length} total in postViews); feedMix=${myProfile.feedMix.followedAuthors}/${myProfile.feedMix.followedLikes}/${myProfile.feedMix.discoveryRandom}; hiddenPostIds=${hiddenPostIds.size}`);
     return computedHomePosts;
-  }, [postViews, contacts, recommendationRevision]);
+  }, [postViews, contacts, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
@@ -1650,6 +1677,7 @@ function App() {
     ? postViews
       // post.author is the raw public key, not the fingerprint - match on authorFingerprint too
       .filter((post) => profileAuthorIds.has(post.authorFingerprint) || profileAuthorIds.has(post.object.author))
+      .filter((post) => !isHiddenPost(post))
       .filter((post) => !isBlockedPost(post))
       .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
@@ -1657,7 +1685,7 @@ function App() {
   const likedProfilePosts = profileContactId
     ? postViews.filter((post) => {
       const summary = getRecommendationSummary(post.object.object_id);
-      return summary.active_recommenders.includes(profileContact?.publicKey ?? profileContactId) && !isBlockedPost(post);
+      return summary.active_recommenders.includes(profileContact?.publicKey ?? profileContactId) && !isHiddenPost(post) && !isBlockedPost(post);
     }).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
@@ -2720,8 +2748,8 @@ function App() {
         {page === 'myProfile' && myProfileContact && (
           <ProfilePage
             contact={myProfileContact}
-            posts={postViews.filter((post) => post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
-            likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            posts={postViews.filter((post) => (post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey) && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -2793,8 +2821,22 @@ function App() {
                   <button className="btn secondary" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
                 </div>
                 <div className="blocked-peers-settings">
-                  <h3>Blocked Peers</h3>
-                  <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
+                  <CollapsibleSection
+                    title="Blocked Peers"
+                    summary={`${myProfile.blockedPeers.length}`}
+                    isOpen={blockedPeersOpen}
+                    onToggle={() => setBlockedPeersOpen((open) => !open)}
+                  >
+                    <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
+                  </CollapsibleSection>
+                  <CollapsibleSection
+                    title="Hidden Posts"
+                    summary={`${postViews.filter((post) => isHiddenPost(post)).length}`}
+                    isOpen={hiddenPostsOpen}
+                    onToggle={() => setHiddenPostsOpen((open) => !open)}
+                  >
+                    <HiddenPostList posts={postViews.filter((post) => isHiddenPost(post))} contacts={contacts} onUnhide={handleUnhidePost} />
+                  </CollapsibleSection>
                 </div>
               </div>
             }

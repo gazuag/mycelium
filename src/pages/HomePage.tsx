@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Contact } from '../types';
 import { postReplyTo, type LocalPostView, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
@@ -28,6 +28,18 @@ export interface HomeFeedPost extends LocalPostView {
 interface ThreadPost {
   post: HomeFeedPost;
   depth: number;
+  parentId?: string;
+}
+
+const HOME_EXPANDED_REPLIES_KEY = 'myceliumHomeExpandedReplies';
+
+function loadExpandedReplyIds(): Set<string> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HOME_EXPANDED_REPLIES_KEY) || '[]');
+    return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
+  } catch {
+    return new Set();
+  }
 }
 
 function threadPosts(posts: HomeFeedPost[]): ThreadPost[] {
@@ -51,7 +63,7 @@ function threadPosts(posts: HomeFeedPost[]): ThreadPost[] {
     const objectId = post.object.object_id;
     if (visited.has(objectId)) return;
     visited.add(objectId);
-    flattened.push({ post, depth });
+    flattened.push({ post, depth, parentId: postReplyTo(post) });
     for (const child of (children.get(objectId) ?? []).sort(newestFirst)) append(child, depth + 1);
   };
 
@@ -81,8 +93,29 @@ export function HomePage({
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
+  const [expandedReplyIds, setExpandedReplyIds] = useState<Set<string>>(loadExpandedReplyIds);
 
-  const visibleThreadPosts = threadPosts(posts).slice(0, visibleCount);
+  useEffect(() => {
+    localStorage.setItem(HOME_EXPANDED_REPLIES_KEY, JSON.stringify(Array.from(expandedReplyIds)));
+  }, [expandedReplyIds]);
+
+  const allThreadPosts = threadPosts(posts);
+  const threadById = new Map(allThreadPosts.map((threadPost) => [threadPost.post.object.object_id, threadPost]));
+  const directReplyCounts = new Map<string, number>();
+  for (const threadPost of allThreadPosts) {
+    if (threadPost.parentId) {
+      directReplyCounts.set(threadPost.parentId, (directReplyCounts.get(threadPost.parentId) ?? 0) + 1);
+    }
+  }
+  const isThreadVisible = (threadPost: ThreadPost) => {
+    let parentId = threadPost.parentId;
+    while (parentId) {
+      if (!expandedReplyIds.has(parentId)) return false;
+      parentId = threadById.get(parentId)?.parentId;
+    }
+    return true;
+  };
+  const visibleThreadPosts = allThreadPosts.filter(isThreadVisible).slice(0, visibleCount);
   const visibleGroups: ThreadPost[][] = [];
   for (const threadPost of visibleThreadPosts) {
     if (threadPost.depth === 0 || visibleGroups.length === 0) {
@@ -216,6 +249,12 @@ export function HomePage({
                         onClick={() => {
                           const text = (replyDrafts[objectId] ?? '').trim();
                           if (!text) return;
+                          setExpandedReplyIds((previous) => {
+                            if (previous.has(objectId)) return previous;
+                            const next = new Set(previous);
+                            next.add(objectId);
+                            return next;
+                          });
                           onReply(objectId, text, replyPublishToDiscovery);
                           setReplyDrafts((drafts) => ({ ...drafts, [objectId]: '' }));
                           setReplyingToPostId(null);
@@ -238,6 +277,21 @@ export function HomePage({
                   </>
                 ) : null}
                 />
+                {(directReplyCounts.get(objectId) ?? 0) > 0 ? (
+                  <button
+                    className="thread-replies-toggle"
+                    type="button"
+                    aria-expanded={expandedReplyIds.has(objectId)}
+                    onClick={() => setExpandedReplyIds((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(objectId)) next.delete(objectId);
+                      else next.add(objectId);
+                      return next;
+                    })}
+                  >
+                    {directReplyCounts.get(objectId)} {directReplyCounts.get(objectId) === 1 ? 'reply' : 'replies'}
+                  </button>
+                ) : null}
               </div>
             );
             })}

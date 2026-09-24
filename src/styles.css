@@ -662,6 +662,22 @@ body, html, #root {
   border-left: 2px solid rgba(255, 255, 255, 0.12);
 }
 
+.thread-replies-toggle {
+  margin: 0.15rem 0 0.65rem 0.75rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #9ed9c8;
+  font: inherit;
+  cursor: pointer;
+}
+
+.thread-replies-toggle:hover,
+.thread-replies-toggle:focus-visible {
+  color: #d5f2e9;
+  text-decoration: underline;
+}
+
 .peer-card {
   display: flex;
   flex-direction: column;
