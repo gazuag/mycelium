@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import type { Contact } from '../types';
-import type { LocalPostView } from '../object-layer';
+import { postReplyTo, type LocalPostView, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface HomePageProps {
-  posts: LocalPostView[];
+  posts: HomeFeedPost[];
   contacts: Contact[];
   postText: string;
   onPostTextChange: (value: string) => void;
@@ -18,6 +18,46 @@ interface HomePageProps {
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   onHide: (objectId: string) => void;
   isRefreshing?: boolean;
+}
+
+export interface HomeFeedPost extends LocalPostView {
+  homeFeedSource?: 'followed' | 'recommendation';
+  recommendationSummary?: RecommendationSummary;
+}
+
+interface ThreadPost {
+  post: HomeFeedPost;
+  depth: number;
+}
+
+function threadPosts(posts: HomeFeedPost[]): ThreadPost[] {
+  const byId = new Map(posts.map((post) => [post.object.object_id, post]));
+  const children = new Map<string, HomeFeedPost[]>();
+  const roots: HomeFeedPost[] = [];
+
+  for (const post of posts) {
+    const parentId = postReplyTo(post);
+    if (!parentId || !byId.has(parentId)) {
+      roots.push(post);
+      continue;
+    }
+    children.set(parentId, [...(children.get(parentId) ?? []), post]);
+  }
+
+  const newestFirst = (left: HomeFeedPost, right: HomeFeedPost) => new Date(right.object.created_at).getTime() - new Date(left.object.created_at).getTime();
+  const flattened: ThreadPost[] = [];
+  const visited = new Set<string>();
+  const append = (post: HomeFeedPost, depth: number) => {
+    const objectId = post.object.object_id;
+    if (visited.has(objectId)) return;
+    visited.add(objectId);
+    flattened.push({ post, depth });
+    for (const child of (children.get(objectId) ?? []).sort(newestFirst)) append(child, depth + 1);
+  };
+
+  for (const root of roots.sort(newestFirst)) append(root, 0);
+  for (const post of posts.sort(newestFirst)) append(post, 0);
+  return flattened;
 }
 
 export function HomePage({
@@ -42,7 +82,15 @@ export function HomePage({
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
 
-  const visiblePosts = posts.slice(0, visibleCount);
+  const visibleThreadPosts = threadPosts(posts).slice(0, visibleCount);
+  const visibleGroups: ThreadPost[][] = [];
+  for (const threadPost of visibleThreadPosts) {
+    if (threadPost.depth === 0 || visibleGroups.length === 0) {
+      visibleGroups.push([threadPost]);
+    } else {
+      visibleGroups[visibleGroups.length - 1].push(threadPost);
+    }
+  }
 
   return (
     <section className="page-view">
@@ -93,13 +141,15 @@ export function HomePage({
         ) : null}
       </div>
 
-      {visiblePosts.length === 0 ? (
+      {visibleThreadPosts.length === 0 ? (
         <div className="empty-state card">
           <p>No posts yet. Follow peers to build your feed.</p>
         </div>
       ) : (
         <div className="feed-list">
-          {visiblePosts.map((post) => {
+          {visibleGroups.map((group) => (
+            <div className="post-thread-group" key={group[0].post.object.object_id}>
+            {group.map(({ post, depth }) => {
             const authorFingerprint = post.authorFingerprint;
             const matchingContact = contacts.find((contact) =>
               contact.fingerprint === authorFingerprint || contact.publicKey === post.object.author
@@ -107,24 +157,28 @@ export function HomePage({
             const authorName = matchingContact
               ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.object.author)
               : displayNameOrFallback(post.authorDisplayName, authorFingerprint);
-            const recommendationLabel = post.isRecommendation && post.recommendedBy
-              ? `Recommended by ${displayNameOrFallback(
-                  contacts.find((contact) =>
-                    contact.fingerprint === post.recommendedBy || contact.publicKey === post.recommendedBy
-                  )?.displayName,
-                  post.recommendedBy
-                )}`
-              : post.isRecommendation
-                ? 'Recommended'
-                : undefined;
+            const recommendationSummary = post.recommendationSummary;
+            const recommenders = recommendationSummary?.followed_recommenders ?? [];
+            const firstRecommender = recommenders[0];
+            const firstRecommenderName = firstRecommender
+              ? displayNameOrFallback(
+                  contacts.find((contact) => contact.fingerprint === firstRecommender || contact.publicKey === firstRecommender)?.displayName,
+                  firstRecommender
+                )
+              : undefined;
+            const recommendationLabel = post.homeFeedSource === 'recommendation' && firstRecommenderName
+              ? recommenders.length === 1
+                ? `${firstRecommenderName} recommends this`
+                : `${firstRecommenderName} and ${recommenders.length - 1} others recommend this`
+              : undefined;
 
             const objectId = post.object.object_id;
             const isReplying = replyingToPostId === objectId;
             const replyText = replyDrafts[objectId] ?? '';
 
             return (
-              <PostCard
-                key={objectId}
+              <div className={`post-thread${depth > 0 ? ' post-thread-reply' : ''}`} style={{ '--thread-depth': depth } as React.CSSProperties} key={objectId}>
+                <PostCard
                 post={post}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
@@ -138,6 +192,7 @@ export function HomePage({
                     setReplyDrafts((drafts) => ({ ...drafts, [objectId]: drafts[objectId] ?? '' }));
                   }
                 }}
+                isLiked={recommendationSummary?.recommended_by_me ?? false}
                 recommendationLabel={recommendationLabel}
                 replyComposer={isReplying ? (
                   <>
@@ -182,9 +237,12 @@ export function HomePage({
                     </div>
                   </>
                 ) : null}
-              />
+                />
+              </div>
             );
-          })}
+            })}
+            </div>
+          ))}
         </div>
       )}
 

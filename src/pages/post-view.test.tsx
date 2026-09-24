@@ -40,6 +40,15 @@ const commonPostProps = {
   onReply: noop
 };
 
+const emptyRecommendationSummary = (postId: string) => ({
+  post_id: postId,
+  active_recommenders: [],
+  active_recommender_count: 0,
+  followed_recommenders: [],
+  followed_recommender_count: 0,
+  recommended_by_me: false
+});
+
 describe('LocalPostView UI migration', () => {
   it('renders PostCard, HomePage, ProfilePage, MyProfilePage, and DiscoverPage from LocalPostView input', () => {
     const view = makeView();
@@ -68,6 +77,7 @@ describe('LocalPostView UI migration', () => {
         onAuthorClick={noop}
         onLike={noop}
         onDislike={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
       />
     );
     const myProfile = renderToStaticMarkup(
@@ -105,6 +115,7 @@ describe('LocalPostView UI migration', () => {
         onLike={noop}
         onDislike={noop}
         onBlock={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
       />
     );
 
@@ -123,5 +134,135 @@ describe('LocalPostView UI migration', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].object.object_id).toBe(local.object.object_id);
     expect(merged[0].source).toBe('peer');
+  });
+
+  it('renders canonical recommendation attribution for one and several recommenders', () => {
+    const oneRecommender = {
+      ...makeView(),
+      homeFeedSource: 'recommendation' as const,
+      recommendationSummary: {
+        post_id: 'a'.repeat(64),
+        active_recommenders: [contact.publicKey],
+        active_recommender_count: 1,
+        followed_recommenders: [contact.publicKey],
+        followed_recommender_count: 1,
+        recommended_by_me: false
+      }
+    };
+    const severalRecommenders = {
+      ...oneRecommender,
+      recommendationSummary: {
+        ...oneRecommender.recommendationSummary,
+        active_recommenders: [contact.publicKey, 'peer-2', 'peer-3', 'peer-4', 'peer-5'],
+        active_recommender_count: 5,
+        followed_recommenders: [contact.publicKey, 'peer-2', 'peer-3', 'peer-4', 'peer-5'],
+        followed_recommender_count: 5
+      }
+    };
+
+    const oneMarkup = renderToStaticMarkup(
+      <HomePage
+        posts={[oneRecommender]}
+        contacts={[contact]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        onRefreshPosts={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+    const severalMarkup = renderToStaticMarkup(
+      <HomePage
+        posts={[severalRecommenders]}
+        contacts={[contact]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        onRefreshPosts={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(oneMarkup).toContain('Author recommends this');
+    expect(severalMarkup).toContain('Author and 4 others recommend this');
+  });
+
+  it('uses canonical own-recommendation state for the like indicator and omits empty attribution', () => {
+    const view = {
+      ...makeView(),
+      homeFeedSource: 'recommendation' as const,
+      recommendationSummary: {
+        post_id: 'a'.repeat(64),
+        active_recommenders: [],
+        active_recommender_count: 0,
+        followed_recommenders: [],
+        followed_recommender_count: 0,
+        recommended_by_me: true
+      }
+    };
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[view]}
+        contacts={[contact]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        onRefreshPosts={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).toContain('aria-pressed="true"');
+    expect(markup).not.toContain('recommend this');
+  });
+
+  it('keeps canonical like state consistent across profile and discover views', () => {
+    const summary = (postId: string) => ({
+      ...emptyRecommendationSummary(postId),
+      recommended_by_me: true
+    });
+    const view = makeView();
+    const profileMarkup = renderToStaticMarkup(
+      <ProfilePage
+        contact={contact}
+        posts={[view]}
+        likedPosts={[]}
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        getRecommendationSummary={summary}
+      />
+    );
+    const discoverMarkup = renderToStaticMarkup(
+      <DiscoverPage
+        discoveryPosts={[view]}
+        contacts={[contact]}
+        onRefreshDiscovery={noop}
+        onAuthorClick={noop}
+        onFollow={noop}
+        onLike={noop}
+        onDislike={noop}
+        onBlock={noop}
+        getRecommendationSummary={summary}
+      />
+    );
+
+    expect(profileMarkup).toContain('aria-pressed="true"');
+    expect(discoverMarkup).toContain('aria-pressed="true"');
   });
 });

@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import type { LocalPostView } from '../object-layer';
+import type { LocalPostView, RecommendationSummary } from '../object-layer';
 import { FollowButton } from '../components/FollowButton';
 import { PostCard } from '../components/PostCard';
 import { BlockButton } from '../components/BlockButton';
@@ -17,9 +17,10 @@ interface DiscoverPageProps {
   onDislike: (objectId: string) => void;
   onHide?: (objectId: string) => void;
   onBlock: (peerId: string) => void;
+  getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock, getRecommendationSummary }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -44,6 +45,7 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
             const authorName = matchedContact
               ? displayNameOrFallback(matchedContact.displayName, authorFingerprint)
               : post.authorDisplayName?.trim() || displayNameOrFallback(undefined, authorFingerprint);
+            const recommendationSummary = getRecommendationSummary(post.object.object_id);
 
             return (
               <PostCard
@@ -55,6 +57,7 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
                 onLike={() => onLike(post.object.object_id)}
                 onDislike={() => onDislike(post.object.object_id)}
                 onReply={() => {} }
+                isLiked={recommendationSummary.recommended_by_me}
                 isOwnPost={authorFingerprint === myPeerId || post.object.author === myPublicKey}
                 showDislikeButton={false}
                 footerActions={

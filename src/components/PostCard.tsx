@@ -13,6 +13,7 @@ interface PostCardProps {
   onDislike: () => void;
   onHide?: (objectId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
+  isLiked?: boolean;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
   replyComposer?: React.ReactNode;
@@ -29,6 +30,7 @@ export function PostCard({
   onDislike,
   onHide,
   onReply,
+  isLiked: isLikedOverride,
   footerActions,
   recommendationLabel,
   replyComposer,
@@ -37,9 +39,10 @@ export function PostCard({
 }: PostCardProps) {
   const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
   const keyLabel = fingerprintLike ? authorId : undefined;
+  const isLiked = isLikedOverride ?? false;
 
   return (
-    <article className={`post-card ${post.isRecommendation ? 'recommended' : ''}`}>
+    <article className={`post-card${recommendationLabel ? ' recommended' : ''}`}>
       <div className="post-card-header">
         <div className="post-author-line">
           <IdentityAvatar seed={authorId} size={36} alt={authorName} />
@@ -63,8 +66,8 @@ export function PostCard({
 
       <div className="post-card-actions">
         <div className="post-actions">
-          <LikeButton isLiked={post.reaction === 'like'} onToggle={onLike} disabled={isOwnPost} />
-          {showDislikeButton && post.reaction !== 'like' ? (
+          <LikeButton isLiked={isLiked} onToggle={onLike} disabled={isOwnPost} />
+          {showDislikeButton && !isLiked ? (
             <HideButton postId={post.object.object_id} onHide={onHide ?? (() => onDislike())} />
           ) : null}
           <button className="chip" onClick={() => onReply()} type="button">Reply</button>

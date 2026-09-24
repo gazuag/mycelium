@@ -648,6 +648,20 @@ body, html, #root {
   min-height: 90px;
 }
 
+.post-thread {
+  --thread-indent: calc(var(--thread-depth, 0) * 1.25rem);
+  margin-left: var(--thread-indent);
+  padding-left: 0.75rem;
+}
+
+.post-thread-group {
+  border: 1px solid transparent;
+}
+
+.post-thread-reply {
+  border-left: 2px solid rgba(255, 255, 255, 0.12);
+}
+
 .peer-card {
   display: flex;
   flex-direction: column;

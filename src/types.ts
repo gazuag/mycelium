@@ -18,6 +18,7 @@ export interface Contact {
 
 export interface PeerMetadata {
   author: string;
+  publicKey?: string;
   displayName: string;
   following: boolean;
   timestamp: string;

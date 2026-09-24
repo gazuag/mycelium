@@ -29,15 +29,21 @@ export async function queryFeedObjectsForPeer(
   author: string,
   options: { since?: string | null; limit?: number } = {}
 ): Promise<DistributedObject[]> {
+  const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined;
   const query = {
     since: options.since ?? undefined,
-    limit: typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined,
     order: 'created_at_desc' as const
   };
-  const [posts, recommendations] = await Promise.all([
-    filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.post' }),
-    filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.recommendation', author })
-  ]);
+  const recommendations = await filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.recommendation', author, limit });
+  const recommendedPostIds = new Set(recommendations.flatMap((recommendation) => {
+    const payload = recommendation.payload;
+    return typeof payload === 'object' && payload !== null && !Array.isArray(payload) && typeof payload.post_id === 'string'
+      ? [payload.post_id]
+      : [];
+  }));
+  const posts = (await filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.post' }))
+    .filter((post) => post.author === author || recommendedPostIds.has(post.object_id))
+    .slice(0, limit);
   return [...posts, ...recommendations].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 }
 

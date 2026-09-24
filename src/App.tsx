@@ -17,7 +17,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
@@ -152,6 +152,7 @@ function App() {
     settings: 0
   });
   const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
+    const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
@@ -222,7 +223,9 @@ function App() {
     if (!objectStore || !metadataStore) return;
     void hydratePostViews(objectStore, metadataStore, (error) => {
       addLog(`Post hydration failed: ${error instanceof Error ? error.message : String(error)}`);
-    }).then((hydratedViews) => {
+    }, resolvePostAuthorFingerprint).then((hydratedViews) => {
+      const hydratedWithMetadata = hydratedViews.filter((view) => view.authorDisplayName !== undefined || view.notInterested !== undefined || view.hidden !== undefined).length;
+      addLog(`Hydrated ${hydratedViews.length} posts from storage (${hydratedWithMetadata} with metadata)`);
       setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
     });
   }, []);
@@ -632,6 +635,7 @@ function App() {
     const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
     return {
       author: id?.id ?? '',
+      publicKey: id?.publicKey,
       displayName: p.displayName.trim() || fallbackName || 'Me',
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
@@ -641,12 +645,15 @@ function App() {
   };
 
   const handlePeerMetadata = (peerId: string, metadata: any) => {
+    const metadataPublicKey = typeof metadata?.publicKey === 'string' && metadata.publicKey.trim()
+      ? metadata.publicKey.trim()
+      : undefined;
     const normalizedProfile: Contact['profile'] = {
       protocol: 'mycelium',
       version: 1,
       type: 'profile',
       id: peerId,
-      author: peerId,
+      author: metadataPublicKey ?? peerId,
       timestamp: typeof metadata?.timestamp === 'string' ? metadata.timestamp : new Date().toISOString(),
       displayName: typeof metadata?.displayName === 'string' ? metadata.displayName : undefined,
       bio: typeof metadata?.bio === 'string' ? metadata.bio : undefined,
@@ -659,6 +666,7 @@ function App() {
       const updatedContact: Contact = existing
         ? {
             ...existing,
+            publicKey: metadataPublicKey ?? existing.publicKey,
             displayName: metadata.displayName,
             profile: normalizedProfile,
             follower: metadata.following,
@@ -666,7 +674,7 @@ function App() {
             connected: true
           }
         : {
-            publicKey: peerId,
+          publicKey: metadataPublicKey ?? peerId,
             fingerprint: peerId,
             displayName: metadata.displayName,
             profile: normalizedProfile,
@@ -917,6 +925,7 @@ function App() {
         }
         await objectStoreRef.current?.put(object);
         recommendationIndexRef.current.add(object);
+        setRecommendationRevision((revision) => revision + 1);
         const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
         const view = object.object_type === 'mycelium.post'
           ? createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' })
@@ -969,6 +978,7 @@ function App() {
         for (const object of uniqueById.values()) {
           await objectStoreRef.current?.put(object);
           recommendationIndexRef.current.add(object);
+          setRecommendationRevision((revision) => revision + 1);
           const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
           if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
         }
@@ -1002,8 +1012,8 @@ function App() {
           manager.sendMetadata(buildPeerMetadata(peer));
           const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
           if (contact?.followed) {
-            const since = localStorage.getItem(`myceliumHomeSync:${peer}`);
-            manager.sendRequestPosts(since, 100);
+            manager.sendRequestPosts(null, 200);
+            addLog(`Requested full home feed from ${peer} after data channel opened`);
           }
         }
         await flushQueuedMessages(peer);
@@ -1134,6 +1144,7 @@ function App() {
         const id = stored.id ?? (await deriveFingerprint(stored.publicKey));
         const loadedIdentity = { ...stored, id };
         setIdentity(loadedIdentity);
+        addLog(`Identity loaded: ${loadedIdentity.id}`);
       }
       const rawProfile = localStorage.getItem('myProfile');
       if (rawProfile) {
@@ -1181,7 +1192,9 @@ function App() {
   useEffect(() => {
     async function loadLocalData() {
       const cs = await loadContacts();
-      setContacts(dedupeContactsByFingerprint(cs || []));
+      const loadedContacts = dedupeContactsByFingerprint(cs || []);
+      setContacts(loadedContacts);
+      addLog(`Contacts loaded: ${loadedContacts.length}`);
       const loadedDirectMessages = await loadDirectChatMessages();
       const groupedDirectMessages = loadedDirectMessages.reduce((acc, message) => {
         acc[message.peerId] = [
@@ -1340,7 +1353,7 @@ function App() {
   useEffect(() => {
     if (!identity?.id || page !== 'home') return;
     void handleRefreshHomeFeed();
-  }, [page, identity?.id]);
+  }, [page, identity?.id, contacts.length]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -1501,15 +1514,15 @@ function App() {
   const handleLikePost = async (objectId: string) => {
     const target = discoveryPosts.find((post) => post.object.object_id === objectId) ?? postViews.find((post) => post.object.object_id === objectId);
     if (target && identity && target.object.author !== identity.publicKey) {
-      const isLiked = target.reaction === 'like' && target.recommendedBy === identity.id;
-      const next = { ...target, reaction: isLiked ? undefined : 'like' as const, isRecommendation: !isLiked, recommendedBy: isLiked ? undefined : identity.id };
+      const isLiked = getRecommendationSummary(objectId).recommended_by_me;
       const sequence = await recommendationSequenceStoreRef.current!.next(identity.publicKey);
       const recommendation = await createSignedRecommendationObject(objectId, isLiked ? 'withdraw' : 'recommend', sequence, createObjectIdentity(identity));
       await objectStoreRef.current?.put(recommendation);
       recommendationIndexRef.current.add(recommendation);
-      setPostViews((prev) => upsertLocalPostView(prev, next));
-      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
-      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      setRecommendationRevision((revision) => revision + 1);
+      setPostViews((prev) => upsertLocalPostView(prev, target));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, target));
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(target));
       addLog(`Liked post ${objectId}`);
     }
   };
@@ -1517,7 +1530,7 @@ function App() {
   const handleDislikePost = async (objectId: string) => {
     const target = postViews.find((post) => post.object.object_id === objectId) ?? discoveryPosts.find((post) => post.object.object_id === objectId);
     if (target) {
-      const next = { ...target, reaction: 'dislike' as const, notInterested: true };
+      const next = { ...target, notInterested: true };
       setPostViews((prev) => upsertLocalPostView(prev, next));
       setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
       await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
@@ -1525,11 +1538,12 @@ function App() {
     }
   };
 
-  async function handleCreatePost(publishToDiscovery = false, replyTo?: string) {
+  async function handleCreatePost(publishToDiscovery = false, replyTo?: string, replyContent?: string) {
     if (!identity) return;
-    const content = newPostContent.trim();
+    const isReply = Boolean(replyTo);
+    const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
-    const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
+    const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
     const objectIdentity = createObjectIdentity(identity);
     const postObject = await createSignedObject({
       object_type: 'mycelium.post',
@@ -1550,8 +1564,10 @@ function App() {
     await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
 
     addLog(`Created and stored object post ${postObject.object_id}`);
-    setNewPostContent('');
-    setNewPostTags('');
+    if (!isReply) {
+      setNewPostContent('');
+      setNewPostTags('');
+    }
 
     if (replyTo) {
       const targetPost = postViews.find((post) => post.object.object_id === replyTo);
@@ -1614,58 +1630,19 @@ function App() {
   }, [visibleDiscoveryPosts]);
 
   const visibleHomePosts = useMemo(() => {
-    const followedContacts = contacts.filter((contact) => contact.followed);
-    const isByFollowedAuthor = (post: LocalPostView) => {
-      return followedContacts.some((contact) => contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author);
-    };
-
-    const authoredByFollowed = postViews
-      .filter((post) => !hiddenPostIds.has(post.object.object_id))
-      .filter((post) => !isBlockedPost(post))
-      .filter((post) => isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
-
-    const likedByFollowed = postViews
-      .filter((post) => !hiddenPostIds.has(post.object.object_id))
-      .filter((post) => !isBlockedPost(post))
-      .filter((post) => post.reaction === 'like')
-      .filter((post) => isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
-
-    const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes);
-    const totalItems = 30;
-    const authoredQuota = Math.floor((totalItems * myProfile.feedMix.followedAuthors) / totalRatio);
-    const likedQuota = Math.max(0, totalItems - authoredQuota);
-
-    const selected: LocalPostView[] = [];
-    const seen = new Set<string>();
-
-    const take = (source: LocalPostView[], maxItems: number) => {
-      let remaining = maxItems;
-      for (const item of source) {
-        if (selected.length >= totalItems || remaining <= 0) break;
-        if (seen.has(item.object.object_id)) continue;
-        selected.push(item);
-        seen.add(item.object.object_id);
-        remaining -= 1;
-      }
-    };
-
-    take(authoredByFollowed, authoredQuota);
-    take(likedByFollowed, likedQuota);
-
-    const fallback = [...authoredByFollowed, ...likedByFollowed]
-      .filter((item) => !seen.has(item.object.object_id))
-      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
-
-    for (const item of fallback) {
-      if (selected.length >= totalItems) break;
-      selected.push(item);
-      seen.add(item.object.object_id);
-    }
-
-    return selected.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
-  }, [postViews, hiddenPostIds, contacts, myProfile.feedMix]);
+    const followedAuthorKeys = new Set([
+      ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
+      ...(identity ? [identity.id, identity.publicKey] : [])
+    ]);
+    const computedHomePosts = selectFollowedPosts(postViews, followedAuthorKeys)
+      .map((post) => ({
+        ...post,
+        homeFeedSource: 'followed' as const,
+        recommendationSummary: getRecommendationSummary(post.object.object_id)
+      }));
+    addLog(`Home feed computed: ${computedHomePosts.length} visible posts (${postViews.length} total in postViews); feedMix=${myProfile.feedMix.followedAuthors}/${myProfile.feedMix.followedLikes}/${myProfile.feedMix.discoveryRandom}; hiddenPostIds=${hiddenPostIds.size}`);
+    return computedHomePosts;
+  }, [postViews, contacts, recommendationRevision]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
@@ -1678,7 +1655,10 @@ function App() {
     : [];
 
   const likedProfilePosts = profileContactId
-    ? postViews.filter((post) => post.recommendedBy === profileContactId && !isBlockedPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
+    ? postViews.filter((post) => {
+      const summary = getRecommendationSummary(post.object.object_id);
+      return summary.active_recommenders.includes(profileContact?.publicKey ?? profileContactId) && !isBlockedPost(post);
+    }).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
   const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
@@ -1790,9 +1770,8 @@ function App() {
         if (!manager) continue;
 
         if (manager.isDataChannelOpen()) {
-          const since = localStorage.getItem(`myceliumHomeSync:${contact.fingerprint}`);
-          manager.sendRequestPosts(since, 100);
-          addLog(`Requested home updates from ${contact.fingerprint}${since ? ` since ${since}` : ' (last 100)'}`);
+          manager.sendRequestPosts(null, 200);
+          addLog(`Requested full home feed from ${contact.fingerprint}`);
         } else if (contact.online) {
           const channelState = manager.getDataChannelState();
           if (channelState === 'closed' || channelState === 'missing') {
@@ -1828,9 +1807,6 @@ function App() {
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
           return createLocalPostView(object as PostObject, authorFingerprint, {
               source: 'discovery',
-              reaction: cachedPost?.reaction,
-              isRecommendation: cachedPost?.isRecommendation,
-              recommendedBy: cachedPost?.recommendedBy,
               authorDisplayName: authorDisplayName || cachedPost?.authorDisplayName
           });
       }))).filter((view): view is LocalPostView => view !== null);
@@ -2686,8 +2662,7 @@ function App() {
             onDislike={handleDislikePost}
             onReply={(postId, content, publishToDiscovery) => {
               if (content && content.trim()) {
-                void handleCreatePost(Boolean(publishToDiscovery), postId);
-                setNewPostContent(content);
+                void handleCreatePost(Boolean(publishToDiscovery), postId, content);
               }
             }}
             onHide={handleHidePost}
@@ -2720,6 +2695,7 @@ function App() {
             onDislike={handleDislikePost}
             onHide={handleHideDiscoveryPost}
             onBlock={handleBlockPeer}
+            getRecommendationSummary={getRecommendationSummary}
           />
         )}
 
@@ -2737,6 +2713,7 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            getRecommendationSummary={getRecommendationSummary}
           />
         )}
 
@@ -2744,11 +2721,12 @@ function App() {
           <ProfilePage
             contact={myProfileContact}
             posts={postViews.filter((post) => post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
-            likedPosts={postViews.filter((post) => post.recommendedBy === identity?.id && post.object.author !== identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            getRecommendationSummary={getRecommendationSummary}
             isOwnProfile
             profileSettingsOpen={profileSettingsOpen}
             onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}

@@ -29,9 +29,6 @@ export interface LocalPostView {
   readonly authorFingerprint: string;
   readonly authorDisplayName?: string;
   readonly source?: 'local' | 'peer' | 'discovery';
-  readonly reaction?: 'like' | 'dislike';
-  readonly isRecommendation?: boolean;
-  readonly recommendedBy?: string;
   readonly notInterested?: boolean;
   readonly hidden?: boolean;
 }

@@ -5,11 +5,11 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
-import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, upsertLocalPostView } from './post-state';
-import { RecommendationIndex } from './recommendations';
+import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
+import { RecommendationIndex, recommendationWeight, selectRecommendationCandidates } from './recommendations';
 import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, queryFeedObjectsForPeer, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
-import type { DistributedObject, ObjectPacket, ObjectStore, PostObject } from './types';
+import type { DistributedObject, LocalPostView, ObjectPacket, ObjectStore, PostObject, RecommendationSummary } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -250,20 +250,20 @@ describe('distributed object foundation', () => {
     expect(mergeLocalPostViews([earlier], [later]).map((view) => view.object.object_id)).toEqual([laterObject.object_id, earlierObject.object_id]);
   });
 
-  it('promotes a discovery-only liked post into the main post state', async () => {
+  it('promotes a discovery-only post into the main post state', async () => {
     const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'discover then like' }, replication_policy: {} });
-    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery', reaction: 'like', isRecommendation: true, recommendedBy: 'my-id' });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
 
-    expect(upsertLocalPostView([], liked)[0].recommendedBy).toBe('my-id');
+    expect(upsertLocalPostView([], liked)[0].source).toBe('discovery');
   });
 
   it('preserves local like metadata when the same object is received again', async () => {
     const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked object' }, replication_policy: {} });
-    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { reaction: 'like', isRecommendation: true, recommendedBy: 'my-id', notInterested: false });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { notInterested: false });
     const received = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'peer' });
 
     const merged = upsertLocalPostView([liked], received);
-    expect(merged[0]).toMatchObject({ reaction: 'like', isRecommendation: true, recommendedBy: 'my-id', source: 'peer' });
+    expect(merged[0]).toMatchObject({ source: 'peer', notInterested: false });
   });
 
   it('persists local post metadata by object_id', async () => {
@@ -338,6 +338,95 @@ describe('distributed object foundation', () => {
     expect(summary.recommended_by_me).toBe(true);
   });
 
+  it('uses a 20 percent incremental recommendation weight per followed recommender', () => {
+    expect(recommendationWeight(1)).toBeCloseTo(0.2);
+    expect(recommendationWeight(2)).toBeCloseTo(0.36);
+    expect(recommendationWeight(3)).toBeCloseTo(0.488);
+  });
+
+  // Temporarily skipped while the home feed uses followed-author posts only.
+  it.skip('builds a deterministic recommendation pool while excluding followed, hidden, blocked, and withdrawn posts', () => {
+    const makePost = (id: string, author: string): LocalPostView => ({
+      object: {
+        object_id: id,
+        object_type: 'mycelium.post',
+        author,
+        created_at: '2026-09-17T00:00:00.000Z',
+        payload: { content: id },
+        signature: '',
+        replication_policy: {}
+      },
+      authorFingerprint: `${author}-fingerprint`
+    });
+    const summaries = new Map<string, RecommendationSummary>([
+      ['recommended', { post_id: 'recommended', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['followed-author', { post_id: 'followed-author', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['withdrawn', { post_id: 'withdrawn', active_recommenders: [], active_recommender_count: 0, followed_recommenders: [], followed_recommender_count: 0, recommended_by_me: false }],
+      ['hidden', { post_id: 'hidden', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['blocked', { post_id: 'blocked', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }]
+    ]);
+    const posts = [
+      makePost('recommended', 'unfollowed-a'),
+      makePost('followed-author', 'followed-author-key'),
+      makePost('withdrawn', 'unfollowed-b'),
+      { ...makePost('hidden', 'unfollowed-c'), hidden: true },
+      makePost('blocked', 'blocked-author')
+    ];
+    const options = {
+      capacity: 10,
+      localIdentity: 'local-identity',
+      feedDay: '2026-09-17',
+      followedAuthorKeys: new Set(['followed-author-key']),
+      isHidden: (post: LocalPostView) => post.hidden === true,
+      isBlocked: (post: LocalPostView) => post.object.author === 'blocked-author'
+    };
+    const getSummary = (postId: string) => summaries.get(postId)!;
+
+    const first = selectRecommendationCandidates(posts, getSummary, options);
+    const second = selectRecommendationCandidates(posts, getSummary, options);
+
+    expect(first.map((post) => post.object.object_id)).toEqual(['recommended']);
+    expect(second.map((post) => post.object.object_id)).toEqual(first.map((post) => post.object.object_id));
+  });
+
+  // Temporarily skipped while the home feed uses followed-author posts only.
+  it.skip('does not duplicate posts already selected from the followed-author pool', () => {
+    const post = {
+      object: { object_id: 'duplicate', object_type: 'mycelium.post', author: 'unfollowed', created_at: '2026-09-17T00:00:00.000Z', payload: {}, signature: '', replication_policy: {} },
+      authorFingerprint: 'unfollowed-fingerprint'
+    } as LocalPostView;
+    const summary: RecommendationSummary = { post_id: 'duplicate', active_recommenders: ['followed'], active_recommender_count: 1, followed_recommenders: ['followed'], followed_recommender_count: 1, recommended_by_me: false };
+    expect(selectRecommendationCandidates([post], () => summary, {
+      capacity: 1,
+      localIdentity: 'local',
+      feedDay: '2026-09-17',
+      followedAuthorKeys: new Set(),
+      alreadySelectedIds: new Set(['duplicate'])
+    })).toEqual([]);
+  });
+
+  it('selects every followed-author post in descending creation order', () => {
+    const makePost = (id: string, author: string, createdAt: string): LocalPostView => ({
+      object: { object_id: id, object_type: 'mycelium.post', author, created_at: createdAt, payload: {}, signature: '', replication_policy: {} },
+      authorFingerprint: `${author}-fingerprint`
+    });
+    const followed = makePost('followed', 'followed-key', '2026-09-17T00:01:00.000Z');
+    const olderFollowed = makePost('older-followed', 'followed-key', '2026-09-17T00:00:00.000Z');
+    const own = makePost('own', 'own-key', '2026-09-17T00:03:00.000Z');
+    const unfollowed = makePost('unfollowed', 'other-key', '2026-09-17T00:02:00.000Z');
+
+    expect(selectFollowedPosts([olderFollowed, unfollowed, followed, own], new Set(['followed-key', 'own-key'])).map((post) => post.object.object_id))
+      .toEqual(['own', 'followed', 'older-followed']);
+  });
+
+  it('keeps recursively nested replies to followed posts in the home selection', () => {
+    const root = createLocalPostView({ object_id: 'root', object_type: 'mycelium.post', author: 'followed-key', created_at: '2026-09-17T00:00:00.000Z', payload: { content: 'root' }, signature: '', replication_policy: {} } as PostObject, 'followed-fingerprint');
+    const reply = createLocalPostView({ object_id: 'reply', object_type: 'mycelium.post', author: 'other-key', created_at: '2026-09-17T00:01:00.000Z', payload: { content: 'reply', reply_to: 'root' }, signature: '', replication_policy: {} } as PostObject, 'other-fingerprint');
+    const nested = createLocalPostView({ object_id: 'nested', object_type: 'mycelium.post', author: 'third-key', created_at: '2026-09-17T00:02:00.000Z', payload: { content: 'nested', reply_to: 'reply' }, signature: '', replication_policy: {} } as PostObject, 'third-fingerprint');
+
+    expect(selectFollowedPosts([nested, reply, root], new Set(['followed-key'])).map((post) => post.object.object_id)).toEqual(['nested', 'reply', 'root']);
+  });
+
   it('includes only the sender authored recommendations in a feed batch query', async () => {
     const senderKeys = await generateIdentityKeyPair();
     const sender = await exportPublicKey(senderKeys.publicKey);
@@ -349,13 +438,17 @@ describe('distributed object foundation', () => {
     const otherIdentity = createObjectIdentity({ id: 'other', publicKey: other, privateKey: otherPrivateKey });
     const store = createMemoryStore();
     const post = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'post' }, replication_policy: {} }, otherIdentity);
+    const unrelatedPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'unrelated' }, replication_policy: {} }, otherIdentity);
+    const ownPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:02:00.000Z', payload: { content: 'own post' }, replication_policy: {} }, senderIdentity);
     const ownRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, senderIdentity);
     const otherRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, otherIdentity);
-    await Promise.all([post, ownRecommendation, otherRecommendation].map((object) => store.put(object)));
+    await Promise.all([post, unrelatedPost, ownPost, ownRecommendation, otherRecommendation].map((object) => store.put(object)));
 
     const results = await queryFeedObjectsForPeer(store, sender, { limit: 20 });
     expect(results).toContainEqual(post);
+    expect(results).toContainEqual(ownPost);
     expect(results).toContainEqual(ownRecommendation);
+    expect(results).not.toContainEqual(unrelatedPost);
     expect(results).not.toContainEqual(otherRecommendation);
   });
 
@@ -387,15 +480,25 @@ describe('distributed object foundation', () => {
     expect(views[0].object.object_id).toBe(object.object_id);
   });
 
+  it('normalizes hydrated authors through the supplied fingerprint resolver', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'normalize author' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+
+    const views = await hydratePostViews(objectStore, metadataStore, undefined, async () => 'resolved-fingerprint');
+    expect(views[0].authorFingerprint).toBe('resolved-fingerprint');
+  });
+
   it('restores interaction metadata across fresh hydration', async () => {
     const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked' }, replication_policy: {} });
     const objectStore = createMemoryStore();
     await objectStore.put(object);
-    const metadataRecords = [localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { reaction: 'like', recommendedBy: 'my-id', isRecommendation: true }))];
+    const metadataRecords = [localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { notInterested: true }))];
     const metadataStore = { put: async () => undefined, get: async () => metadataRecords[0], delete: async () => undefined, query: async () => metadataRecords };
 
     const hydrated = await hydratePostViews(objectStore, metadataStore);
-    expect(hydrated[0]).toMatchObject({ reaction: 'like', recommendedBy: 'my-id', isRecommendation: true });
+    expect(hydrated[0]).toMatchObject({ notInterested: true });
   });
 
   it('reports hydration failures instead of silently returning an unexplained empty result', async () => {

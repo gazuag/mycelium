@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Contact } from '../types';
-import type { LocalPostView } from '../object-layer';
+import type { LocalPostView, RecommendationSummary } from '../object-layer';
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
@@ -25,6 +25,7 @@ interface ProfilePageProps {
   profileSettings?: React.ReactNode;
   profileSettingsOpen?: boolean;
   onToggleProfileSettings?: () => void;
+  getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
 export function ProfilePage({
@@ -43,7 +44,8 @@ export function ProfilePage({
   isOwnProfile = false,
   profileSettings,
   profileSettingsOpen = false,
-  onToggleProfileSettings
+  onToggleProfileSettings,
+  getRecommendationSummary
 }: ProfilePageProps) {
   const [activeTab, setActiveTab] = useState<'posts' | 'liked'>('posts');
   const [visiblePostsCount, setVisiblePostsCount] = useState(PROFILE_LOAD_STEP);
@@ -124,6 +126,7 @@ export function ProfilePage({
                 onDislike={() => onDislike(post.object.object_id)}
                 onHide={onHide}
                 onReply={() => {} }
+                isLiked={getRecommendationSummary(post.object.object_id).recommended_by_me}
                 isOwnPost={isOwnProfile}
               />
             ))}

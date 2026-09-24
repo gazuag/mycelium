@@ -79,13 +79,13 @@ export function SettingsPage({
   phase7Test
 }: SettingsPageProps) {
   const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
-    pingPong: false,
-    discovery: false,
-    chat: false,
-    postRequests: false,
+    pingPong: true,
+    discovery: true,
+    chat: true,
+    postRequests: true,
     objectStorage: true,
     ice: true,
-    general: false
+    general: true
   });
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';

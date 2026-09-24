@@ -29,15 +29,32 @@ export function createLocalPostView(
   return { object, authorFingerprint, ...metadata };
 }
 
+export function selectFollowedPosts(posts: readonly LocalPostView[], followedAuthorKeys: ReadonlySet<string>): LocalPostView[] {
+  const followedPosts = posts.filter((post) => followedAuthorKeys.has(post.authorFingerprint) || followedAuthorKeys.has(post.object.author));
+  const selectedIds = new Set(followedPosts.map((post) => post.object.object_id));
+  let addedReply = true;
+  while (addedReply) {
+    addedReply = false;
+    for (const post of posts) {
+      const parentId = postReplyTo(post);
+      if (parentId && selectedIds.has(parentId) && !selectedIds.has(post.object.object_id)) {
+        selectedIds.add(post.object.object_id);
+        addedReply = true;
+      }
+    }
+  }
+
+  return posts
+    .filter((post) => selectedIds.has(post.object.object_id))
+    .sort((left, right) => new Date(right.object.created_at).getTime() - new Date(left.object.created_at).getTime());
+}
+
 export function localPostMetadata(view: LocalPostView): LocalPostMetadata {
   return {
     object_id: view.object.object_id,
     authorFingerprint: view.authorFingerprint,
     ...(view.authorDisplayName ? { authorDisplayName: view.authorDisplayName } : {}),
     ...(view.source ? { source: view.source } : {}),
-    ...(view.reaction ? { reaction: view.reaction } : {}),
-    ...(view.isRecommendation === undefined ? {} : { isRecommendation: view.isRecommendation }),
-    ...(view.recommendedBy ? { recommendedBy: view.recommendedBy } : {}),
     ...(view.notInterested === undefined ? {} : { notInterested: view.notInterested }),
     ...(view.hidden === undefined ? {} : { hidden: view.hidden })
   };
@@ -46,7 +63,8 @@ export function localPostMetadata(view: LocalPostView): LocalPostMetadata {
 export async function hydratePostViews(
   objectStore: ObjectStore,
   metadataStore: LocalPostMetadataStore,
-  onError: (error: unknown) => void = () => undefined
+  onError: (error: unknown) => void = () => undefined,
+  resolveAuthorFingerprint: (author: string) => Promise<string> = async (author) => author
 ): Promise<LocalPostView[]> {
   try {
     const [objects, metadata] = await Promise.all([
@@ -54,22 +72,20 @@ export async function hydratePostViews(
       metadataStore.query()
     ]);
     const metadataById = new Map(metadata.map((item) => [item.object_id, item]));
-    return objects.map((object) => {
+    return Promise.all(objects.map(async (object) => {
       const item = metadataById.get(object.object_id);
+      const authorFingerprint = item?.authorFingerprint ?? await resolveAuthorFingerprint(object.author);
       return createLocalPostView(
         object as PostObject,
-        item?.authorFingerprint ?? object.author,
+        authorFingerprint,
         item ? {
           authorDisplayName: item.authorDisplayName,
           source: item.source ?? 'peer',
-          reaction: item.reaction,
-          isRecommendation: item.isRecommendation,
-          recommendedBy: item.recommendedBy,
           notInterested: item.notInterested,
           hidden: item.hidden
         } : { source: 'peer' }
       );
-    });
+    }));
   } catch (error) {
     onError(error);
     return [];
@@ -81,9 +97,6 @@ export function upsertLocalPostView(views: LocalPostView[], next: LocalPostView)
   const merged = existing
     ? {
       ...next,
-      reaction: next.reaction ?? existing.reaction,
-      recommendedBy: next.recommendedBy ?? existing.recommendedBy,
-      isRecommendation: next.isRecommendation ?? existing.isRecommendation,
       notInterested: next.notInterested ?? existing.notInterested,
       hidden: next.hidden ?? existing.hidden
     }
