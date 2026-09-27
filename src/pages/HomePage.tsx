@@ -3,6 +3,7 @@ import type { Contact } from '../types';
 import { postReplyTo, type LocalPostView, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import type { PopularPeer } from '../services/peer-discovery';
 
 interface HomePageProps {
   posts: HomeFeedPost[];
@@ -17,6 +18,8 @@ interface HomePageProps {
   onDislike: (objectId: string) => void;
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   onHide: (objectId: string) => void;
+  popularPeers?: PopularPeer[];
+  onFollowPeer?: (peerId: string) => void;
   isRefreshing?: boolean;
 }
 
@@ -85,6 +88,8 @@ export function HomePage({
   onDislike,
   onReply,
   onHide,
+  popularPeers = [],
+  onFollowPeer,
   isRefreshing = false
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
@@ -127,6 +132,21 @@ export function HomePage({
 
   return (
     <section className="page-view">
+      {!contacts.some((contact) => contact.followed) ? (
+        <div className="popular-posters-banner">
+          <strong>You are not following anyone. Here are some popular posters right now.</strong>
+          {popularPeers.length === 0 ? <p className="note">No popular posters found yet.</p> : (
+            <div className="popular-posters-list">
+              {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
+                <div className="popular-poster-item" key={peerId}>
+                  <span>{displayNameOrFallback(undefined, peerId)} <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
+                  {onFollowPeer ? <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>Follow</button> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
       <div className="page-header">
         <h2>Home</h2>
         <p className="note">New posts from people you follow.</p>

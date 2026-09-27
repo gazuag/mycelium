@@ -108,6 +108,6 @@ export function mergeLocalPostViews(views: LocalPostView[], incoming: LocalPostV
   return incoming.reduce(upsertLocalPostView, views);
 }
 
-export function createReplyObjectPayload(replyTo: string): { reply_to: string } {
-  return { reply_to: replyTo };
+export function createReplyObjectPayload(replyTo: string, replyToAuthor?: string): { reply_to: string; reply_to_author?: string } {
+  return { reply_to: replyTo, ...(replyToAuthor ? { reply_to_author: replyToAuthor } : {}) };
 }

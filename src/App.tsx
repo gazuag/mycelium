@@ -22,6 +22,7 @@ import { canonicalize, type PacketSigner } from './p2p/protocol';
 import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
+import { fetchPeerPool, fetchPopularPeers, type PopularPeer } from './services/peer-discovery';
 import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -156,6 +157,9 @@ function App() {
     settings: 0
   });
   const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
+  const [possiblePeerIds, setPossiblePeerIds] = useState<string[]>([]);
+  const [popularPeers, setPopularPeers] = useState<PopularPeer[]>([]);
+  const [contactsLoaded, setContactsLoaded] = useState(false);
     const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
@@ -175,6 +179,8 @@ function App() {
   const [phase7RequestId, setPhase7RequestId] = useState('');
   const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>>([]);
   const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
+  const peerPoolRequestedRef = useRef(false);
+  const popularPeersRequestedRef = useRef(false);
   const selectedContactIdRef = useRef<string | null>(null);
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
@@ -1198,6 +1204,7 @@ function App() {
       const cs = await loadContacts();
       const loadedContacts = dedupeContactsByFingerprint(cs || []);
       setContacts(loadedContacts);
+      setContactsLoaded(true);
       addLog(`Contacts loaded: ${loadedContacts.length}`);
       const loadedDirectMessages = await loadDirectChatMessages();
       const groupedDirectMessages = loadedDirectMessages.reduce((acc, message) => {
@@ -1358,6 +1365,27 @@ function App() {
     if (!identity?.id || page !== 'home') return;
     void handleRefreshHomeFeed();
   }, [page, identity?.id, contacts.length]);
+
+  useEffect(() => {
+    if (!identity?.id || !contactsLoaded || connectedPeerIds.length > 0 || signallingStatus !== 'connected' || peerPoolRequestedRef.current) return;
+    peerPoolRequestedRef.current = true;
+    void fetchPeerPool().then((peerIds) => {
+      setPossiblePeerIds(peerIds.filter((peerId) => peerId !== identity.id && !blockedPeersRef.current.has(peerId)));
+      addLog(`Loaded ${peerIds.length} possible peers from discovery`);
+    }).catch((error: unknown) => {
+      addLog(`Peer pool request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [identity?.id, contactsLoaded, connectedPeerIds.length, signallingStatus]);
+
+  useEffect(() => {
+    if (!identity?.id || !contactsLoaded || contacts.some((contact) => contact.followed) || signallingStatus !== 'connected' || popularPeersRequestedRef.current) return;
+    popularPeersRequestedRef.current = true;
+    void fetchPopularPeers().then((peers) => {
+      setPopularPeers(peers.filter((peer) => peer.peer_id !== identity.id && !blockedPeersRef.current.has(peer.peer_id)));
+    }).catch((error: unknown) => {
+      addLog(`Popular peers request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [identity?.id, contactsLoaded, contacts, signallingStatus]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -1570,6 +1598,7 @@ function App() {
     const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
     const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
+    const replyTarget = replyTo ? postViews.find((post) => post.object.object_id === replyTo) : undefined;
     const objectIdentity = createObjectIdentity(identity);
     const postObject = await createSignedObject({
       object_type: 'mycelium.post',
@@ -1577,7 +1606,7 @@ function App() {
       payload: {
         content,
         tags,
-        ...(replyTo ? { reply_to: replyTo } : {})
+        ...(replyTo ? { reply_to: replyTo, ...(replyTarget ? { reply_to_author: replyTarget.authorFingerprint } : {}) } : {})
       },
       replication_policy: {}
     }, objectIdentity) as PostObject;
@@ -1596,7 +1625,7 @@ function App() {
     }
 
     if (replyTo) {
-      const targetPost = postViews.find((post) => post.object.object_id === replyTo);
+      const targetPost = replyTarget;
       const targetPeer = targetPost
         ? targetPost.authorFingerprint
         : undefined;
@@ -1605,7 +1634,7 @@ function App() {
         const replyObject = await createSignedObject({
           object_type: 'mycelium.reply',
           created_at: new Date().toISOString(),
-          payload: createReplyObjectPayload(replyTo),
+          payload: createReplyObjectPayload(replyTo, targetPeer),
           replication_policy: {}
         }, replyIdentity);
         const replyResult = await sendReplyToAuthor(identity.id, replyObject, objectTransportRef.current!, targetPeer, (packet) => signString(identity.privateKey, canonicalize(packet)));
@@ -2680,6 +2709,8 @@ function App() {
           <HomePage
             posts={visibleHomePosts}
             contacts={contacts}
+            popularPeers={popularPeers}
+            onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={handleCreatePost}
@@ -2701,6 +2732,7 @@ function App() {
         {page === 'people' && (
           <PeoplePage
             contacts={visibleContacts}
+            suggestedPeerIds={possiblePeerIds}
             myPeerId={identity.id}
             onViewProfile={handleOpenPeerProfile}
             onMessage={handleSelectContact}

@@ -11,9 +11,10 @@ interface PeoplePageProps {
   onToggleFollow: (peerId: string) => void;
   onBlockPeer?: (peerId: string) => void;
   onAddPeerAddress: (address: string) => Promise<void>;
+  suggestedPeerIds?: string[];
 }
 
-export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress }: PeoplePageProps) {
+export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress, suggestedPeerIds = [] }: PeoplePageProps) {
   const [newPeerAddress, setNewPeerAddress] = useState('');
 
   const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
@@ -21,13 +22,23 @@ export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onTog
   const following = contacts.filter((c) => c.followed && !c.follower && (c.unreadMessages || 0) === 0);
   const followers = contacts.filter((c) => !c.followed && c.follower && (c.unreadMessages || 0) === 0);
   const everyoneElse = contacts.filter((c) => !c.followed && !c.follower && (c.unreadMessages || 0) === 0);
+  const peerPoolSuggestions = suggestedPeerIds
+    .filter((peerId) => !contacts.some((contact) => contact.fingerprint === peerId || contact.publicKey === peerId))
+    .map((peerId) => ({
+      publicKey: peerId,
+      fingerprint: peerId,
+      addedAt: '',
+      followed: false,
+      online: false
+    }));
 
   const [openGroups, setOpenGroups] = useState({
     inbox: unreadInbox.length > 0,
     friends: friends.length > 0,
     following: following.length > 0,
     followers: followers.length > 0,
-    everyone: everyoneElse.length > 0
+    everyone: everyoneElse.length > 0,
+    peerPool: peerPoolSuggestions.length > 0
   });
 
   useEffect(() => {
@@ -36,9 +47,10 @@ export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onTog
       friends: friends.length > 0 ? true : false,
       following: following.length > 0 ? true : false,
       followers: followers.length > 0 ? true : false,
-      everyone: everyoneElse.length > 0 ? true : false
+      everyone: everyoneElse.length > 0 ? true : false,
+      peerPool: peerPoolSuggestions.length > 0 ? true : false
     }));
-  }, [unreadInbox.length, friends.length, following.length, followers.length, everyoneElse.length]);
+  }, [unreadInbox.length, friends.length, following.length, followers.length, everyoneElse.length, peerPoolSuggestions.length]);
 
   const toggleGroup = (group: keyof typeof openGroups) => {
     setOpenGroups((prev) => ({ ...prev, [group]: !prev[group] }));
@@ -106,6 +118,7 @@ export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onTog
       {renderGroup('Following', following, 'following')}
       {renderGroup('Followers', followers, 'followers')}
       {renderGroup('Follow Suggestions', everyoneElse, 'everyone')}
+      {renderGroup('Popular Peers', peerPoolSuggestions, 'peerPool')}
     </section>
   );
 }

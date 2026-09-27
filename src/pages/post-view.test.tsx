@@ -4,6 +4,7 @@ import { PostCard } from '../components/PostCard';
 import { DiscoverPage } from './DiscoverPage';
 import { HomePage } from './HomePage';
 import { MyProfilePage } from './MyProfilePage';
+import { PeoplePage } from './PeoplePage';
 import { ProfilePage } from './ProfilePage';
 import { createLocalPostView, upsertLocalPostView, type LocalPostView, type PostObject } from '../object-layer';
 import type { Contact } from '../types';
@@ -264,5 +265,50 @@ describe('LocalPostView UI migration', () => {
 
     expect(profileMarkup).toContain('aria-pressed="true"');
     expect(discoverMarkup).toContain('aria-pressed="true"');
+  });
+});
+
+describe('peer discovery suggestion UI', () => {
+  it('shows Stage 2 peer-pool suggestions at the bottom of the People page', () => {
+    const markup = renderToStaticMarkup(
+      <PeoplePage
+        contacts={[]}
+        myPeerId="local-peer"
+        suggestedPeerIds={['aa:bb:cc:dd:ee:ff:00:22']}
+        onViewProfile={noop}
+        onMessage={noop}
+        onToggleFollow={noop}
+        onAddPeerAddress={async () => undefined}
+      />
+    );
+
+    expect(markup).toContain('Popular Peers');
+    expect(markup).toContain('aa:bb:cc:dd:ee:ff:00:22');
+    expect(markup).toContain('Follow');
+  });
+
+  it('shows Stage 3 popular posters on Home when the user follows nobody', () => {
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[]}
+        popularPeers={[{ peer_id: 'aa:bb:cc:dd:ee:ff:00:22', reply_count: 4 }]}
+        onFollowPeer={noop}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        onRefreshPosts={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).toContain('You are not following anyone. Here are some popular posters right now.');
+    expect(markup).toContain('4 replies');
+    expect(markup).toContain('Follow');
   });
 });

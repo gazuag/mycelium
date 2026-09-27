@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -7,9 +8,11 @@ import sqlite3
 import ssl
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -32,6 +35,7 @@ SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
 SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8765'))
 TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
+PEER_DISCOVERY_WINDOW_DAYS = int(os.environ.get('PEER_DISCOVERY_WINDOW_DAYS', '30'))
 
 clients: Dict[str, WebSocketServerProtocol] = {}
 pending_signals: Dict[str, List[Tuple[float, str]]] = {}
@@ -144,6 +148,88 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
         )
     rows = cursor.fetchall()
     return [json.loads(row[0]) for row in rows]
+
+
+def _recent_cutoff() -> str:
+    return (datetime.utcnow() - timedelta(days=PEER_DISCOVERY_WINDOW_DAYS)).isoformat(timespec='seconds') + 'Z'
+
+
+def _peer_id_for_author(author: str) -> str:
+    digest = hashlib.sha256(author.strip().encode('utf-8')).digest()[:8]
+    return ':'.join(f'{byte:02x}' for byte in digest)
+
+
+def load_peer_pool(limit: int = 50) -> List[str]:
+    if limit <= 0:
+        return []
+    rows = DB_CONN.execute(
+        'SELECT object_json FROM discovery_posts WHERE received_at >= ? ORDER BY received_at DESC',
+        (_recent_cutoff(),)
+    ).fetchall()
+    peer_ids: List[str] = []
+    seen = set()
+    for (object_json,) in rows:
+        try:
+            obj = json.loads(object_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if obj.get('object_type') != 'mycelium.post' or not isinstance(obj.get('author'), str):
+            continue
+        peer_id = _peer_id_for_author(obj['author'])
+        if peer_id not in seen:
+            seen.add(peer_id)
+            peer_ids.append(peer_id)
+            if len(peer_ids) >= max(0, limit):
+                break
+    return peer_ids
+
+
+def load_popular_peers(limit: int = 10) -> List[dict]:
+    rows = DB_CONN.execute(
+        'SELECT object_json FROM discovery_posts WHERE received_at >= ?',
+        (_recent_cutoff(),)
+    ).fetchall()
+    reply_counts: Dict[str, int] = {}
+    for (object_json,) in rows:
+        try:
+            obj = json.loads(object_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if obj.get('object_type') not in {'mycelium.post', 'mycelium.reply'}:
+            continue
+        payload = obj.get('payload')
+        if not isinstance(payload, dict):
+            continue
+        peer_id = payload.get('reply_to_author')
+        if isinstance(peer_id, str) and peer_id.strip():
+            peer_id = peer_id.strip()
+            reply_counts[peer_id] = reply_counts.get(peer_id, 0) + 1
+    ranked = sorted(reply_counts.items(), key=lambda item: (-item[1], item[0]))
+    return [{'peer_id': peer_id, 'reply_count': count} for peer_id, count in ranked[:max(0, limit)]]
+
+
+def build_discovery_api_response(path: str) -> Optional[Tuple[int, bytes]]:
+    route = urlsplit(path).path
+    if route == '/api/peer-pool':
+        body = {'peers': load_peer_pool()}
+    elif route == '/api/popular-peers':
+        body = {'peers': load_popular_peers(10)}
+    else:
+        return None
+    return HTTPStatus.OK, json.dumps(body).encode('utf-8')
+
+
+def process_http_request(path: str, request_headers):
+    response = build_discovery_api_response(path)
+    if response is None:
+        return None
+    status, body = response
+    return status, [
+        ('Content-Type', 'application/json; charset=utf-8'),
+        ('Content-Length', str(len(body))),
+        ('Access-Control-Allow-Origin', '*'),
+        ('Cache-Control', 'no-store')
+    ], body
 
 
 async def handle_discovery_get(message: dict, websocket: WebSocketServerProtocol) -> None:
@@ -260,7 +346,13 @@ async def main() -> None:
     ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
     logging.info('Loaded TLS certificate for secure signalling at %s and %s', TLS_CERT_PATH, TLS_KEY_PATH)
 
-    wss_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_PORT, ssl=ssl_context)
+    wss_server = await websockets.serve(
+        websocket_handler,
+        SIGNAL_HOST,
+        SIGNAL_PORT,
+        ssl=ssl_context,
+        process_request=process_http_request
+    )
     logging.info('Secure server started on wss://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_PORT)
 
     await asyncio.Future()

@@ -19,7 +19,7 @@ A privacy-first peer-to-peer social app prototype.
 - `src/p2p/signalling.ts` — WebSocket signalling connection.
 - `src/p2p/webrtc.ts` — WebRTC peer connection and data channel.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.
-- `server.py` — Python WebSocket server handling signalling and discovery on a single port.
+- `server.py` — Python WebSocket server handling signalling and discovery, plus small HTTP peer-discovery routes on the same port.
 
 ## Install dependencies
 
@@ -44,7 +44,7 @@ Open the local URL printed by Vite.
 python3 server.py
 ```
 
-The server listens on a single WebSocket port (`ws://0.0.0.0:8765`) and handles both peer signalling and discovery — no HTTP is used.
+The server listens on a single port (`ws://0.0.0.0:8765` locally, HTTPS/WSS when deployed) for peer signalling, object discovery, and JSON peer-discovery routes.
 
 ## Testing with two browser windows or devices
 
@@ -73,6 +73,8 @@ The server listens on a single WebSocket port (`ws://0.0.0.0:8765`) and handles 
 - `ice-candidate` messages used to establish the peer route.
 - `DISCOVERY_PUBLISH` packets to store a public post.
 - `DISCOVERY_GET` packets to fetch public posts; the server replies with a `DISCOVERY_RESULT` packet.
+- `GET /api/peer-pool` returns peer IDs derived from authors of recent published posts.
+- `GET /api/popular-peers` returns the top ten reply targets from the last 30 days, grouped by `reply_to_author`.
 
 ## What travels directly between peers
 

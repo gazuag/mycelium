@@ -678,6 +678,27 @@ body, html, #root {
   text-decoration: underline;
 }
 
+.popular-posters-banner {
+  margin-bottom: 1rem;
+  padding: 1rem;
+  border: 1px solid rgba(158, 217, 200, 0.3);
+  border-radius: 8px;
+  background: rgba(158, 217, 200, 0.06);
+}
+
+.popular-posters-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.popular-poster-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 .peer-card {
   display: flex;
   flex-direction: column;

@@ -517,6 +517,13 @@ describe('distributed object foundation', () => {
     expect(payload).not.toHaveProperty('post');
   });
 
+  it('includes the target author peer ID in reply payloads for discovery tallying', () => {
+    expect(createReplyObjectPayload('parent-object-id', 'parent-peer-id')).toEqual({
+      reply_to: 'parent-object-id',
+      reply_to_author: 'parent-peer-id'
+    });
+  });
+
   it('delivers a generic object through the transport adapter and stores it at the receiver', async () => {
     const object = await createFixtureObject({
       object_type: 'transport-test',
