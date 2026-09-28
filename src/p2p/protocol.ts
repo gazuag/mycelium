@@ -19,6 +19,10 @@ export type MyceliumPacketType =
   | 'DISCOVERY_PUBLISH'
   | 'DISCOVERY_GET'
   | 'DISCOVERY_RESULT'
+  | 'PEER_POOL_GET'
+  | 'PEER_POOL_RESULT'
+  | 'POPULAR_PEERS_GET'
+  | 'POPULAR_PEERS_RESULT'
   | 'ERROR';
 
 export interface MyceliumPacket {

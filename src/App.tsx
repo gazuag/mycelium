@@ -22,7 +22,7 @@ import { canonicalize, type PacketSigner } from './p2p/protocol';
 import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
-import { fetchPeerPool, fetchPopularPeers, type PopularPeer } from './services/peer-discovery';
+import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -763,7 +763,9 @@ function App() {
       queuedMessages: 0
     };
     await saveContact(contact);
-    setContacts((prev) => dedupeContactsByFingerprint([...prev, contact]));
+    const nextContacts = dedupeContactsByFingerprint([...contactsRef.current, contact]);
+    contactsRef.current = nextContacts;
+    setContacts(nextContacts);
   };
 
   const refreshMessageQueue = async () => {
@@ -1105,40 +1107,54 @@ function App() {
   };
 
   const handlePeerList = async (peers: string[]) => {
+    const localPeerId = identity?.id;
+    if (!localPeerId) return;
     const validPeers = peers.filter((peerId) => {
-      if (!peerId || peerId === identity?.id) return false;
+      if (!peerId || peerId === localPeerId) return false;
       return isValidPeerFingerprint(peerId) && !blockedPeersRef.current.has(peerId);
     });
-    const invalidPeers = peers.filter((peerId) => !validPeers.includes(peerId) && !blockedPeersRef.current.has(peerId) && peerId !== identity?.id);
+    const invalidPeers = peers.filter((peerId) => !validPeers.includes(peerId) && !blockedPeersRef.current.has(peerId) && peerId !== localPeerId);
     if (invalidPeers.length) {
       addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
     }
+    addLog(`Peer-list received: ${peers.length} announced, ${validPeers.length} valid online peers`);
 
-    await Promise.all(validPeers.map((peerId) => addKnownPeer(peerId)));
+    for (const peerId of validPeers) {
+      await addKnownPeer(peerId);
+    }
 
-    setContacts((prev) =>
-      dedupeContactsByFingerprint(prev).map((contact) => ({
-        ...contact,
-        online: validPeers.includes(contact.fingerprint)
-      }))
-    );
+    const onlinePeerIds = new Set(validPeers);
+    const nextContacts = dedupeContactsByFingerprint(contactsRef.current).map((contact) => ({
+      ...contact,
+      online: onlinePeerIds.has(contact.fingerprint)
+    }));
+    contactsRef.current = nextContacts;
+    setContacts(nextContacts);
 
     const socket = signallingSocketRef.current;
-    validPeers.forEach((peerId) => {
-      if (!peerId || peerId === identity?.id) return;
-      const contact = contactsRef.current.find((c) => c.fingerprint === peerId);
+    for (const peerId of validPeers) {
       const manager = ensurePeerManager(peerId);
-      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) return;
+      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) {
+        addLog(`Peer-list dial skipped for ${peerId}: signalling=${socket?.readyState === WebSocket.OPEN ? 'open' : 'closed'} manager=${manager ? 'ready' : 'missing'}`);
+        continue;
+      }
 
       const channelState = manager.getDataChannelState();
-      const shouldReconnect = !contact?.connected || channelState === 'closed' || channelState === 'missing' || channelState === 'connecting';
-      if (shouldReconnect) {
-        const freshManager = ensurePeerManager(peerId);
-        if (freshManager) {
-          requestPeerOffer(peerId, freshManager, socket);
-        }
+      if (localPeerId > peerId) {
+        addLog(`Peer-list dial deferred for ${peerId}: local ID is not the initiator`);
+        continue;
       }
-    });
+      if (channelState === 'open') {
+        addLog(`Peer-list dial skipped for ${peerId}: data channel already open`);
+        continue;
+      }
+      if (channelState === 'connecting' || manager.isNegotiating()) {
+        addLog(`Peer-list dial deferred for ${peerId}: channel=${channelState} negotiating=${manager.isNegotiating()}`);
+        continue;
+      }
+      addLog(`Peer-list initiating connection to ${peerId}: channel=${channelState}`);
+      requestPeerOffer(peerId, manager, socket);
+    }
 
     for (const peerId of validPeers) {
       if (messageQueueRef.current[peerId]?.length) {
@@ -1282,6 +1298,11 @@ function App() {
           return;
         }
 
+        if (message.type === 'peer-discovery-result') {
+          handlePeerDiscoveryResult(message.packet);
+          return;
+        }
+
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
           if (message.from === identityRef.current?.id) {
             addLog(`Ignoring signalling message from self: ${message.type}`);
@@ -1332,13 +1353,11 @@ function App() {
       dedupeContactsByFingerprint(contactsRef.current).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
         const hasQueuedMessages = (messageQueueRef.current[contact.fingerprint]?.length ?? 0) > 0;
+        if (!contact.online && !hasQueuedMessages) return;
         const manager = ensurePeerManager(contact.fingerprint);
         if (!manager) return;
 
-        const shouldReconnect = (contact.online || hasQueuedMessages) && (
-          !contact.connected ||
-          manager.needsReplacement()
-        );
+        const shouldReconnect = manager.needsReplacement() || !manager.isDataChannelOpen();
 
         if (shouldReconnect && !manager.isNegotiating() && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
           addLog(`Reconnect attempt to ${contact.fingerprint}`);
@@ -1353,8 +1372,12 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
     void handleRefreshHomeFeed();
-    void handleFetchDiscovery();
   }, [identity?.id]);
+
+  useEffect(() => {
+    if (!identity?.id || signallingStatus !== 'connected') return;
+    void handleFetchDiscovery();
+  }, [identity?.id, signallingStatus]);
 
   useEffect(() => {
     if (page !== 'discover' || discoveryPosts.length > 0) return;
@@ -1368,8 +1391,10 @@ function App() {
 
   useEffect(() => {
     if (!identity?.id || !contactsLoaded || connectedPeerIds.length > 0 || signallingStatus !== 'connected' || peerPoolRequestedRef.current) return;
+    const socket = signallingSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     peerPoolRequestedRef.current = true;
-    void fetchPeerPool().then((peerIds) => {
+    void fetchPeerPool(socket).then((peerIds) => {
       setPossiblePeerIds(peerIds.filter((peerId) => peerId !== identity.id && !blockedPeersRef.current.has(peerId)));
       addLog(`Loaded ${peerIds.length} possible peers from discovery`);
     }).catch((error: unknown) => {
@@ -1379,8 +1404,10 @@ function App() {
 
   useEffect(() => {
     if (!identity?.id || !contactsLoaded || contacts.some((contact) => contact.followed) || signallingStatus !== 'connected' || popularPeersRequestedRef.current) return;
+    const socket = signallingSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     popularPeersRequestedRef.current = true;
-    void fetchPopularPeers().then((peers) => {
+    void fetchPopularPeers(socket).then((peers) => {
       setPopularPeers(peers.filter((peer) => peer.peer_id !== identity.id && !blockedPeersRef.current.has(peer.peer_id)));
     }).catch((error: unknown) => {
       addLog(`Popular peers request failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1853,8 +1880,17 @@ function App() {
     addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(socket, 20);
-      const verifiedPosts = (await Promise.all(items.map(async (object) => {
-          if (object.object_type !== 'mycelium.post' || !(await validateObject(object))) return null;
+      let unsupportedObjectCount = 0;
+      let invalidObjectCount = 0;
+      const verificationResults = await Promise.all(items.map(async (object) => {
+          if (object.object_type !== 'mycelium.post') {
+            unsupportedObjectCount += 1;
+            return null;
+          }
+          if (!(await validateObject(object))) {
+            invalidObjectCount += 1;
+            return null;
+          }
           const cachedPost = discoveryPosts.find((cached) => cached.object.object_id === object.object_id)
             ?? postViews.find((cached) => cached.object.object_id === object.object_id);
           const knownContact = contactsRef.current.find((contact) =>
@@ -1862,16 +1898,17 @@ function App() {
           );
           const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-          return createLocalPostView(object as PostObject, authorFingerprint, {
+            return createLocalPostView(object as PostObject, authorFingerprint, {
               source: 'discovery',
               authorDisplayName: authorDisplayName || cachedPost?.authorDisplayName
           });
-      }))).filter((view): view is LocalPostView => view !== null);
+          }));
+          const verifiedPosts = verificationResults.filter((view): view is LocalPostView => view !== null);
       setDiscoveryPosts((prev) => {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
         return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
       });
-      addLog(`Fetched ${verifiedPosts.length} discovery posts`);
+      addLog(`Discovery result: received=${items.length} accepted=${verifiedPosts.length} unsupported=${unsupportedObjectCount} invalid=${invalidObjectCount}`);
     } catch (err: any) {
       const message = err?.message || String(err);
       addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);

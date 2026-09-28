@@ -9,10 +9,8 @@ import ssl
 import time
 import uuid
 from datetime import datetime, timedelta
-from http import HTTPStatus
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -76,10 +74,12 @@ async def broadcast_peer_list() -> None:
             pass
 
 
-def init_db() -> sqlite3.Connection:
-    created = not DB_PATH.exists()
-    conn = sqlite3.connect(DB_PATH)
-    if created:
+def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='discovery_posts'"
+    ).fetchone() is not None
+    if not table_exists:
         conn.execute('''
             CREATE TABLE discovery_posts (
                 id TEXT PRIMARY KEY,
@@ -91,12 +91,42 @@ def init_db() -> sqlite3.Connection:
         ''')
         conn.execute('CREATE INDEX idx_received_at ON discovery_posts(received_at)')
         conn.commit()
-    else:
-        columns = {row[1] for row in conn.execute('PRAGMA table_info(discovery_posts)')}
-        if 'object_json' not in columns:
-            conn.execute('ALTER TABLE discovery_posts ADD COLUMN object_json TEXT')
-            conn.execute('UPDATE discovery_posts SET object_json = post_json WHERE object_json IS NULL')
+        return conn
+
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(discovery_posts)')}
+    if 'post_json' in columns:
+        json_expression = 'COALESCE(object_json, post_json)' if 'object_json' in columns else 'post_json'
+        author_expression = 'author' if 'author' in columns else "''"
+        tags_expression = 'tags' if 'tags' in columns else "''"
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            conn.execute('''
+                CREATE TABLE discovery_posts_migrated (
+                    id TEXT PRIMARY KEY,
+                    received_at TEXT NOT NULL,
+                    object_json TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    tags TEXT
+                )
+            ''')
+            conn.execute(f'''
+                INSERT INTO discovery_posts_migrated (id, received_at, object_json, author, tags)
+                SELECT id, received_at, {json_expression}, {author_expression}, {tags_expression}
+                FROM discovery_posts
+                WHERE {json_expression} IS NOT NULL
+            ''')
+            conn.execute('DROP TABLE discovery_posts')
+            conn.execute('ALTER TABLE discovery_posts_migrated RENAME TO discovery_posts')
+            conn.execute('CREATE INDEX idx_received_at ON discovery_posts(received_at)')
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        if 'object_json' not in columns:
+            raise sqlite3.DatabaseError('discovery_posts has neither object_json nor legacy post_json')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_received_at ON discovery_posts(received_at)')
+        conn.commit()
     return conn
 
 DB_CONN = init_db()
@@ -208,28 +238,35 @@ def load_popular_peers(limit: int = 10) -> List[dict]:
     return [{'peer_id': peer_id, 'reply_count': count} for peer_id, count in ranked[:max(0, limit)]]
 
 
-def build_discovery_api_response(path: str) -> Optional[Tuple[int, bytes]]:
-    route = urlsplit(path).path
-    if route == '/api/peer-pool':
-        body = {'peers': load_peer_pool()}
-    elif route == '/api/popular-peers':
-        body = {'peers': load_popular_peers(10)}
-    else:
-        return None
-    return HTTPStatus.OK, json.dumps(body).encode('utf-8')
+def build_peer_discovery_result_packet(response_type: str, peers, request_id: Optional[str], recipient: Optional[str]):
+    return {
+        'protocol': 'mycelium',
+        'version': 1,
+        'id': str(uuid.uuid4()),
+        'type': response_type,
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'sender': 'discovery-server',
+        'recipient': recipient,
+        'payload': {'requestId': request_id, 'peers': peers},
+        'signature': 'server-unsigned-v1'
+    }
 
 
-def process_http_request(path: str, request_headers):
-    response = build_discovery_api_response(path)
-    if response is None:
-        return None
-    status, body = response
-    return status, [
-        ('Content-Type', 'application/json; charset=utf-8'),
-        ('Content-Length', str(len(body))),
-        ('Access-Control-Allow-Origin', '*'),
-        ('Cache-Control', 'no-store')
-    ], body
+async def handle_peer_pool_get(message: dict, websocket: WebSocketServerProtocol) -> None:
+    packet = build_peer_discovery_result_packet(
+        'PEER_POOL_RESULT', load_peer_pool(), message.get('id'), message.get('sender')
+    )
+    await websocket.send(json.dumps(packet))
+    logging.info('Sent %d peer-pool suggestions to %s', len(packet['payload']['peers']), message.get('sender', '<unknown>'))
+
+
+async def handle_popular_peers_get(message: dict, websocket: WebSocketServerProtocol) -> None:
+    peers = load_popular_peers(10)
+    packet = build_peer_discovery_result_packet(
+        'POPULAR_PEERS_RESULT', peers, message.get('id'), message.get('sender')
+    )
+    await websocket.send(json.dumps(packet))
+    logging.info('Sent %d popular peers to %s', len(peers), message.get('sender', '<unknown>'))
 
 
 async def handle_discovery_get(message: dict, websocket: WebSocketServerProtocol) -> None:
@@ -265,12 +302,17 @@ async def handle_discovery_publish(message: dict) -> None:
     received_at = datetime.utcnow().isoformat() + 'Z'
     object_tags = object_content.get('tags', [])
     tags = ','.join(tag for tag in object_tags if isinstance(tag, str)) if isinstance(object_tags, list) else ''
-    DB_CONN.execute(
-        'INSERT OR REPLACE INTO discovery_posts (id, received_at, object_json, author, tags) VALUES (?, ?, ?, ?, ?)',
-        (object_id, received_at, raw_object_json, author, tags)
-    )
-    DB_CONN.commit()
-    await prune_discovery_posts()
+    try:
+        DB_CONN.execute(
+            'INSERT OR REPLACE INTO discovery_posts (id, received_at, object_json, author, tags) VALUES (?, ?, ?, ?, ?)',
+            (object_id, received_at, raw_object_json, author, tags)
+        )
+        DB_CONN.commit()
+        await prune_discovery_posts()
+    except sqlite3.Error:
+        DB_CONN.rollback()
+        logging.exception('Failed to persist discovery object %s from %s; keeping signalling session alive', object_id, author)
+        return
     logging.info('Stored discovery object %s from %s tags=%s', object_id, author, tags)
 
 
@@ -323,6 +365,12 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                 if msg_type == 'DISCOVERY_PUBLISH':
                     await handle_discovery_publish(message)
                     continue
+                if msg_type == 'PEER_POOL_GET':
+                    await handle_peer_pool_get(message, websocket)
+                    continue
+                if msg_type == 'POPULAR_PEERS_GET':
+                    await handle_popular_peers_get(message, websocket)
+                    continue
 
             logging.warning('Unsupported message type: %s', msg_type)
     except websockets.ConnectionClosed:
@@ -346,13 +394,7 @@ async def main() -> None:
     ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
     logging.info('Loaded TLS certificate for secure signalling at %s and %s', TLS_CERT_PATH, TLS_KEY_PATH)
 
-    wss_server = await websockets.serve(
-        websocket_handler,
-        SIGNAL_HOST,
-        SIGNAL_PORT,
-        ssl=ssl_context,
-        process_request=process_http_request
-    )
+    wss_server = await websockets.serve(websocket_handler, SIGNAL_HOST, SIGNAL_PORT, ssl=ssl_context)
     logging.info('Secure server started on wss://%s:%s (signalling + discovery)', SIGNAL_HOST, SIGNAL_PORT)
 
     await asyncio.Future()

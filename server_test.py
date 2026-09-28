@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -71,6 +72,60 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         self.assertEqual(result['payload']['objects'], [object_value])
         self.assertNotIn('posts', result['payload'])
 
+    def test_migrates_legacy_post_json_not_null_schema(self):
+        legacy_path = os.path.join(self.temp_dir.name, 'legacy.db')
+        legacy = sqlite3.connect(legacy_path)
+        legacy.execute('''CREATE TABLE discovery_posts (
+            id TEXT PRIMARY KEY, received_at TEXT NOT NULL, post_json TEXT NOT NULL,
+            author TEXT NOT NULL, tags TEXT
+        )''')
+        old_object = {'object_type': 'mycelium.post', 'author': 'old-author'}
+        legacy.execute(
+            'INSERT INTO discovery_posts (id, received_at, post_json, author, tags) VALUES (?, ?, ?, ?, ?)',
+            ('legacy-id', datetime.utcnow().isoformat() + 'Z', json.dumps(old_object), 'old-author', '')
+        )
+        legacy.commit()
+        legacy.close()
+
+        migrated = self.server.init_db(legacy_path)
+        columns = {row[1] for row in migrated.execute('PRAGMA table_info(discovery_posts)')}
+        self.assertIn('object_json', columns)
+        self.assertNotIn('post_json', columns)
+        self.assertEqual(json.loads(migrated.execute('SELECT object_json FROM discovery_posts WHERE id = ?', ('legacy-id',)).fetchone()[0]), old_object)
+        migrated.execute(
+            'INSERT INTO discovery_posts (id, received_at, object_json, author, tags) VALUES (?, ?, ?, ?, ?)',
+            ('new-id', datetime.utcnow().isoformat() + 'Z', json.dumps({'object_type': 'mycelium.post'}), 'new-author', '')
+        )
+        migrated.commit()
+        migrated.close()
+
+    def test_publish_database_error_does_not_escape_handler(self):
+        class FailingDatabase:
+            rolled_back = False
+
+            def execute(self, *_args):
+                raise sqlite3.IntegrityError('simulated legacy schema failure')
+
+            def rollback(self):
+                self.rolled_back = True
+
+        original_db = self.server.DB_CONN
+        failing_db = FailingDatabase()
+        self.server.DB_CONN = failing_db
+        object_value = {
+            'object_id': 'error-object',
+            'object_type': 'mycelium.post',
+            'author': 'author-key',
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'payload': {'content': 'test'},
+            'signature': 'not-validated-by-server'
+        }
+        try:
+            asyncio.run(self.server.handle_discovery_publish({'payload': {'object': object_value}}))
+        finally:
+            self.server.DB_CONN = original_db
+        self.assertTrue(failing_db.rolled_back)
+
     def test_popular_peer_tally_groups_reply_authors(self):
         self.store_object('reply-1', 'mycelium.post', 'author-a', {'reply_to_author': 'peer-a', 'reply_to': 'post-1'})
         self.store_object('reply-2', 'mycelium.post', 'author-b', {'reply_to_author': 'peer-a', 'reply_to': 'post-2'})
@@ -102,12 +157,23 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         self.assertEqual(peers[0], {'peer_id': 'peer-11', 'reply_count': 12})
         self.assertNotIn('peer-00', [peer['peer_id'] for peer in peers])
 
-    def test_peer_pool_http_route_returns_recent_post_authors(self):
+    def test_peer_pool_request_returns_protocol_response_over_websocket(self):
         post = self.store_object('pool-post', 'mycelium.post', 'author-key', {'content': 'hello'})
-        status, body = self.server.build_discovery_api_response('/api/peer-pool')
+        websocket = FakeWebSocket()
+        asyncio.run(self.server.handle_peer_pool_get({'id': 'pool-request', 'sender': 'requester'}, websocket))
 
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)['peers'], [self.server._peer_id_for_author(post['author'])])
+        self.assertEqual(websocket.messages[0]['type'], 'PEER_POOL_RESULT')
+        self.assertEqual(websocket.messages[0]['payload']['requestId'], 'pool-request')
+        self.assertEqual(websocket.messages[0]['payload']['peers'], [self.server._peer_id_for_author(post['author'])])
+
+    def test_popular_peer_request_returns_correlated_protocol_response(self):
+        self.store_object('popular-reply', 'mycelium.post', 'author', {'reply_to_author': 'popular-peer'})
+        websocket = FakeWebSocket()
+        asyncio.run(self.server.handle_popular_peers_get({'id': 'popular-request', 'sender': 'requester'}, websocket))
+
+        self.assertEqual(websocket.messages[0]['type'], 'POPULAR_PEERS_RESULT')
+        self.assertEqual(websocket.messages[0]['payload']['requestId'], 'popular-request')
+        self.assertEqual(websocket.messages[0]['payload']['peers'], [{'peer_id': 'popular-peer', 'reply_count': 1}])
 
 
 if __name__ == '__main__':

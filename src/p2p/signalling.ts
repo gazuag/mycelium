@@ -12,6 +12,10 @@ export type SignalMessage =
   | {
       type: 'discovery-result';
       packet: unknown;
+    }
+    | {
+      type: 'peer-discovery-result';
+      packet: unknown;
     };
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
@@ -81,6 +85,10 @@ export function connectToSignalling(
       // Route Mycelium DISCOVERY_RESULT packets as a typed discovery-result message.
       if (parsed?.protocol === 'mycelium' && parsed?.type === 'DISCOVERY_RESULT') {
         onMessage({ type: 'discovery-result', packet: parsed });
+        return;
+      }
+      if (parsed?.protocol === 'mycelium' && ['PEER_POOL_RESULT', 'POPULAR_PEERS_RESULT'].includes(parsed?.type)) {
+        onMessage({ type: 'peer-discovery-result', packet: parsed });
         return;
       }
       const message = parsed as SignalMessage;
