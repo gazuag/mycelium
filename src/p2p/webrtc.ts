@@ -2,14 +2,13 @@ import type { PeerSignalMessage, SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
 import type { DistributedObject, ObjectPacket } from '../object-layer/types';
+import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
-const TURN_URL = import.meta.env.VITE_TURN_URL || 'turn:openrelay.metered.ca:80';
-const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || 'openrelayproject';
-const TURN_CREDENTIAL = import.meta.env.VITE_TURN_CREDENTIAL || 'openrelayproject';
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: [TURN_URL, 'turn:openrelay.metered.ca:443?transport=tcp'], username: TURN_USERNAME, credential: TURN_CREDENTIAL }
-];
+let ICE_SERVERS: RTCIceServer[] = FALLBACK_ICE_SERVERS;
+
+export function configureIceServers(iceServers: RTCIceServer[]) {
+  if (iceServers.length > 0) ICE_SERVERS = [...iceServers];
+}
 const PING_INTERVAL_MS = 30000;
 const OFFER_RECOVERY_TIMEOUT_MS = 10000;
 let nextManagerId = 1;

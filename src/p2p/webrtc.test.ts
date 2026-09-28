@@ -1,8 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { DistributedObject, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
-import { PeerConnectionManager } from './webrtc';
+import { configureIceServers, PeerConnectionManager } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
+import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
 class FakeDataChannel {
   readonly label = 'chat';
@@ -28,6 +29,7 @@ class FakePeerConnection {
   static maxActiveRemoteDescriptionCalls = 0;
   static createDataChannelCalls = 0;
   lastDataChannel: FakeDataChannel | null = null;
+  configuration: RTCConfiguration;
 
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -42,7 +44,8 @@ class FakePeerConnection {
   ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null;
   stats = new Map<string, any>();
 
-  constructor() {
+  constructor(configuration: RTCConfiguration) {
+    this.configuration = configuration;
     FakePeerConnection.instances.push(this);
   }
 
@@ -112,6 +115,7 @@ function signal(type: PeerSignalMessage['type'], from = 'peer-b'): PeerSignalMes
 }
 
 beforeEach(() => {
+  configureIceServers(FALLBACK_ICE_SERVERS);
   FakePeerConnection.instances = [];
   FakePeerConnection.activeRemoteDescriptionCalls = 0;
   FakePeerConnection.maxActiveRemoteDescriptionCalls = 0;
@@ -121,6 +125,18 @@ beforeEach(() => {
 });
 
 describe('PeerConnectionManager lifecycle', () => {
+  it('uses the configured Metered ICE servers when creating peer connections', () => {
+    const meteredServers: RTCIceServer[] = [
+      { urls: 'stun:metered.example:80' },
+      { urls: 'turn:metered.example:443?transport=tcp', username: 'temporary-user', credential: 'temporary-password' }
+    ];
+    configureIceServers(meteredServers);
+
+    createManager();
+
+    expect(FakePeerConnection.instances[0].configuration.iceServers).toEqual(meteredServers);
+  });
+
   it('logs all checked ICE pairs on failure and the selected pair when connected', async () => {
     const events: string[] = [];
     const manager = new PeerConnectionManager(

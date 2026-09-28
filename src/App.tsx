@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
-import { PeerConnectionManager } from './p2p/webrtc';
+import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
@@ -23,6 +23,7 @@ import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacke
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
+import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
 import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
 
 interface IdentityRecord {
@@ -181,6 +182,8 @@ function App() {
   const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
   const peerPoolRequestedRef = useRef(false);
   const popularPeersRequestedRef = useRef(false);
+  const turnIceInitializationRef = useRef<Promise<void> | null>(null);
+  const turnIceConfiguredRef = useRef(false);
   const selectedContactIdRef = useRef<string | null>(null);
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
@@ -206,6 +209,27 @@ function App() {
   if (!objectTransportRef.current) {
     objectTransportRef.current = new PeerConnectionObjectTransport(() => peerManagersRef.current);
   }
+
+  const refreshTurnIceServers = async () => {
+    try {
+      const iceServers = await fetchMeteredIceServers();
+      configureIceServers(iceServers);
+      turnIceConfiguredRef.current = true;
+      addLog(`Loaded ${iceServers.length} Metered ICE server entries`);
+    } catch (error) {
+      if (!turnIceConfiguredRef.current) {
+        configureIceServers(FALLBACK_ICE_SERVERS);
+      }
+      addLog(`Metered TURN credentials unavailable; ${turnIceConfiguredRef.current ? 'retaining last configured servers' : 'using STUN-only fallback'}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const ensureTurnIceServers = () => {
+    if (!turnIceInitializationRef.current) {
+      turnIceInitializationRef.current = refreshTurnIceServers();
+    }
+    return turnIceInitializationRef.current;
+  };
 
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
@@ -1169,6 +1193,7 @@ function App() {
       if (stored) {
         const id = stored.id ?? (await deriveFingerprint(stored.publicKey));
         const loadedIdentity = { ...stored, id };
+        await ensureTurnIceServers();
         setIdentity(loadedIdentity);
         addLog(`Identity loaded: ${loadedIdentity.id}`);
       }
@@ -1372,6 +1397,14 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
     void handleRefreshHomeFeed();
+  }, [identity?.id]);
+
+  useEffect(() => {
+    if (!identity?.id) return;
+    const interval = window.setInterval(() => {
+      void refreshTurnIceServers();
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(interval);
   }, [identity?.id]);
 
   useEffect(() => {
@@ -1916,6 +1949,7 @@ function App() {
   }
 
   async function handleCreateIdentity() {
+    await ensureTurnIceServers();
     const keys = await generateIdentityKeyPair();
     const publicKey = await exportPublicKey(keys.publicKey);
     const privateKey = await exportPrivateKey(keys.privateKey);
@@ -1990,6 +2024,7 @@ function App() {
         const importedIdentity = imported?.identity ?? imported;
 
         if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
+          await ensureTurnIceServers();
           const nextIdentity = {
             key: importedIdentity.key ?? 'local',
             publicKey: importedIdentity.publicKey,
