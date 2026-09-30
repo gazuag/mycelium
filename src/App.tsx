@@ -19,7 +19,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
@@ -421,16 +421,17 @@ function App() {
         addLog(`upstream recorded: ${peerId}`);
         let aggregation: FindAggregation;
         aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
+          const responseObjects = applyFindQueryLimit(objects, queryFields);
           addLog('aggregate complete');
           addLog(`reason: ${reason}`);
-          addLog(`returning: ${objects.length} objects`);
+          addLog(`returning: ${responseObjects.length} objects`);
           addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
-          addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${objects.length} upstream=${peerId}`);
+          addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${responseObjects.length} upstream=${peerId}`);
           const response = await buildFindResponseObjectsPacket(
             identityRef.current?.id ?? 'unknown',
             peerId,
             requestId,
-            objects,
+            responseObjects,
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
             expiresAt
@@ -955,11 +956,11 @@ function App() {
           addLog(`Blocked peer ${peer} post ignored`);
           return;
         }
-        if (!(await validateObject(object))) {
-          addLog(`Rejected invalid object from ${peer}`);
-          return;
-        }
-        await objectStoreRef.current?.put(object);
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!store || !transport) return;
+        const stored = await receiveAndReplicate(object, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        if (!stored) return;
         recommendationIndexRef.current.add(object);
         setRecommendationRevision((revision) => revision + 1);
         const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
@@ -1006,13 +1007,13 @@ function App() {
           return;
         }
 
-        const uniqueById = new Map<string, DistributedObject>();
-        for (const object of objects) {
-          if (await validateObject(object)) uniqueById.set(object.object_id, object);
-        }
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!store || !transport) return;
+        const storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
         const receivedViews: LocalPostView[] = [];
-        for (const object of uniqueById.values()) {
-          await objectStoreRef.current?.put(object);
+        for (const object of newlyStoredObjects) {
           recommendationIndexRef.current.add(object);
           setRecommendationRevision((revision) => revision + 1);
           const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
@@ -1023,8 +1024,8 @@ function App() {
         // Only advance the cursor when something was actually received, and use the newest
         // post timestamp (not wall-clock now) so an empty/partial batch never causes older,
         // not-yet-synced posts to become permanently unreachable on future requests.
-        if (uniqueById.size > 0) {
-          const latestTimestamp = [...uniqueById.values()].reduce(
+        if (newlyStoredObjects.length > 0) {
+          const latestTimestamp = newlyStoredObjects.reduce(
             (latest, object) => Math.max(latest, new Date(object.created_at).getTime()),
             0
           );
@@ -1035,7 +1036,7 @@ function App() {
             localStorage.setItem(cursorKey, new Date(latestTimestamp).toISOString());
           }
         }
-        addLog(`Received ${uniqueById.size} canonical posts from ${peer}`);
+        addLog(`Received ${newlyStoredObjects.length} canonical posts from ${peer}`);
       },
       async (peer: string) => {
         if (!isCurrentManager(peer)) return;

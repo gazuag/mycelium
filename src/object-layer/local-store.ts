@@ -1,5 +1,5 @@
 import type { DistributedObject, LocalPostMetadata, LocalPostMetadataStore, ObjectCriteria, ObjectStore, RecommendationSequenceStore } from './types';
-import { validateDistributedObject } from './envelope';
+import { isObjectExpired, validateDistributedObject } from './envelope';
 
 const DATABASE_NAME = 'mycelium_objects';
 const DATABASE_VERSION = 3;
@@ -14,17 +14,34 @@ export class IndexedDbObjectStore implements ObjectStore {
     this.databasePromise = openObjectDatabase();
   }
 
-  async put(object: DistributedObject): Promise<void> {
+  async put(object: DistributedObject): Promise<boolean> {
     if (!(await validateDistributedObject(object))) {
       throw new Error('Invalid distributed object');
     }
     const database = await this.databasePromise;
-    await runTransaction(database, 'readwrite', (store) => store.put(object));
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(OBJECT_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(OBJECT_STORE_NAME);
+      const request = store.get(object.object_id);
+      let existed = false;
+      request.onsuccess = () => {
+        existed = request.result !== undefined;
+        store.put(object);
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve(!existed);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+    });
   }
 
   async get(objectId: string): Promise<DistributedObject | null> {
     const database = await this.databasePromise;
     const object = await runRequest<DistributedObject | undefined>(database, 'readonly', (store) => store.get(objectId));
+    if (object && isObjectExpired(object)) {
+      await this.delete(objectId);
+      return null;
+    }
     return object ?? null;
   }
 
@@ -36,7 +53,16 @@ export class IndexedDbObjectStore implements ObjectStore {
   async query(criteria: ObjectCriteria = {}): Promise<DistributedObject[]> {
     const database = await this.databasePromise;
     const objects = await runRequest<DistributedObject[]>(database, 'readonly', (store) => store.getAll());
-    return objects.filter((object) => Object.entries(criteria).every(([key, expected]) => object[key as keyof DistributedObject] === expected));
+    const matching = objects.filter((object) => Object.entries(criteria).every(([key, expected]) => object[key as keyof DistributedObject] === expected));
+    const results: DistributedObject[] = [];
+    for (const object of matching) {
+      if (isObjectExpired(object)) {
+        await this.delete(object.object_id);
+      } else {
+        results.push(object);
+      }
+    }
+    return results;
   }
 }
 

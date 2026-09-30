@@ -1,5 +1,5 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
-import { validateObject } from './envelope';
+import { isObjectExpired, validateObject } from './envelope';
 import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
@@ -87,12 +87,14 @@ export async function buildTimeRangeFindPacket(
   ttl = 1,
   origin?: string,
   expiresAt = new Date(Date.now() + FIND_REQUEST_LIFETIME_MS).toISOString(),
-  objectIds: string[] = []
+  objectIds: string[] = [],
+  limit?: number
 ): Promise<FindPacket> {
   return buildFindPacket(sender, recipient, objectIds, signer, requestId, ttl, origin, expiresAt, {
     author,
     created_after: createdAfter,
-    created_before: createdBefore
+    created_before: createdBefore,
+    limit
   });
 }
 
@@ -165,21 +167,57 @@ export async function receiveObjectPacket(packet: unknown, store: ObjectStore): 
   if (!object || typeof object !== 'object' || Array.isArray(object)) return false;
   if (!(await validateObject(object))) return false;
 
-  await store.put(object as DistributedObject);
-  return true;
+  return await store.put(object as DistributedObject);
 }
 
-export async function receiveObjectBatchPacket(packet: unknown, store: ObjectStore): Promise<DistributedObject[]> {
+export async function receiveObjectBatchPacket(packet: unknown, store: ObjectStore): Promise<boolean[]> {
   if (!isMyceliumPacket(packet) || packet.type !== 'OBJECT_BATCH') return [];
   const objects = packet.payload?.objects;
   if (!Array.isArray(objects)) return [];
-  const validObjects: DistributedObject[] = [];
+  const storedFlags: boolean[] = [];
   for (const object of objects) {
-    if (!object || typeof object !== 'object' || Array.isArray(object) || !(await validateObject(object))) continue;
-    await store.put(object as DistributedObject);
-    validObjects.push(object as DistributedObject);
+    if (!object || typeof object !== 'object' || Array.isArray(object) || !(await validateObject(object))) {
+      storedFlags.push(false);
+      continue;
+    }
+    storedFlags.push(await store.put(object as DistributedObject));
   }
-  return validObjects;
+  return storedFlags;
+}
+
+export async function receiveAndReplicate(
+  value: unknown,
+  sourcePeerId: string,
+  store: ObjectStore,
+  transport: ObjectTransport,
+  sender: string,
+  signer?: PacketSigner,
+  log: (message: string) => void = () => {}
+): Promise<boolean> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !(await validateObject(value))) return false;
+
+  const object = value as DistributedObject;
+  const stored = await store.put(object);
+  if (!stored) return false;
+
+  await replicateObject(sender, object, transport, signer, new Set([sourcePeerId]), log);
+  return true;
+}
+
+export async function receiveBatchAndReplicate(
+  objects: readonly unknown[],
+  sourcePeerId: string,
+  store: ObjectStore,
+  transport: ObjectTransport,
+  sender: string,
+  signer?: PacketSigner,
+  log: (message: string) => void = () => {}
+): Promise<boolean[]> {
+  const storedFlags: boolean[] = [];
+  for (const object of objects) {
+    storedFlags.push(await receiveAndReplicate(object, sourcePeerId, store, transport, sender, signer, log));
+  }
+  return storedFlags;
 }
 
 export async function receiveFindResponsePacket(packet: unknown, store: ObjectStore, expectedRequestId?: string): Promise<DistributedObject | null> {
@@ -210,7 +248,8 @@ export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | nu
 
 export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQueryCriteria): Promise<DistributedObject[]> {
   const objects = await store.query();
-  const filtered = objects.filter((object) => {
+  const liveObjects = objects.filter((object) => !isObjectExpired(object));
+  const filtered = liveObjects.filter((object) => {
     if (query.object_type && object.object_type !== query.object_type) return false;
     if (query.author && object.author !== query.author) return false;
     if (query.created_after && new Date(object.created_at).getTime() < new Date(query.created_after).getTime()) return false;
@@ -222,6 +261,16 @@ export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQu
     filtered.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
   }
   return query.limit === undefined ? filtered : filtered.slice(0, query.limit);
+}
+
+export function applyFindQueryLimit(
+  objects: DistributedObject[],
+  query: Pick<FindQueryCriteria, 'limit' | 'order'>
+): DistributedObject[] {
+  const ordered = query.order === 'created_at_desc'
+    ? [...objects].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    : [...objects];
+  return query.limit === undefined ? ordered : ordered.slice(0, query.limit);
 }
 
 export async function validateFindResponseObjects(

@@ -72,6 +72,13 @@ export function isRecommendationObject(object: DistributedObject): object is Rec
     && payload.sequence === object.sequence;
 }
 
+export function isObjectExpired(object: DistributedObject, now: Date = new Date()): boolean {
+  const expiresAt = object.expires_at !== undefined
+    ? object.expires_at
+    : object.replication_policy.expires_at;
+  return expiresAt !== undefined && Date.parse(expiresAt) <= now.getTime();
+}
+
 export async function validateObject(value: unknown, identity?: ObjectIdentity): Promise<boolean> {
   return validateDistributedObject(value, identity
     ? (author, content, signature) => identity.verify(author, content, signature)

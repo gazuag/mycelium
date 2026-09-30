@@ -129,7 +129,7 @@ export type ObjectContent = Omit<DistributedObject, 'object_id' | 'author' | 'si
 export type ObjectCriteria = Partial<Pick<DistributedObject, 'object_id' | 'object_type' | 'author' | 'created_at' | 'expires_at' | 'sequence'>>;
 
 export interface ObjectStore {
-  put(object: DistributedObject): Promise<void>;
+  put(object: DistributedObject): Promise<boolean>;
   get(objectId: string): Promise<DistributedObject | null>;
   delete(objectId: string): Promise<void>;
   query(criteria?: ObjectCriteria): Promise<DistributedObject[]>;
