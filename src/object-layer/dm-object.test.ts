@@ -11,10 +11,13 @@ import {
   verifyEncryptionKeyBinding
 } from '../crypto/dm-crypto';
 import { isObjectExpired, validateObject } from './envelope';
+import { createObjectIdentity } from './identity';
+import { createSignedObject } from './envelope';
 import { createDmObject, decryptDmObject, DM_REPLICATION_BUDGET, DM_TTL_MS, validateDmPayload } from './dm-object';
 import { IndexedDbObjectStore } from './local-store';
-import { buildObjectStorePacket, queryFeedObjectsForPeer, receiveObjectPacket, replicateObject } from './transport';
+import { buildObjectBatchPacket, buildObjectStorePacket, queryFeedObjectsForPeer, receiveObjectBatchPacket, receiveObjectPacket, replicateObject } from './transport';
 import { deleteIdentity, loadIdentity, saveIdentity, type LocalIdentityRecord } from '../storage/idb';
+import { fetchDiscovery, handleDiscoveryResult } from '../services/discovery';
 import type { ObjectPacket, ObjectTransport } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
@@ -65,8 +68,9 @@ describe('mycelium.dm objects', () => {
     expect(await import('../object-layer/envelope').then(({ validateObject }) => validateObject(object))).toBe(true);
     expect(Date.parse(object.expires_at ?? '')).toBeGreaterThan(Date.now());
     expect(object.replication_policy).toEqual({ replication_budget: DM_REPLICATION_BUDGET });
+    expect(object.recipient).toBe(recipient.publicKey);
     expect(validateDmPayload(object.payload)).toBe(true);
-    expect((object.payload as { recipient: string }).recipient).toBe(recipient.publicKey);
+    expect(object.payload).not.toHaveProperty('recipient');
   });
 
   it('does not include plaintext in the signed object', async () => {
@@ -112,13 +116,71 @@ describe('mycelium.dm objects', () => {
       .rejects.toThrow();
   });
 
-  it('rejects a tampered recipient field', async () => {
-    const { recipient, sender, object } = await sendDm();
+  it('rejects a DM payload that still contains a recipient field', async () => {
+    const { recipient, object } = await sendDm();
     const payload = object.payload as Record<string, unknown>;
-    const tampered = { ...object, payload: { ...payload, recipient: sender.publicKey } };
 
-    await expect(decryptDmObject({ object: tampered, identity: recipient, expectedSenderEncryptionKey: sender.encryptionPublicKey }))
-      .rejects.toThrow();
+    expect(validateDmPayload({ ...payload, recipient: recipient.publicKey })).toBe(false);
+    await expect(decryptDmObject({
+      object: { ...object, payload: { ...payload, recipient: recipient.publicKey } },
+      identity: recipient
+    })).rejects.toThrow();
+  });
+
+  it('rejects a signed DM that has no envelope recipient', async () => {
+    const { sender, recipient, object } = await sendDm();
+    const unsignedContent = {
+      object_type: object.object_type,
+      created_at: object.created_at,
+      expires_at: object.expires_at,
+      payload: object.payload,
+      replication_policy: object.replication_policy
+    };
+    const legacyObject = await createSignedObject(unsignedContent, createObjectIdentity({
+      id: sender.id,
+      publicKey: sender.publicKey,
+      privateKey: sender.privateKey
+    }));
+
+    await expect(decryptDmObject({
+      object: legacyObject,
+      identity: recipient,
+      expectedSenderEncryptionKey: sender.encryptionPublicKey
+    })).rejects.toThrow('Direct-message recipient is missing');
+  });
+
+  it('rejects a tampered envelope recipient by signature and after re-signing by AAD', async () => {
+    const { sender, recipient, object } = await sendDm();
+    const changedSigningPair = await generateIdentityKeyPair();
+    const changedRecipient = {
+      ...recipient,
+      publicKey: await exportPublicKey(changedSigningPair.publicKey),
+      privateKey: await exportPrivateKey(changedSigningPair.privateKey)
+    };
+    const unsignedContent = {
+      object_type: object.object_type,
+      recipient: changedRecipient.publicKey,
+      created_at: object.created_at,
+      expires_at: object.expires_at,
+      payload: object.payload,
+      replication_policy: object.replication_policy
+    };
+    const resignedObject = await createSignedObject(unsignedContent, createObjectIdentity({
+      id: changedRecipient.id,
+      publicKey: sender.publicKey,
+      privateKey: sender.privateKey
+    }));
+
+    await expect(decryptDmObject({
+      object: { ...object, recipient: changedRecipient.publicKey },
+      identity: recipient,
+      expectedSenderEncryptionKey: sender.encryptionPublicKey
+    })).rejects.toThrow('Invalid signed direct-message object');
+    await expect(decryptDmObject({
+      object: resignedObject,
+      identity: changedRecipient,
+      expectedSenderEncryptionKey: sender.encryptionPublicKey
+    })).rejects.toThrow();
   });
 
   it('rejects a tampered encryption-key field', async () => {
@@ -145,6 +207,7 @@ describe('mycelium.dm objects', () => {
     const { createSignedObject } = await import('./envelope');
     const malformed = await createSignedObject({
       object_type: 'mycelium.dm',
+      recipient: recipient.publicKey,
       created_at: new Date().toISOString(),
       payload: { v: 2, recipient: recipient.publicKey },
       replication_policy: { replication_budget: 1 }
@@ -257,12 +320,50 @@ describe('mycelium.dm objects', () => {
     await expect(receiveObjectPacket(packet, store)).resolves.toBe(true);
     const stored = await store.get(object.object_id);
     expect(stored).toEqual(object);
+    expect(stored?.recipient).toBe(recipient.publicKey);
     expect(await validateObject(stored)).toBe(true);
     await expect(decryptDmObject({
       object: stored!,
       identity: recipient,
       expectedSenderEncryptionKey: sender.encryptionPublicKey
     })).resolves.toBe('replicated ciphertext');
+  });
+
+  it('preserves recipient through an OBJECT_BATCH round trip', async () => {
+    const { sender, recipient, object } = await sendDm('batch recipient');
+    const store = new IndexedDbObjectStore();
+    storedObjectIds.push(object.object_id);
+    const packet = await buildObjectBatchPacket(sender.id, recipient.id, [object]);
+
+    await expect(receiveObjectBatchPacket(packet, store)).resolves.toEqual([true]);
+    const stored = await store.get(object.object_id);
+    expect(stored?.recipient).toBe(recipient.publicKey);
+    expect(await validateObject(stored)).toBe(true);
+  });
+
+  it('preserves recipient through generic discovery result parsing', async () => {
+    const { object, recipient } = await sendDm('discovery parser');
+    const sentPackets: string[] = [];
+    const socket = { readyState: 1, send: (packet: string) => sentPackets.push(packet) } as unknown as WebSocket;
+    const discoveryPromise = fetchDiscovery(socket);
+    await Promise.resolve();
+    const request = JSON.parse(sentPackets[0] ?? '{}');
+
+    expect(handleDiscoveryResult({
+      protocol: 'mycelium',
+      version: 1,
+      id: 'result-id',
+      type: 'DISCOVERY_RESULT',
+      timestamp: object.created_at,
+      sender: 'discovery-server',
+      recipient: 'discovery-client',
+      payload: { requestId: request.id, objects: [object] },
+      signature: 'server-unsigned-v1'
+    })).toBe(true);
+
+    const [result] = await discoveryPromise;
+    expect(result?.recipient).toBe(recipient.publicKey);
+    expect(result).toEqual(object);
   });
 
   it('does not return DMs from the post and recommendation feed query', async () => {

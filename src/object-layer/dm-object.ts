@@ -22,7 +22,6 @@ export interface DmObjectIdentity extends EncryptionKeyBindingIdentity {
 
 export interface DmPayload {
   readonly v: 1;
-  readonly recipient: string;
   readonly sender_enc_key: string;
   readonly recipient_enc_key: string;
   readonly ciphertext: string;
@@ -60,11 +59,11 @@ export async function createDmObject({
 
   return await createSignedObject({
     object_type: DM_OBJECT_TYPE,
+    recipient: recipientSigningKey,
     created_at: createdAt.toISOString(),
     expires_at: new Date(createdAt.getTime() + expiresInMs).toISOString(),
     payload: {
       v: 1,
-      recipient: recipientSigningKey,
       sender_enc_key: senderEncryptionKey,
       recipient_enc_key: recipientEncryptionKey,
       ciphertext: encrypted.ciphertext,
@@ -77,19 +76,18 @@ export async function createDmObject({
 export function validateDmPayload(payload: unknown): payload is DmPayload {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   const candidate = payload as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(candidate, 'recipient')) return false;
   if (candidate.v !== 1
-    || typeof candidate.recipient !== 'string'
     || typeof candidate.sender_enc_key !== 'string'
     || typeof candidate.recipient_enc_key !== 'string'
     || typeof candidate.ciphertext !== 'string'
     || typeof candidate.nonce !== 'string') return false;
 
-  const recipient = decodeBase64(candidate.recipient);
   const senderKey = decodeBase64(candidate.sender_enc_key);
   const recipientKey = decodeBase64(candidate.recipient_enc_key);
   const ciphertext = decodeBase64(candidate.ciphertext);
   const nonce = decodeBase64(candidate.nonce);
-  return Boolean(recipient?.length && senderKey?.length && recipientKey?.length
+  return Boolean(senderKey?.length && recipientKey?.length
     && ciphertext && ciphertext.length >= 16
     && nonce?.length === 12);
 }
@@ -100,6 +98,7 @@ export async function decryptDmObject({
   expectedSenderEncryptionKey
 }: DecryptDmObjectOptions): Promise<string> {
   if (object.object_type !== DM_OBJECT_TYPE) throw new Error('Unsupported direct-message object type');
+  if (typeof object.recipient !== 'string' || object.recipient.length === 0) throw new Error('Direct-message recipient is missing');
   if (!(await validateObject(object))) throw new Error('Invalid signed direct-message object');
   if (!validateDmPayload(object.payload)) throw new Error('Invalid direct-message payload');
 
@@ -108,7 +107,7 @@ export async function decryptDmObject({
   if (object.author === identity.publicKey) {
     if (payload.sender_enc_key !== identity.encryptionPublicKey) throw new Error('Direct-message sender encryption key mismatch');
     peerEncryptionKey = payload.recipient_enc_key;
-  } else if (payload.recipient === identity.publicKey) {
+  } else if (object.recipient === identity.publicKey) {
     if (payload.recipient_enc_key !== identity.encryptionPublicKey) throw new Error('Direct-message recipient encryption key mismatch');
     if (payload.sender_enc_key !== expectedSenderEncryptionKey) throw new Error('Unexpected direct-message sender encryption key');
     peerEncryptionKey = payload.sender_enc_key;
@@ -121,36 +120,39 @@ export async function decryptDmObject({
     await importEncryptionPublicKey(peerEncryptionKey),
     createDmKeyContext(payload.sender_enc_key, payload.recipient_enc_key)
   );
-  const aad = createDmAad(object.author, payload.recipient, payload.sender_enc_key, payload.recipient_enc_key);
+  const aad = createDmAad(object.author, object.recipient, payload.sender_enc_key, payload.recipient_enc_key);
   return await decryptDm(key, { ciphertext: payload.ciphertext, nonce: payload.nonce }, aad);
 }
 
 function createDmKeyContext(firstPublicKey: string, secondPublicKey: string): Uint8Array {
-  const encoder = new TextEncoder();
-  const fields = [firstPublicKey, secondPublicKey].sort().map((key) => encoder.encode(key));
-  const byteLength = fields.reduce((total, field) => total + 4 + field.byteLength, 0);
-  const context = new Uint8Array(byteLength);
-  const view = new DataView(context.buffer as ArrayBuffer);
-  let offset = 0;
-  for (const field of fields) {
-    view.setUint32(offset, field.byteLength, false);
-    offset += 4;
-    context.set(field, offset);
-    offset += field.byteLength;
-  }
-  return context;
+  return encodeLengthPrefixed([firstPublicKey, secondPublicKey].sort());
 }
 
 function createDmAad(author: string, recipient: string, senderEncryptionKey: string, recipientEncryptionKey: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify({
-    domain: DM_AAD_DOMAIN,
-    object_type: DM_OBJECT_TYPE,
-    v: 1,
-    author,
-    recipient,
-    sender_enc_key: senderEncryptionKey,
-    recipient_enc_key: recipientEncryptionKey
-  }));
+  return encodeLengthPrefixed([
+    'domain', DM_AAD_DOMAIN,
+    'object_type', DM_OBJECT_TYPE,
+    'v', '1',
+    'author', author,
+    'recipient', recipient,
+    'sender_enc_key', senderEncryptionKey,
+    'recipient_enc_key', recipientEncryptionKey
+  ]);
+}
+
+function encodeLengthPrefixed(fields: string[]): Uint8Array {
+  const encodedFields = fields.map((field) => new TextEncoder().encode(field));
+  const byteLength = encodedFields.reduce((total, field) => total + 4 + field.byteLength, 0);
+  const result = new Uint8Array(byteLength);
+  const view = new DataView(result.buffer as ArrayBuffer);
+  let offset = 0;
+  for (const field of encodedFields) {
+    view.setUint32(offset, field.byteLength, false);
+    offset += 4;
+    result.set(field, offset);
+    offset += field.byteLength;
+  }
+  return result;
 }
 
 function decodeBase64(value: string): Uint8Array | null {
