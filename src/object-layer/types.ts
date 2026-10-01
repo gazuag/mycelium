@@ -127,7 +127,14 @@ export interface ObjectTransport {
 
 export type ObjectContent = Omit<DistributedObject, 'object_id' | 'author' | 'signature'>;
 
-export type ObjectCriteria = Partial<Pick<DistributedObject, 'object_id' | 'object_type' | 'author' | 'created_at' | 'expires_at' | 'sequence'>>;
+export type ObjectCriteria = Partial<Pick<DistributedObject, 'object_id' | 'object_type' | 'author' | 'created_at' | 'expires_at' | 'sequence'>> & {
+  readonly recipient?: string;
+  readonly created_after?: string;
+  readonly created_before?: string;
+  readonly since?: string;
+  readonly limit?: number;
+  readonly order?: 'created_at_desc';
+};
 
 export interface ObjectStore {
   put(object: DistributedObject): Promise<boolean>;

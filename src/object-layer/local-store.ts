@@ -2,8 +2,9 @@ import type { DistributedObject, LocalPostMetadata, LocalPostMetadataStore, Obje
 import { isObjectExpired, validateDistributedObject } from './envelope';
 
 const DATABASE_NAME = 'mycelium_objects';
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const OBJECT_STORE_NAME = 'objects';
+const RECIPIENT_CREATED_AT_INDEX = 'recipient_created_at';
 const LOCAL_POST_METADATA_STORE_NAME = 'local_post_metadata';
 const RECOMMENDATION_SEQUENCE_STORE_NAME = 'recommendation_sequences';
 
@@ -52,8 +53,20 @@ export class IndexedDbObjectStore implements ObjectStore {
 
   async query(criteria: ObjectCriteria = {}): Promise<DistributedObject[]> {
     const database = await this.databasePromise;
-    const objects = await runRequest<DistributedObject[]>(database, 'readonly', (store) => store.getAll());
-    const matching = objects.filter((object) => Object.entries(criteria).every(([key, expected]) => object[key as keyof DistributedObject] === expected));
+    const objects = await runRequest<DistributedObject[]>(database, 'readonly', (store) => {
+      if (criteria.recipient === undefined) return store.getAll();
+      const range = IDBKeyRange.bound([criteria.recipient, ''], [criteria.recipient, '\uffff']);
+      return store.index(RECIPIENT_CREATED_AT_INDEX).getAll(range);
+    });
+    const { recipient, created_after, created_before, since, order, limit, ...exactCriteria } = criteria;
+    const matching = objects.filter((object) => {
+      if (!Object.entries(exactCriteria).every(([key, expected]) => object[key as keyof DistributedObject] === expected)) return false;
+      const createdAt = new Date(object.created_at).getTime();
+      if (created_after && createdAt < new Date(created_after).getTime()) return false;
+      if (created_before && createdAt > new Date(created_before).getTime()) return false;
+      if (since && createdAt <= new Date(since).getTime()) return false;
+      return true;
+    });
     const results: DistributedObject[] = [];
     for (const object of matching) {
       if (isObjectExpired(object)) {
@@ -62,7 +75,10 @@ export class IndexedDbObjectStore implements ObjectStore {
         results.push(object);
       }
     }
-    return results;
+    if (order === 'created_at_desc') {
+      results.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+    }
+    return limit === undefined ? results : results.slice(0, limit);
   }
 }
 
@@ -126,6 +142,10 @@ function openObjectDatabase(): Promise<IDBDatabase> {
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(OBJECT_STORE_NAME)) {
         request.result.createObjectStore(OBJECT_STORE_NAME, { keyPath: 'object_id' });
+      }
+      const objectStore = request.transaction!.objectStore(OBJECT_STORE_NAME);
+      if (!objectStore.indexNames.contains(RECIPIENT_CREATED_AT_INDEX)) {
+        objectStore.createIndex(RECIPIENT_CREATED_AT_INDEX, ['recipient', 'created_at'], { unique: false });
       }
       if (!request.result.objectStoreNames.contains(LOCAL_POST_METADATA_STORE_NAME)) {
         request.result.createObjectStore(LOCAL_POST_METADATA_STORE_NAME, { keyPath: 'object_id' });
