@@ -10,6 +10,7 @@ export interface DistributedObject {
   readonly object_id: string;
   readonly object_type: string;
   readonly author: string;
+  readonly recipient?: string;
   readonly created_at: string;
   readonly expires_at?: string;
   readonly sequence?: number;

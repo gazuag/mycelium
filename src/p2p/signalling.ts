@@ -20,8 +20,8 @@ export type SignalMessage =
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
 
-const SIGNAL_SERVER_HOST = 'mycelium.my.to';
-const SIGNAL_SERVER_PORT = 8765;
+const SIGNAL_SERVER_HOST = 'discover.unfilter.ing';
+const SIGNAL_SERVER_PORT = 8443;
 const DEFAULT_SIGNAL_SERVER_URL = `wss://${SIGNAL_SERVER_HOST}:${SIGNAL_SERVER_PORT}`;
 
 function normalizeSignalUrl(rawUrl: string) {

@@ -44,7 +44,7 @@ Open the local URL printed by Vite.
 python3 server.py
 ```
 
-The server listens on a single WebSocket endpoint (`ws://0.0.0.0:8765` locally, `wss://` when deployed) for peer signalling and discovery.
+The server listens for peer signalling and discovery on port `8443`. The deployed secure WebSocket endpoint is `wss://discover.unfilter.ing:8443`.
 
 ## Testing with two browser windows or devices
 
@@ -63,7 +63,7 @@ The server listens on a single WebSocket endpoint (`ws://0.0.0.0:8765` locally, 
 
 ## Server configuration
 
-- The frontend defaults to `ws://217.154.78.152:8765` for all server communication (signalling and discovery).
+- The frontend defaults to `wss://discover.unfilter.ing:8443` for all server communication (signalling and discovery).
 - Override with the `VITE_SIGNAL_SERVER_URL` environment variable.
 
 ## What travels through the signalling server

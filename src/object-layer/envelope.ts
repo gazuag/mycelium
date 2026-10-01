@@ -8,6 +8,7 @@ export function immutableObjectContent(object: DistributedObject): ImmutableObje
   return {
     object_type: object.object_type,
     author: object.author,
+    ...(object.recipient === undefined ? {} : { recipient: object.recipient }),
     created_at: object.created_at,
     ...(object.expires_at === undefined ? {} : { expires_at: object.expires_at }),
     ...(object.sequence === undefined ? {} : { sequence: object.sequence }),
@@ -110,6 +111,7 @@ export async function validateDistributedObject(
 function isValidImmutableObjectContent(content: Partial<ImmutableObjectContent>): content is ImmutableObjectContent {
   return typeof content.object_type === 'string' && Boolean(content.object_type)
     && typeof content.author === 'string' && Boolean(content.author)
+    && (content.recipient === undefined || (typeof content.recipient === 'string' && content.recipient.length > 0))
     && isIsoDate(content.created_at)
     && isJsonValue(content.payload)
     && isReplicationPolicy(content.replication_policy)

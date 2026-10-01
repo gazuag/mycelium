@@ -4,7 +4,8 @@ import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
+import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
@@ -31,6 +32,8 @@ interface IdentityRecord {
   publicKey: string;
   privateKey: string;
   id: string;
+  encryptionPublicKey: string;
+  encryptionPrivateKey: string;
 }
 
 export type LogCategory = 'pingPong' | 'discovery' | 'chat' | 'postRequests' | 'objectStorage' | 'ice' | 'general';
@@ -664,11 +667,11 @@ function App() {
 
   const getLocalDisplayName = () => myProfile.displayName.trim() || generatedDisplayName || 'Me';
 
-  const buildPeerMetadata = (peerId: string, followingOverride?: boolean) => {
+  const buildPeerMetadata = async (peerId: string, followingOverride?: boolean) => {
     const p = myProfileRef.current;
     const id = identityRef.current;
     const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
-    return {
+    const metadata = {
       author: id?.id ?? '',
       publicKey: id?.publicKey,
       displayName: p.displayName.trim() || fallbackName || 'Me',
@@ -677,12 +680,29 @@ function App() {
       bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
       tags: []
     };
+    return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;
   };
 
-  const handlePeerMetadata = (peerId: string, metadata: any) => {
+  const sendPeerMetadata = async (manager: PeerConnectionManager, peerId: string, followingOverride?: boolean) => {
+    manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
+  };
+
+  const handlePeerMetadata = async (peerId: string, metadata: PeerMetadata) => {
     const metadataPublicKey = typeof metadata?.publicKey === 'string' && metadata.publicKey.trim()
       ? metadata.publicKey.trim()
       : undefined;
+    const existingContact = contactsRef.current.find((contact) => contact.fingerprint === peerId);
+    const bindingUpdate = await applyEncryptionKeyBinding(
+      metadata.encryptionKeyBinding,
+      metadataPublicKey,
+      existingContact ? {
+        encryptionPublicKey: existingContact.encryptionPublicKey,
+        encryptionKeyChanged: existingContact.encryptionKeyChanged
+      } : {}
+    );
+    if (bindingUpdate.keyChanged) {
+      console.warn(`Peer encryption key changed for ${peerId}; keeping previously trusted key`);
+    }
     const normalizedProfile: Contact['profile'] = {
       protocol: 'mycelium',
       version: 1,
@@ -701,6 +721,7 @@ function App() {
       const updatedContact: Contact = existing
         ? {
             ...existing,
+            ...bindingUpdate.contactFields,
             publicKey: metadataPublicKey ?? existing.publicKey,
             displayName: metadata.displayName,
             profile: normalizedProfile,
@@ -711,6 +732,7 @@ function App() {
         : {
           publicKey: metadataPublicKey ?? peerId,
             fingerprint: peerId,
+            ...bindingUpdate.contactFields,
             displayName: metadata.displayName,
             profile: normalizedProfile,
             addedAt: new Date().toISOString(),
@@ -970,7 +992,7 @@ function App() {
         if (view) setPostViews((prev) => upsertLocalPostView(prev, view));
         addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
-      (peer: string, metadata: PeerMetadata) => {
+      async (peer: string, metadata: PeerMetadata) => {
         if (!isCurrentManager(peer)) return;
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
@@ -980,7 +1002,7 @@ function App() {
           addLog(`Blocked peer ${peer} metadata ignored`);
           return;
         }
-        handlePeerMetadata(peer, metadata);
+        await handlePeerMetadata(peer, metadata);
       },
       async (peer: string, since: string | null = null, limit = 100) => {
         if (!isCurrentManager(peer)) return;
@@ -1046,7 +1068,7 @@ function App() {
         addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendMetadata(buildPeerMetadata(peer));
+          await sendPeerMetadata(manager, peer);
           const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
           if (contact?.followed) {
             manager.sendRequestPosts(null, 200);
@@ -1081,8 +1103,9 @@ function App() {
         // Respond to PROFILE_REQUEST with our current profile
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendMetadata(buildPeerMetadata(peer));
-          addLog(`Sent profile to ${peer} (on request)`);
+          void sendPeerMetadata(manager, peer)
+            .then(() => addLog(`Sent profile to ${peer} (on request)`))
+            .catch((error: unknown) => addLog(`Failed to send profile to ${peer}: ${error instanceof Error ? error.message : String(error)}`));
         }
       },
       async (peer: string, transportMessageId: string) => {
@@ -1561,7 +1584,7 @@ function App() {
     const manager = peerManagersRef.current[fingerprint] ?? ensurePeerManager(fingerprint);
     if (socket?.readyState === WebSocket.OPEN && manager) {
       if (manager.isDataChannelOpen()) {
-        manager.sendMetadata(buildPeerMetadata(fingerprint, updated.followed));
+        await sendPeerMetadata(manager, fingerprint, updated.followed);
       } else {
         requestPeerOffer(fingerprint, manager, socket);
       }
@@ -1955,8 +1978,9 @@ function App() {
     const publicKey = await exportPublicKey(keys.publicKey);
     const privateKey = await exportPrivateKey(keys.privateKey);
     const identityId = await deriveFingerprint(publicKey);
-    await saveIdentity({ key: 'local', publicKey, privateKey, id: identityId });
-    setIdentity({ key: 'local', publicKey, privateKey, id: identityId });
+    const identityRecord = await ensureIdentityEncryptionKeyPair({ key: 'local', publicKey, privateKey, id: identityId });
+    await saveIdentity(identityRecord);
+    setIdentity(identityRecord as IdentityRecord);
   }
 
   async function handleExportIdentity() {
@@ -1965,12 +1989,7 @@ function App() {
     const exportPayload = {
       version: 1,
       exportedAt: new Date().toISOString(),
-      identity: {
-        key: identity.key,
-        publicKey: identity.publicKey,
-        privateKey: identity.privateKey,
-        id: identity.id
-      },
+      identity: identityBackupFields(identity),
       profile: {
         displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity.id),
         bio: myProfile.bio.trim(),
@@ -2026,15 +2045,17 @@ function App() {
 
         if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
           await ensureTurnIceServers();
-          const nextIdentity = {
+          const nextIdentity = await ensureIdentityEncryptionKeyPair({
             key: importedIdentity.key ?? 'local',
             publicKey: importedIdentity.publicKey,
             privateKey: importedIdentity.privateKey,
-            id: importedIdentity.id
-          };
+            id: importedIdentity.id,
+            encryptionPublicKey: typeof importedIdentity.encryptionPublicKey === 'string' ? importedIdentity.encryptionPublicKey : undefined,
+            encryptionPrivateKey: typeof importedIdentity.encryptionPrivateKey === 'string' ? importedIdentity.encryptionPrivateKey : undefined
+          });
 
           await saveIdentity(nextIdentity);
-          setIdentity(nextIdentity);
+          setIdentity(nextIdentity as IdentityRecord);
 
           const profileData = imported?.profile ?? {};
           const safeFeedMix = typeof profileData.feedMix === 'object' && profileData.feedMix !== null
@@ -2915,7 +2936,11 @@ function App() {
                     addLog('Profile saved locally');
                     contacts.forEach((contact) => {
                       if (!contact.connected) return;
-                      peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
+                      const manager = peerManagersRef.current[contact.fingerprint];
+                      if (manager) {
+                        void sendPeerMetadata(manager, contact.fingerprint)
+                          .catch((error: unknown) => addLog(`Failed to send profile to ${contact.fingerprint}: ${error instanceof Error ? error.message : String(error)}`));
+                      }
                     });
                   }}>Save Profile</button>
                   <button className="btn secondary" onClick={handleExportIdentity}>Export Identity</button>

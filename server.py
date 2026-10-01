@@ -30,7 +30,7 @@ SIGNAL_QUEUE_TTL_SECONDS = int(os.environ.get('SIGNAL_QUEUE_TTL_SECONDS', '60'))
 MAX_QUEUED_SIGNALS_PER_CLIENT = int(os.environ.get('MAX_QUEUED_SIGNALS_PER_CLIENT', '32'))
 DB_PATH = Path(os.environ.get('DISCOVERY_DB_PATH', 'discovery.db'))
 SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
-SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8765'))
+SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8443'))
 TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 PEER_DISCOVERY_WINDOW_DAYS = int(os.environ.get('PEER_DISCOVERY_WINDOW_DAYS', '30'))
@@ -292,6 +292,9 @@ async def handle_discovery_publish(message: dict) -> None:
     required_keys = {'object_id', 'object_type', 'author', 'created_at', 'payload', 'signature'}
     if not required_keys.issubset(object_payload.keys()):
         logging.warning('DISCOVERY_PUBLISH missing object fields: %s', required_keys - object_payload.keys())
+        return
+    if object_payload['object_type'] == 'mycelium.dm':
+        logging.warning('DISCOVERY_PUBLISH direct-message objects are not supported, ignoring')
         return
     object_id = object_payload['object_id']
     author = object_payload['author']

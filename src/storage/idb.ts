@@ -1,4 +1,5 @@
 import { Contact, SignedProfile } from '../types';
+import { exportEncryptionPrivateKey, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
 
 const DB_NAME = 'mycelium_p2p';
 const DB_VERSION = 5;
@@ -8,6 +9,44 @@ const PROFILE_STORE = 'profiles';
 const DISCOVERY_STORE = 'discovery_interactions';
 const QUEUE_STORE = 'message_queue';
 const DIRECT_CHAT_STORE = 'direct_chat_messages';
+let identityLoadPromise: Promise<CompleteLocalIdentityRecord | null> | null = null;
+
+export interface LocalIdentityRecord {
+  key: string;
+  publicKey: string;
+  privateKey: string;
+  id?: string;
+  encryptionPublicKey?: string;
+  encryptionPrivateKey?: string;
+}
+
+export interface CompleteLocalIdentityRecord extends LocalIdentityRecord {
+  encryptionPublicKey: string;
+  encryptionPrivateKey: string;
+}
+
+export async function ensureIdentityEncryptionKeyPair(identity: LocalIdentityRecord): Promise<CompleteLocalIdentityRecord> {
+  if (identity.encryptionPublicKey && identity.encryptionPrivateKey) {
+    return identity as CompleteLocalIdentityRecord;
+  }
+  const keyPair = await generateEncryptionKeyPair();
+  return {
+    ...identity,
+    encryptionPublicKey: await exportEncryptionPublicKey(keyPair.publicKey),
+    encryptionPrivateKey: await exportEncryptionPrivateKey(keyPair.privateKey)
+  };
+}
+
+export function identityBackupFields(identity: CompleteLocalIdentityRecord) {
+  return {
+    key: identity.key,
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    id: identity.id,
+    encryptionPublicKey: identity.encryptionPublicKey,
+    encryptionPrivateKey: identity.encryptionPrivateKey
+  };
+}
 
 export async function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -44,7 +83,7 @@ export async function openDatabase() {
   });
 }
 
-export async function saveIdentity(payload: { key: string; publicKey: string; privateKey: string; id?: string }) {
+export async function saveIdentity(payload: LocalIdentityRecord) {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(IDENTITY_STORE, 'readwrite');
@@ -55,13 +94,33 @@ export async function saveIdentity(payload: { key: string; publicKey: string; pr
   });
 }
 
-export async function loadIdentity() {
+export function loadIdentity(): Promise<CompleteLocalIdentityRecord | null> {
+  if (!identityLoadPromise) {
+    identityLoadPromise = loadAndMigrateIdentity().finally(() => {
+      identityLoadPromise = null;
+    });
+  }
+  return identityLoadPromise;
+}
+
+async function loadAndMigrateIdentity(): Promise<CompleteLocalIdentityRecord | null> {
   const db = await openDatabase();
-  return new Promise<{ key: string; publicKey: string; privateKey: string; id?: string } | null>((resolve, reject) => {
+  return new Promise<CompleteLocalIdentityRecord | null>((resolve, reject) => {
     const tx = db.transaction(IDENTITY_STORE, 'readonly');
     const store = tx.objectStore(IDENTITY_STORE);
     const request = store.get('local');
-    request.onsuccess = () => resolve(request.result ?? null);
+    request.onsuccess = () => {
+      const stored = request.result as LocalIdentityRecord | undefined;
+      if (!stored) {
+        resolve(null);
+        return;
+      }
+      void (async () => {
+        const complete = await ensureIdentityEncryptionKeyPair(stored);
+        if (!stored.encryptionPublicKey || !stored.encryptionPrivateKey) await saveIdentity(complete);
+        resolve(complete);
+      })().catch(reject);
+    };
     request.onerror = () => reject(request.error);
   });
 }

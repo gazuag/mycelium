@@ -287,6 +287,37 @@ describe('peer discovery suggestion UI', () => {
     expect(markup).toContain('Follow');
   });
 
+  it('keeps popular peer suggestions visible and offers Unfollow for followed peers', () => {
+    const followedPeer: Contact = {
+      publicKey: 'aa:bb:cc:dd:ee:ff:00:22',
+      fingerprint: 'aa:bb:cc:dd:ee:ff:00:22',
+      addedAt: '2026-08-25T00:00:00.000Z',
+      followed: true
+    };
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[followedPeer]}
+        popularPeers={[{ peer_id: followedPeer.fingerprint, reply_count: 4 }]}
+        onFollowPeer={noop}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        onRefreshPosts={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).toContain('Popular posters right now.');
+    expect(markup).toContain('Unfollow');
+    expect(markup).toContain('aria-label="Dismiss popular peer suggestions"');
+  });
+
   it('shows Stage 3 popular posters on Home when the user follows nobody', () => {
     const markup = renderToStaticMarkup(
       <HomePage
@@ -307,7 +338,7 @@ describe('peer discovery suggestion UI', () => {
       />
     );
 
-    expect(markup).toContain('You are not following anyone. Here are some popular posters right now.');
+    expect(markup).toContain('Popular posters right now.');
     expect(markup).toContain('4 replies');
     expect(markup).toContain('Follow');
   });

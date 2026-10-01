@@ -4,6 +4,7 @@ import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 const MAX_BATCH_SIZE = 30;
 const RESPONSE_TIMEOUT_MS = 15000;
 const WEBSOCKET_OPEN = 1;
+const DISCOVERY_PUBLISHABLE_OBJECT_TYPES = new Set(['mycelium.post']);
 
 // Pending DISCOVERY_GET responses keyed by outgoing packet id.
 const pendingDiscoveryRequests = new Map<string, (objects: DistributedObject[]) => void>();
@@ -26,6 +27,9 @@ export function handleDiscoveryResult(packet: unknown): boolean {
 }
 
 export async function publishObject(object: DistributedObject, socket: WebSocket) {
+  if (!DISCOVERY_PUBLISHABLE_OBJECT_TYPES.has(object.object_type)) {
+    throw new Error(`Discovery publish failed: unsupported object type '${object.object_type}'`);
+  }
   if (socket.readyState !== WEBSOCKET_OPEN) {
     throw new Error('Discovery publish failed: WebSocket not open');
   }

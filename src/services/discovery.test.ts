@@ -21,6 +21,31 @@ async function fixture(): Promise<DistributedObject> {
 }
 
 describe('discovery object protocol', () => {
+  it('allows publishing mycelium.post objects', async () => {
+    const object = await fixture();
+    const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };
+
+    await expect(publishObject(object, socket)).resolves.toBeUndefined();
+    expect(socket.send).toHaveBeenCalledOnce();
+    expect(JSON.parse(socket.send.mock.calls[0][0]).payload.object).toEqual(object);
+  });
+
+  it('rejects mycelium.dm without sending it to discovery', async () => {
+    const object = { ...(await fixture()), object_type: 'mycelium.dm' };
+    const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };
+
+    await expect(publishObject(object, socket)).rejects.toThrow("unsupported object type 'mycelium.dm'");
+    expect(socket.send).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown object types without sending them to discovery', async () => {
+    const object = { ...(await fixture()), object_type: 'mycelium.unknown' };
+    const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };
+
+    await expect(publishObject(object, socket)).rejects.toThrow("unsupported object type 'mycelium.unknown'");
+    expect(socket.send).not.toHaveBeenCalled();
+  });
+
   it('publishes and fetches canonical objects through discovery packets', async () => {
     const object = await fixture();
     const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };

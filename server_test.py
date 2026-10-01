@@ -72,6 +72,21 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         self.assertEqual(result['payload']['objects'], [object_value])
         self.assertNotIn('posts', result['payload'])
 
+    def test_rejects_direct_message_discovery_publish(self):
+        object_value = {
+            'object_id': 'd' * 64,
+            'object_type': 'mycelium.dm',
+            'author': 'author-key',
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'payload': {'ciphertext': 'private'},
+            'signature': 'not-validated-by-server'
+        }
+
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': object_value}}))
+
+        rows = self.server.DB_CONN.execute('SELECT object_json FROM discovery_posts').fetchall()
+        self.assertEqual(rows, [])
+
     def test_migrates_legacy_post_json_not_null_schema(self):
         legacy_path = os.path.join(self.temp_dir.name, 'legacy.db')
         legacy = sqlite3.connect(legacy_path)

@@ -99,6 +99,7 @@ export function HomePage({
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
   const [expandedReplyIds, setExpandedReplyIds] = useState<Set<string>>(loadExpandedReplyIds);
+  const [popularPeersDismissed, setPopularPeersDismissed] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(HOME_EXPANDED_REPLIES_KEY, JSON.stringify(Array.from(expandedReplyIds)));
@@ -132,15 +133,30 @@ export function HomePage({
 
   return (
     <section className="page-view">
-      {!contacts.some((contact) => contact.followed) ? (
+      {!popularPeersDismissed ? (
         <div className="popular-posters-banner">
-          <strong>You are not following anyone. Here are some popular posters right now.</strong>
+          <div className="popular-posters-heading">
+            <strong>Popular posters right now.</strong>
+            <button
+              aria-label="Dismiss popular peer suggestions"
+              className="popular-posters-close"
+              onClick={() => setPopularPeersDismissed(true)}
+              title="Dismiss suggestions"
+              type="button"
+            >
+              X
+            </button>
+          </div>
           {popularPeers.length === 0 ? <p className="note">No popular posters found yet.</p> : (
             <div className="popular-posters-list">
               {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
                 <div className="popular-poster-item" key={peerId}>
                   <span>{displayNameOrFallback(undefined, peerId)} <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
-                  {onFollowPeer ? <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>Follow</button> : null}
+                  {onFollowPeer ? (
+                    <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
+                      {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
+                    </button>
+                  ) : null}
                 </div>
               ))}
             </div>

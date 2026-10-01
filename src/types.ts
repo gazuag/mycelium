@@ -1,3 +1,5 @@
+import type { EncryptionKeyBinding } from './crypto/dm-crypto';
+
 export type ConnectionState = 'idle' | 'signalling' | 'connecting' | 'connected' | 'disconnected';
 
 export interface Contact {
@@ -14,6 +16,8 @@ export interface Contact {
   lastSeen?: string;
   unreadMessages?: number;
   queuedMessages?: number;
+  encryptionPublicKey?: string;
+  encryptionKeyChanged?: boolean;
 }
 
 export interface PeerMetadata {
@@ -24,6 +28,7 @@ export interface PeerMetadata {
   timestamp: string;
   bio?: string;
   tags?: string[];
+  encryptionKeyBinding?: EncryptionKeyBinding;
 }
 
 export interface SignedProfile {

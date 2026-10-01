@@ -686,6 +686,32 @@ body, html, #root {
   background: rgba(158, 217, 200, 0.06);
 }
 
+.popular-posters-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.popular-posters-close {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.popular-posters-close:hover,
+.popular-posters-close:focus-visible {
+  background: rgba(158, 217, 200, 0.14);
+}
+
 .popular-posters-list {
   display: grid;
   gap: 0.5rem;
