@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ConnectionState } from '../types';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
+import { BrandLogo } from './BrandLogo';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -46,7 +47,8 @@ export function AppHeader({
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
       <div className="app-header-top">
-        <div>
+        <div className="brand-mark">
+          <BrandLogo variant="default" className="brand-logo app-brand-logo" size={32} />
           <p className="app-title">Mycelium - Private peer-to-peer social</p>
         </div>
         <button className="icon-btn" onClick={onToggleCollapse} aria-label="Toggle header">

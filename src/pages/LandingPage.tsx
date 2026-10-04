@@ -1,3 +1,5 @@
+import { BrandLogo } from '../components/BrandLogo';
+
 interface LandingPageProps {
   onCreateIdentity: () => void;
   onImportIdentity: () => void;
@@ -7,6 +9,7 @@ export function LandingPage({ onCreateIdentity, onImportIdentity }: LandingPageP
   return (
     <main className="landing-page">
       <section className="landing-hero card">
+        <BrandLogo variant="white" className="brand-logo landing-brand-logo" size={220} />
         <h1>Mycelium</h1>
         <p>
           Mycelium is a peer-to-peer social network where your identity is your keypair,
