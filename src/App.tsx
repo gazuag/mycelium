@@ -5,6 +5,7 @@ import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
+import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
 import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -384,8 +385,14 @@ function App() {
       }
     }
     if (packet.type === 'FIND') {
-      const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; since?: string; limit?: number; order?: 'created_at_desc' };
-      const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
+      const hasRecipientField = Object.prototype.hasOwnProperty.call(packet.payload, 'recipient');
+      if (hasRecipientField && (typeof packet.payload.recipient !== 'string' || packet.payload.recipient.trim().length === 0)) {
+        addLog(`Rejected FIND with invalid recipient: requestId=${packet.payload.requestId}`);
+        return;
+      }
+      const parsedQueryFields = getFindQueryCriteria(packet);
+      const queryFields = parsedQueryFields ?? {};
+      const isPhase7Query = parsedQueryFields !== null;
       if (isPhase7Query) {
         addLog(`PHASE7 QUERY RECEIVED requestId=${packet.payload.requestId} peer=${peerId} author=${queryFields.author ?? 'unknown'} lower=${queryFields.created_after ?? 'none'} upper=${queryFields.created_before ?? 'none'}`);
       }
@@ -424,7 +431,7 @@ function App() {
         addLog(`upstream recorded: ${peerId}`);
         let aggregation: FindAggregation;
         aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
-          const responseObjects = applyFindQueryLimit(objects, queryFields);
+          const responseObjects = await prepareFindQueryResponse(objects, queryFields);
           addLog('aggregate complete');
           addLog(`reason: ${reason}`);
           addLog(`returning: ${responseObjects.length} objects`);

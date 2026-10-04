@@ -1,8 +1,9 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
-import { isObjectExpired, validateObject } from './envelope';
+import { isObjectExpired, validateDistributedObject, validateObject } from './envelope';
 import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
+export const MAX_FIND_QUERY_LIMIT = 500;
 export const FIND_GRACE_PERIOD_MS = 1000;
 export type FindAggregationCompletionReason = 'all-objects-found' | 'all-children-responded-or-failed' | 'grace-expired' | 'child-failure-grace-expired' | 'deadline-expired';
 
@@ -68,6 +69,7 @@ export async function buildFindPacket(
     ...(origin ? { origin } : {}),
     ...(query?.object_type ? { object_type: query.object_type } : {}),
     ...(query?.author ? { author: query.author } : {}),
+    ...(query?.recipient ? { recipient: query.recipient } : {}),
     ...(query?.created_after ? { created_after: query.created_after } : {}),
     ...(query?.created_before ? { created_before: query.created_before } : {}),
     ...(query?.since ? { since: query.since } : {}),
@@ -234,24 +236,29 @@ export async function receiveFindResponsePacket(packet: unknown, store: ObjectSt
 export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | null {
   const objectType = typeof packet.payload?.object_type === 'string' ? packet.payload.object_type : undefined;
   const author = typeof packet.payload?.author === 'string' ? packet.payload.author : undefined;
+  const rawRecipient = packet.payload?.recipient;
+  const recipient = typeof rawRecipient === 'string' && rawRecipient.trim().length > 0 ? rawRecipient : undefined;
+  if (rawRecipient !== undefined && recipient === undefined) return null;
   const createdAfter = typeof packet.payload?.created_after === 'string' ? packet.payload.created_after : undefined;
   const createdBefore = typeof packet.payload?.created_before === 'string' ? packet.payload.created_before : undefined;
   const since = typeof packet.payload?.since === 'string' ? packet.payload.since : undefined;
-  const limit = typeof packet.payload?.limit === 'number' && Number.isSafeInteger(packet.payload.limit) && packet.payload.limit > 0
-    ? packet.payload.limit
-    : undefined;
+  const rawLimit = packet.payload?.limit;
   const order = packet.payload?.order === 'created_at_desc' ? packet.payload.order : undefined;
-  const hasQuery = Boolean(objectType || author || createdAfter || createdBefore || since || limit !== undefined || order);
+  const hasQuery = Boolean(objectType || author || recipient || createdAfter || createdBefore || since || rawLimit !== undefined || order);
   if (!hasQuery) return null;
-  return { object_type: objectType, author, created_after: createdAfter, created_before: createdBefore, since, limit, order };
+  const limit = typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit > 0
+    ? Math.min(rawLimit, MAX_FIND_QUERY_LIMIT)
+    : MAX_FIND_QUERY_LIMIT;
+  return { object_type: objectType, author, recipient, created_after: createdAfter, created_before: createdBefore, since, limit, order };
 }
 
 export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQueryCriteria): Promise<DistributedObject[]> {
-  const objects = await store.query();
+  const objects = await store.query(query.recipient === undefined ? undefined : { recipient: query.recipient });
   const liveObjects = objects.filter((object) => !isObjectExpired(object));
   const filtered = liveObjects.filter((object) => {
     if (query.object_type && object.object_type !== query.object_type) return false;
     if (query.author && object.author !== query.author) return false;
+    if (query.recipient !== undefined && object.recipient !== query.recipient) return false;
     if (query.created_after && new Date(object.created_at).getTime() < new Date(query.created_after).getTime()) return false;
     if (query.created_before && new Date(object.created_at).getTime() > new Date(query.created_before).getTime()) return false;
     if (query.since && new Date(object.created_at).getTime() <= new Date(query.since).getTime()) return false;
@@ -261,6 +268,18 @@ export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQu
     filtered.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
   }
   return query.limit === undefined ? filtered : filtered.slice(0, query.limit);
+}
+
+export async function prepareFindQueryResponse(
+  objects: DistributedObject[],
+  query: Pick<FindQueryCriteria, 'recipient' | 'limit' | 'order'>
+): Promise<DistributedObject[]> {
+  const matching: DistributedObject[] = [];
+  for (const object of objects) {
+    if (query.recipient !== undefined && object.recipient !== query.recipient) continue;
+    if (await validateDistributedObject(object)) matching.push(object);
+  }
+  return applyFindQueryLimit(matching, query);
 }
 
 export function applyFindQueryLimit(
@@ -396,6 +415,8 @@ export async function respondToFindPacket(
   forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: FindQueryCriteria }) => Promise<void>
 ): Promise<boolean> {
   if (!isMyceliumPacket(packet) || packet.type !== 'FIND') return false;
+  const rawRecipient = packet.payload?.recipient;
+  if (rawRecipient !== undefined && (typeof rawRecipient !== 'string' || rawRecipient.trim().length === 0)) return false;
   const objectIds = getFindObjectIds(packet as FindPacket);
   const requestId = packet.payload?.requestId;
   const ttl = packet.payload?.ttl;
