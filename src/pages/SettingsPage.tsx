@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { shouldRenderDiagnosticPayload } from '../diagnostics';
 import type { LogCategory, LogEntry } from '../App';
 
 interface SettingsPageProps {
@@ -210,7 +211,7 @@ export function SettingsPage({
               <div>{object.object_id}</div>
               <div>author: {object.author}</div>
               <div>created_at: {object.created_at}</div>
-              <div>payload: {JSON.stringify(object.payload)}</div>
+              {shouldRenderDiagnosticPayload(object.object_type) && <div>payload: {JSON.stringify(object.payload)}</div>}
             </div>
           ))}
         </div>

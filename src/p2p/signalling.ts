@@ -36,6 +36,11 @@ function normalizeSignalUrl(rawUrl: string) {
       console.warn('Only ws:// and wss:// are supported for the signalling server. HTTP/S endpoints are rejected.');
       return DEFAULT_SIGNAL_SERVER_URL;
     }
+    const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (url.protocol === 'ws:' && !['localhost', '127.0.0.1', '::1'].includes(hostname)) {
+      console.warn('Insecure ws:// signalling is allowed only for loopback hosts; falling back to the default wss:// endpoint.');
+      return DEFAULT_SIGNAL_SERVER_URL;
+    }
     return url.toString();
   } catch {
     return DEFAULT_SIGNAL_SERVER_URL;

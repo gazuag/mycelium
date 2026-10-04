@@ -5,6 +5,7 @@ import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
+import { appendBoundedLog, formatMessageLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
 import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
@@ -318,7 +319,8 @@ function App() {
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
   const addLog = (entry: string) => {
-    setLogs((prev) => [...prev, { text: `${new Date().toLocaleTimeString()}: ${entry}`, category: classifyLogEntry(entry) }]);
+    const timestampedEntry = `${new Date().toLocaleTimeString()}: ${entry}`;
+    setLogs((prev) => appendBoundedLog(prev, { text: timestampedEntry, category: classifyLogEntry(entry) }));
   };
 
   const statusLabel = useMemo(() => {
@@ -879,7 +881,7 @@ function App() {
     messageQueueRef.current = nextQueue;
     setMessageQueue(nextQueue);
     updateContactState(peerId, { queuedMessages: (contacts.find((c) => c.fingerprint === peerId)?.queuedMessages || 0) + 1 });
-    addLog(`Queued direct message for ${peerId}: ${text.slice(0, 80)}`);
+    addLog(formatMessageLog('queued', { peerId, messageId: chatMessageId, textLength: text.length }));
     return queuedMessageId;
   };
 
@@ -907,7 +909,7 @@ function App() {
         await updateDirectChatMessageStatus(queuedMessage.chatMessageId, 'sent');
         markDirectMessageDelivered(peerId, queuedMessage.chatMessageId, 'sent');
       }
-      addLog(`Queued message sent to ${peerId}: ${queuedMessage.text.slice(0, 80)}`);
+      addLog(formatMessageLog('sent', { peerId, messageId: queuedMessage.chatMessageId ?? queuedMessage.id, textLength: queuedMessage.text.length }));
     }
 
     const nextQueue = { ...(messageQueueRef.current ?? {}) };
@@ -967,7 +969,7 @@ function App() {
           return;
         }
 
-        addLog(`Direct message received from ${peer}: ${incoming.slice(0, 80)}`);
+        addLog(formatMessageLog('incoming', { peerId: peer, textLength: incoming.length }));
         saveDirectMessage(peer, incoming, true);
         const chatIsOpenForPeer = pageRef.current === 'chat' && chatContactIdRef.current === peer;
         if (!chatIsOpenForPeer) {
@@ -1108,7 +1110,7 @@ function App() {
       },
       (peer: string, event: string) => {
         if (!isCurrentManager(peer)) return;
-        addLog(`Peer ${peer}: ${event}`);
+        addLog(redactNetworkAddresses(`Peer ${peer}: ${event}`));
       },
       (peer: string) => {
         if (!isCurrentManager(peer)) return;
@@ -2345,7 +2347,7 @@ function App() {
     const peerId = chatContactId;
     const trimmedMessage = message.trim();
     if (isDuplicateOutboundMessage(peerId, trimmedMessage)) {
-      addLog(`Duplicate message suppressed for ${peerId}: ${trimmedMessage.slice(0, 80)}`);
+      addLog(formatMessageLog('duplicate-suppressed', { peerId, textLength: trimmedMessage.length }));
       setMessage('');
       return;
     }
