@@ -2,14 +2,21 @@ import { Contact, SignedProfile } from '../types';
 import { exportEncryptionPrivateKey, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
 const DISCOVERY_STORE = 'discovery_interactions';
 const QUEUE_STORE = 'message_queue';
 const DIRECT_CHAT_STORE = 'direct_chat_messages';
+const INBOX_CURSOR_STORE = 'inbox_cursors';
 let identityLoadPromise: Promise<CompleteLocalIdentityRecord | null> | null = null;
+
+interface InboxCursorRecord {
+  identity: string;
+  cursor: string;
+  updated_at: string;
+}
 
 export interface LocalIdentityRecord {
   key: string;
@@ -76,6 +83,9 @@ export async function openDatabase() {
         directChatStore.createIndex('peerId', 'peerId');
         directChatStore.createIndex('timestamp', 'timestamp');
       }
+      if (!db.objectStoreNames.contains(INBOX_CURSOR_STORE)) {
+        db.createObjectStore(INBOX_CURSOR_STORE, { keyPath: 'identity' });
+      }
     };
 
     request.onsuccess = () => resolve(request.result);
@@ -134,6 +144,69 @@ export async function deleteIdentity() {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+export async function loadInboxCursor(identityKey: string): Promise<string | null> {
+  validateIdentityKey(identityKey);
+  const db = await openDatabase();
+  return new Promise<string | null>((resolve, reject) => {
+    const transaction = db.transaction(INBOX_CURSOR_STORE, 'readonly');
+    const request = transaction.objectStore(INBOX_CURSOR_STORE).get(identityKey);
+    request.onsuccess = () => resolve((request.result as InboxCursorRecord | undefined)?.cursor ?? null);
+    request.onerror = () => reject(request.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+export async function saveInboxCursor(identityKey: string, cursor: string): Promise<string> {
+  validateIdentityKey(identityKey);
+  const cursorTime = validateIsoCursor(cursor);
+  const db = await openDatabase();
+  return new Promise<string>((resolve, reject) => {
+    const transaction = db.transaction(INBOX_CURSOR_STORE, 'readwrite');
+    const store = transaction.objectStore(INBOX_CURSOR_STORE);
+    const request = store.get(identityKey);
+    let resultingCursor = cursor;
+    request.onsuccess = () => {
+      const existing = request.result as InboxCursorRecord | undefined;
+      if (existing && Date.parse(existing.cursor) > cursorTime) resultingCursor = existing.cursor;
+      store.put({ identity: identityKey, cursor: resultingCursor, updated_at: new Date().toISOString() });
+    };
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve(resultingCursor);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('Inbox cursor transaction aborted'));
+  });
+}
+
+function validateIdentityKey(identityKey: string): void {
+  if (typeof identityKey !== 'string' || identityKey.trim().length === 0) {
+    throw new Error('Inbox cursor identity key must not be empty');
+  }
+}
+
+function validateIsoCursor(cursor: string): number {
+  const match = typeof cursor === 'string'
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|[+-]\d{2}:\d{2})$/i.exec(cursor)
+    : null;
+  const timestamp = typeof cursor === 'string' ? Date.parse(cursor) : Number.NaN;
+  if (!match || !Number.isFinite(timestamp)) {
+    throw new Error('Inbox cursor must be a valid ISO timestamp');
+  }
+
+  const [, year, month, day, hour, minute, second, fraction = ''] = match;
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  calendar.setUTCHours(Number(hour), Number(minute), Number(second), Number((fraction + '000').slice(0, 3)));
+  if (calendar.getUTCFullYear() !== Number(year)
+    || calendar.getUTCMonth() !== Number(month) - 1
+    || calendar.getUTCDate() !== Number(day)
+    || calendar.getUTCHours() !== Number(hour)
+    || calendar.getUTCMinutes() !== Number(minute)
+    || calendar.getUTCSeconds() !== Number(second)) {
+    throw new Error('Inbox cursor must be a valid ISO timestamp');
+  }
+  return timestamp;
 }
 
 export async function saveContact(contact: Contact) {
@@ -314,7 +387,7 @@ export async function clearAllLocalData() {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(
-      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE],
+      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE, INBOX_CURSOR_STORE],
       'readwrite'
     );
 
@@ -324,7 +397,8 @@ export async function clearAllLocalData() {
       tx.objectStore(PROFILE_STORE),
       tx.objectStore(DISCOVERY_STORE),
       tx.objectStore(QUEUE_STORE),
-      tx.objectStore(DIRECT_CHAT_STORE)
+      tx.objectStore(DIRECT_CHAT_STORE),
+      tx.objectStore(INBOX_CURSOR_STORE)
     ];
 
     stores.forEach((store) => store.clear());
