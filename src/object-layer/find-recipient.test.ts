@@ -1,12 +1,14 @@
 import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair } from '../crypto/identity';
 import { createObjectIdentity } from './identity';
 import { createSignedObject } from './envelope';
 import { IndexedDbObjectStore } from './local-store';
 import {
+  buildForwardedFindPacket,
   buildFindPacket,
+  buildLocalQueryCriteria,
   FindAggregation,
   filterObjectsByFindQuery,
   getFindQueryCriteria,
@@ -14,7 +16,7 @@ import {
   prepareFindQueryResponse,
   respondToFindPacket
 } from './transport';
-import type { DistributedObject, ObjectContent } from './types';
+import type { DistributedObject, ObjectContent, ObjectStore } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -143,6 +145,132 @@ describe('recipient FIND queries', () => {
     })).resolves.toEqual([newest, middle]);
   });
 
+  it('builds local query criteria with recipient and all parsed fields', () => {
+    expect(buildLocalQueryCriteria({
+      recipient: 'recipient-a',
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      created_after: '2026-09-30T10:00:00.000Z',
+      created_before: '2026-09-30T12:00:00.000Z',
+      since: '2026-09-30T09:00:00.000Z',
+      order: 'created_at_desc',
+      limit: 42
+    })).toEqual({
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      recipient: 'recipient-a',
+      created_after: '2026-09-30T10:00:00.000Z',
+      created_before: '2026-09-30T12:00:00.000Z',
+      since: '2026-09-30T09:00:00.000Z',
+      limit: 42,
+      order: 'created_at_desc'
+    });
+  });
+
+  it('forwards recipient and every other parsed query field unchanged', async () => {
+    const criteria = {
+      recipient: 'recipient-a',
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      created_after: '2026-09-30T10:00:00.000Z',
+      created_before: '2026-09-30T12:00:00.000Z',
+      since: '2026-09-30T09:00:00.000Z',
+      order: 'created_at_desc' as const,
+      limit: 42
+    };
+
+    const packet = await buildForwardedFindPacket(
+      criteria,
+      'forwarded-recipient-query',
+      'local-peer',
+      'child-peer',
+      [],
+      1,
+      'origin-peer',
+      '2026-09-30T12:05:00.000Z'
+    );
+
+    expect(packet.payload).toMatchObject(criteria);
+  });
+
+  it('preserves the previous local criteria and forwarded packet shapes without recipient', async () => {
+    const oldCriteria = {
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      created_after: '2026-09-30T10:00:00.000Z',
+      created_before: '2026-09-30T12:00:00.000Z',
+      since: '2026-09-30T09:00:00.000Z',
+      limit: 42,
+      order: 'created_at_desc' as const
+    };
+    expect(buildLocalQueryCriteria({ ...oldCriteria, recipient: undefined })).toStrictEqual(oldCriteria);
+
+    const packet = await buildForwardedFindPacket(
+      { ...oldCriteria, recipient: undefined },
+      'old-shape-query',
+      'local-peer',
+      'child-peer',
+      ['a'.repeat(64)],
+      1,
+      'origin-peer',
+      '2026-09-30T12:05:00.000Z'
+    );
+    expect(packet.payload).toEqual({
+      requested_objects: ['a'.repeat(64)],
+      object_id: 'a'.repeat(64),
+      requestId: 'old-shape-query',
+      ttl: 1,
+      expiresAt: '2026-09-30T12:05:00.000Z',
+      origin: 'origin-peer',
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      created_after: '2026-09-30T10:00:00.000Z',
+      created_before: '2026-09-30T12:00:00.000Z',
+      since: '2026-09-30T09:00:00.000Z',
+      limit: 42,
+      order: 'created_at_desc'
+    });
+  });
+
+  it('scopes an intermediate local query before applying its limit', async () => {
+    const unrelated = Array.from({ length: 600 }, (_, index) => ({
+      object_id: index.toString(16).padStart(64, '0'),
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      recipient: 'recipient-b',
+      created_at: `2026-09-30T11:${String(index % 60).padStart(2, '0')}:00.000Z`,
+      payload: {},
+      signature: '',
+      replication_policy: {}
+    } as DistributedObject));
+    const matching = Array.from({ length: 3 }, (_, index) => ({
+      object_id: (700 + index).toString(16).padStart(64, '0'),
+      object_type: 'mycelium.dm',
+      author: 'author-key',
+      recipient: 'recipient-a',
+      created_at: `2026-09-30T12:0${index}:00.000Z`,
+      payload: {},
+      signature: '',
+      replication_policy: {}
+    } as DistributedObject));
+    const allObjects = [...unrelated, ...matching];
+    const query = vi.fn(async (criteria?: { recipient?: string }) => criteria?.recipient
+      ? allObjects.filter((object) => object.recipient === criteria.recipient)
+      : allObjects);
+    const store = { query } as unknown as ObjectStore;
+    const criteria = buildLocalQueryCriteria({
+      recipient: 'recipient-a',
+      object_type: 'mycelium.dm',
+      order: 'created_at_desc',
+      limit: 3
+    });
+
+    const result = await filterObjectsByFindQuery(store, criteria);
+
+    expect(query).toHaveBeenCalledWith({ recipient: 'recipient-a' });
+    expect(result).toEqual([...matching].reverse());
+  });
+
   it('merges child results, deduplicates, scopes recipient, validates, and caps the final set', async () => {
     const first = await createObject({ recipient: 'recipient-a', createdAt: '2026-09-30T12:00:00.000Z' });
     const second = await createObject({ recipient: 'recipient-a', createdAt: '2026-09-30T12:00:01.000Z' });
@@ -150,11 +278,11 @@ describe('recipient FIND queries', () => {
     const unrelated = await createObject({ recipient: 'recipient-b', createdAt: '2026-09-30T12:00:03.000Z' });
     let completed: DistributedObject[] = [];
     const aggregation = new FindAggregation([], Date.now() + 5000, async (objects) => {
-      completed = await prepareFindQueryResponse(objects, {
+      completed = await prepareFindQueryResponse(objects, buildLocalQueryCriteria({
         recipient: 'recipient-a',
         order: 'created_at_desc',
         limit: 2
-      });
+      }));
     }, undefined, true);
     aggregation.addChild('peer-a');
     aggregation.addChild('peer-b');

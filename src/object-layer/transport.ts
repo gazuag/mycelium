@@ -259,6 +259,42 @@ export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | nu
   return { object_type: objectType, author, recipient, created_after: createdAfter, created_before: createdBefore, since, limit, order };
 }
 
+export function buildLocalQueryCriteria(parsedCriteria: FindQueryCriteria): FindQueryCriteria {
+  return {
+    object_type: parsedCriteria.object_type,
+    author: parsedCriteria.author,
+    ...(parsedCriteria.recipient === undefined ? {} : { recipient: parsedCriteria.recipient }),
+    created_after: parsedCriteria.created_after,
+    created_before: parsedCriteria.created_before,
+    since: parsedCriteria.since,
+    limit: parsedCriteria.limit,
+    order: parsedCriteria.order
+  };
+}
+
+export async function buildForwardedFindPacket(
+  parsedCriteria: FindQueryCriteria,
+  requestId: string,
+  sender: string,
+  recipient: string,
+  requestedObjectIds: string[],
+  ttl: number,
+  origin: string,
+  expiresAt: string
+): Promise<FindPacket> {
+  return buildFindPacket(
+    sender,
+    recipient,
+    requestedObjectIds,
+    undefined,
+    requestId,
+    ttl,
+    origin,
+    expiresAt,
+    buildLocalQueryCriteria(parsedCriteria)
+  );
+}
+
 export async function filterObjectsByFindQuery(store: ObjectStore, query: FindQueryCriteria): Promise<DistributedObject[]> {
   const objects = await store.query(query.recipient === undefined ? undefined : { recipient: query.recipient });
   const liveObjects = objects.filter((object) => !isObjectExpired(object));

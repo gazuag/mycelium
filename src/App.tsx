@@ -21,7 +21,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
@@ -409,15 +409,7 @@ function App() {
         if (!requestId || Number.isNaN(expiresAtMs) || now >= expiresAtMs || findRequestCacheRef.current.has(requestId)) return;
         findRequestCacheRef.current.set(requestId, expiresAtMs);
         const localObjects = isPhase7Query
-          ? await filterObjectsByFindQuery(store, {
-            object_type: queryFields.object_type,
-            author: queryFields.author,
-            created_after: queryFields.created_after,
-            created_before: queryFields.created_before,
-            since: queryFields.since,
-            limit: queryFields.limit,
-            order: queryFields.order
-          })
+          ? await filterObjectsByFindQuery(store, buildLocalQueryCriteria(queryFields))
           : (await Promise.all(requestedObjectIds.map(async (objectId) => {
             const object = await store.get(objectId);
             return object && await validateObject(object) ? object : null;
@@ -469,15 +461,28 @@ function App() {
         aggregation.addLocal(localObjects);
         if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
-            const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt, isPhase7Query ? {
-              object_type: queryFields.object_type,
-              author: queryFields.author,
-              created_after: queryFields.created_after,
-              created_before: queryFields.created_before,
-              since: queryFields.since,
-              limit: queryFields.limit,
-              order: queryFields.order
-            } : undefined);
+            const origin = typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender;
+            const forwardedPacket = isPhase7Query
+              ? await buildForwardedFindPacket(
+                queryFields,
+                requestId,
+                identityRef.current?.id ?? 'unknown',
+                nextPeer,
+                requestedObjectIds,
+                packet.payload.ttl - 1,
+                origin,
+                expiresAt
+              )
+              : await buildFindPacket(
+                identityRef.current?.id ?? 'unknown',
+                nextPeer,
+                requestedObjectIds,
+                undefined,
+                requestId,
+                packet.payload.ttl - 1,
+                origin,
+                expiresAt
+              );
             try {
               await objectTransportRef.current?.send(nextPeer, forwardedPacket);
               addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
