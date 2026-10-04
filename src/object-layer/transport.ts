@@ -4,6 +4,7 @@ import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePack
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
 export const MAX_FIND_QUERY_LIMIT = 500;
+export const MAX_FIND_REQUEST_OBJECT_IDS = 200;
 export const FIND_GRACE_PERIOD_MS = 1000;
 export type FindAggregationCompletionReason = 'all-objects-found' | 'all-children-responded-or-failed' | 'grace-expired' | 'child-failure-grace-expired' | 'deadline-expired';
 
@@ -30,7 +31,9 @@ export async function queryFeedObjectsForPeer(
   author: string,
   options: { since?: string | null; limit?: number } = {}
 ): Promise<DistributedObject[]> {
-  const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0 ? options.limit : undefined;
+  const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+    ? Math.min(options.limit, MAX_FIND_QUERY_LIMIT)
+    : MAX_FIND_QUERY_LIMIT;
   const query = {
     since: options.since ?? undefined,
     order: 'created_at_desc' as const
@@ -60,6 +63,10 @@ export async function buildFindPacket(
   query?: FindQueryCriteria
 ): Promise<FindPacket> {
   const requestedObjects = Array.isArray(objectId) ? objectId : [objectId];
+  if (requestedObjects.length > MAX_FIND_REQUEST_OBJECT_IDS) {
+    console.warn(`Rejecting oversized FIND request: ${requestedObjects.length} object IDs exceeds ${MAX_FIND_REQUEST_OBJECT_IDS}`);
+    throw new Error(`Too many object IDs in FIND request: ${requestedObjects.length} exceeds ${MAX_FIND_REQUEST_OBJECT_IDS}`);
+  }
   return await buildPacket(sender, recipient, 'FIND', {
     requested_objects: requestedObjects,
     object_id: requestedObjects[0] ?? '',
@@ -418,6 +425,10 @@ export async function respondToFindPacket(
   const rawRecipient = packet.payload?.recipient;
   if (rawRecipient !== undefined && (typeof rawRecipient !== 'string' || rawRecipient.trim().length === 0)) return false;
   const objectIds = getFindObjectIds(packet as FindPacket);
+  if (objectIds && objectIds.length > MAX_FIND_REQUEST_OBJECT_IDS) {
+    console.warn(`Rejecting oversized FIND request: ${objectIds.length} object IDs exceeds ${MAX_FIND_REQUEST_OBJECT_IDS}`);
+    return false;
+  }
   const requestId = packet.payload?.requestId;
   const ttl = packet.payload?.ttl;
   const expiresAt = typeof packet.payload?.expiresAt === 'string' ? packet.payload.expiresAt : null;
@@ -618,6 +629,10 @@ export async function findObjects(
   gracePeriodMs = FIND_GRACE_PERIOD_MS
 ): Promise<DistributedObject[]> {
   const requestedObjectIds = [...new Set(objectIds)];
+  if (requestedObjectIds.length > MAX_FIND_REQUEST_OBJECT_IDS) {
+    console.warn(`Rejecting oversized FIND request in findObjects: ${requestedObjectIds.length} object IDs exceeds ${MAX_FIND_REQUEST_OBJECT_IDS}`);
+    throw new Error('Invalid FIND object IDs');
+  }
   if (requestedObjectIds.length === 0 || !requestedObjectIds.every((objectId) => /^[0-9a-f]{64}$/.test(objectId))) {
     throw new Error('Invalid FIND object IDs');
   }

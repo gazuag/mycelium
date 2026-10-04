@@ -6,6 +6,15 @@ import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
 let ICE_SERVERS: RTCIceServer[] = FALLBACK_ICE_SERVERS;
 
+export const POST_REQUEST_LIMIT_MAX = 500;
+const DEFAULT_POST_REQUEST_LIMIT = 100;
+
+function normalizePostRequestLimit(value: unknown): number {
+  const normalized = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(normalized) || normalized <= 0) return DEFAULT_POST_REQUEST_LIMIT;
+  return Math.min(normalized, POST_REQUEST_LIMIT_MAX);
+}
+
 export function configureIceServers(iceServers: RTCIceServer[]) {
   if (iceServers.length > 0) ICE_SERVERS = [...iceServers];
 }
@@ -371,7 +380,7 @@ export class PeerConnectionManager {
         this.onRequestPosts(
           peerId,
           typeof packet.payload?.since === 'string' ? packet.payload.since : null,
-          Number(packet.payload?.limit ?? 100)
+          normalizePostRequestLimit(packet.payload?.limit)
         );
         return;
       }

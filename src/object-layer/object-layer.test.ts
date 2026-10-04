@@ -7,9 +7,10 @@ import { createObjectIdentity } from './identity';
 import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
 import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
 import { RecommendationIndex, recommendationWeight, selectRecommendationCandidates } from './recommendations';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, queryFeedObjectsForPeer, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, queryFeedObjectsForPeer, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { buildPacket } from '../p2p/protocol';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
-import type { DistributedObject, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
+import type { DistributedObject, FindResponsePacket, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -17,7 +18,7 @@ async function createFixtureObject(content: ImmutableObjectContent): Promise<Dis
   const keys = await generateIdentityKeyPair();
   const publicKey = await exportPublicKey(keys.publicKey);
   const privateKey = await exportPrivateKey(keys.privateKey);
-  const unsigned = { ...content, author: publicKey };
+  const unsigned = { ...content, author: content.author || publicKey };
   const objectId = await calculateObjectId(unsigned);
   const signature = await signString(privateKey, canonicalizeObjectContent({ ...unsigned, object_id: objectId, signature: '' }));
   return { ...unsigned, object_id: objectId, signature };
@@ -1314,6 +1315,73 @@ describe('distributed object foundation', () => {
     expect(queryPacket.payload.created_after).toBe('2026-08-25T00:00:00.000Z');
     expect(queryPacket.payload.created_before).toBe('2026-08-25T00:10:00.000Z');
     expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
+  });
+
+  it('queryFeedObjectsForPeer defaults to 500 results when no limit is supplied', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const store = createMemoryStore();
+    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
+      object_type: 'mycelium.post',
+      author,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      payload: { content: `post-${index}` },
+      replication_policy: {}
+    })));
+    await Promise.all(posts.map((post) => store.put(post)));
+
+    const results = await queryFeedObjectsForPeer(store, author);
+    expect(results).toHaveLength(500);
+    expect(results[0].created_at).toBe(posts[599].created_at);
+  });
+
+  it('queryFeedObjectsForPeer clamps a supplied limit above 500', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const store = createMemoryStore();
+    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
+      object_type: 'mycelium.post',
+      author,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      payload: { content: `post-${index}` },
+      replication_policy: {}
+    })));
+    await Promise.all(posts.map((post) => store.put(post)));
+
+    const results = await queryFeedObjectsForPeer(store, author, { limit: 900 });
+    expect(results).toHaveLength(500);
+  });
+
+  it('answers a FIND with the maximum number of object IDs', async () => {
+    const store = createMemoryStore();
+    const ids = Array.from({ length: MAX_FIND_REQUEST_OBJECT_IDS }, (_, index) => {
+      const objectId = `${index.toString(16).padStart(64, '0')}`;
+      return objectId;
+    });
+    const packet = await buildFindPacket('peer-a', 'peer-b', ids, undefined, 'max-id-request', 1, 'peer-a');
+    const sent: FindResponsePacket[] = [];
+    const result = await respondToFindPacket(packet, store, async (response) => { sent.push(response); }, 'peer-b');
+
+    expect(result).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.objects).toEqual([]);
+  });
+
+  it('rejects a FIND request whose object ID list exceeds the maximum and returns nothing', async () => {
+    const store = createMemoryStore();
+    const ids = Array.from({ length: MAX_FIND_REQUEST_OBJECT_IDS + 1 }, (_, index) => `${index.toString(16).padStart(64, '0')}`);
+    const packet = await buildPacket('peer-a', 'peer-b', 'FIND', {
+      requested_objects: ids,
+      object_id: ids[0],
+      requestId: 'oversized-id-request',
+      ttl: 1,
+      expiresAt: new Date(Date.now() + 5000).toISOString(),
+      origin: 'peer-a'
+    });
+    const sent: any[] = [];
+
+    await expect(respondToFindPacket(packet, store, async (response) => { sent.push(response); }, 'peer-b')).resolves.toBe(false);
+    expect(sent).toEqual([]);
   });
 
   describe('merged FIND query limits', () => {

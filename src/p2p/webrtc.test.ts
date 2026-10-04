@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { DistributedObject, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
-import { configureIceServers, PeerConnectionManager } from './webrtc';
+import { configureIceServers, PeerConnectionManager, POST_REQUEST_LIMIT_MAX } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
@@ -122,6 +122,111 @@ beforeEach(() => {
   FakePeerConnection.createDataChannelCalls = 0;
   Object.defineProperty(globalThis, 'RTCPeerConnection', { value: FakePeerConnection, configurable: true });
   Object.defineProperty(globalThis, 'window', { value: { setInterval, clearInterval, setTimeout, clearTimeout }, configurable: true });
+});
+
+describe('POST_REQUEST limit handling', () => {
+  it('clamps the incoming POST_REQUEST limit above the max', () => {
+    const requests: Array<{ limit?: number }> = [];
+    const manager = new PeerConnectionManager(
+      'peer-a',
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      (peerId, since, limit) => requests.push({ limit }),
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: null, limit: 9999 }
+    });
+
+    expect(requests).toEqual([{ limit: POST_REQUEST_LIMIT_MAX }]);
+  });
+
+  it('falls back to the default POST_REQUEST limit for invalid values', () => {
+    const requests: Array<{ limit?: number }> = [];
+    const manager = new PeerConnectionManager(
+      'peer-a',
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      (peerId, since, limit) => requests.push({ limit }),
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: null, limit: 0 }
+    });
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: null, limit: Number.NaN }
+    });
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: null }
+    });
+
+    expect(requests).toEqual([{ limit: 100 }, { limit: 100 }, { limit: 100 }]);
+  });
+
+  it('passes through a valid POST_REQUEST limit under the max', () => {
+    const requests: Array<{ limit?: number }> = [];
+    const manager = new PeerConnectionManager(
+      'peer-a',
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      (peerId, since, limit) => requests.push({ limit }),
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: null, limit: 42 }
+    });
+
+    expect(requests).toEqual([{ limit: 42 }]);
+  });
 });
 
 describe('PeerConnectionManager lifecycle', () => {
