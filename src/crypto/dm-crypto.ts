@@ -1,4 +1,4 @@
-import { signString, verifySignedString } from './identity';
+import { signString, signStringWithKey, verifySignedString } from './identity';
 
 const DM_PROTOCOL_VERSION = 'mycelium-dm-v1';
 const ENCRYPTION_KEY_BINDING_DOMAIN = 'mycelium-enc-key-binding-v1';
@@ -17,11 +17,15 @@ export interface EncryptionKeyBinding {
   readonly signature: string;
 }
 
-export interface EncryptionKeyBindingIdentity {
+interface EncryptionKeyBindingIdentityFields {
   readonly publicKey: string;
-  readonly privateKey: string;
   readonly encryptionPublicKey: string;
 }
+
+export type EncryptionKeyBindingIdentity = EncryptionKeyBindingIdentityFields & (
+  | { readonly privateKey: string; readonly signingKey?: never }
+  | { readonly privateKey?: never; readonly signingKey: CryptoKey }
+);
 
 export interface ContactEncryptionKeyState {
   readonly encryptionPublicKey?: string;
@@ -119,7 +123,9 @@ export async function createEncryptionKeyBinding(identity: EncryptionKeyBindingI
   };
   return {
     ...unsigned,
-    signature: await signString(identity.privateKey, canonicalizeEncryptionKeyBinding(unsigned))
+    signature: typeof identity.privateKey === 'string'
+      ? await signString(identity.privateKey, canonicalizeEncryptionKeyBinding(unsigned))
+      : await signStringWithKey(identity.signingKey, canonicalizeEncryptionKeyBinding(unsigned))
   };
 }
 

@@ -227,6 +227,26 @@ describe('DM cryptography primitives', () => {
     expect(await verifyEncryptionKeyBinding(binding)).toBe(true);
   });
 
+  it('creates verifiable encryption-key bindings with a non-extractable signing key', async () => {
+    const identity = await createBindingIdentity();
+    const signingKey = await crypto.subtle.importKey(
+      'pkcs8',
+      Uint8Array.from(atob(identity.privateKey), (character) => character.charCodeAt(0)).buffer,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign']
+    );
+    const binding = await createEncryptionKeyBinding({
+      publicKey: identity.publicKey,
+      encryptionPublicKey: identity.encryptionPublicKey,
+      signingKey
+    });
+
+    expect(signingKey.extractable).toBe(false);
+    await expect(crypto.subtle.exportKey('pkcs8', signingKey)).rejects.toThrow();
+    expect(await verifyEncryptionKeyBinding(binding)).toBe(true);
+  });
+
   it('rejects an encryption key swapped into a signed binding', async () => {
     const identity = await createBindingIdentity();
     const otherKeyPair = await generateEncryptionKeyPair();

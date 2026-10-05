@@ -1,4 +1,4 @@
-import { importPrivateKey, importPublicKey } from './identity';
+import { importPrivateKey, importPublicKey, signStringWithKey } from './identity';
 import type { SignedProfile } from '../types';
 
 function canonicalizeProfile(profile: Omit<SignedProfile, 'signature'>): string {
@@ -15,7 +15,8 @@ function canonicalizeProfile(profile: Omit<SignedProfile, 'signature'>): string 
   });
 }
 
-async function signData(privateKeyBase64: string, data: string): Promise<string> {
+async function signData(privateKeyBase64: string | CryptoKey, data: string): Promise<string> {
+  if (typeof privateKeyBase64 !== 'string') return await signStringWithKey(privateKeyBase64, data);
   const privateKey = await importPrivateKey(privateKeyBase64);
   const signature = await crypto.subtle.sign(
     { name: 'ECDSA', hash: 'SHA-256' },
@@ -39,7 +40,7 @@ async function verifyData(publicKeyBase64: string, data: string, signatureBase64
 export async function createSignedProfile(
   id: string,
   authorKey: string,
-  privateKey: string,
+  privateKey: string | CryptoKey,
   displayName?: string,
   bio?: string,
   tags: string[] = []

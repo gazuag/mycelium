@@ -15,10 +15,10 @@ export const DM_REPLICATION_BUDGET = 3;
 export const DM_OBJECT_TYPE = 'mycelium.dm';
 const DM_AAD_DOMAIN = 'mycelium-dm-aad-v1';
 
-export interface DmObjectIdentity extends EncryptionKeyBindingIdentity {
-  readonly id: string;
-  readonly encryptionPrivateKey: string;
-}
+export type DmObjectIdentity = EncryptionKeyBindingIdentity & { readonly id: string } & (
+  | { readonly encryptionPrivateKey: string; readonly encryptionKey?: never }
+  | { readonly encryptionPrivateKey?: never; readonly encryptionKey: CryptoKey }
+);
 
 export interface DmPayload {
   readonly v: 1;
@@ -52,7 +52,10 @@ export async function createDmObject({
   const senderEncryptionKey = identity.encryptionPublicKey;
   const recipientKey = await importEncryptionPublicKey(recipientEncryptionKey);
   const context = createDmKeyContext(senderEncryptionKey, recipientEncryptionKey);
-  const key = await deriveDmKey(await importEncryptionPrivateKey(identity.encryptionPrivateKey), recipientKey, context);
+  const encryptionKey = typeof identity.encryptionPrivateKey === 'string'
+    ? await importEncryptionPrivateKey(identity.encryptionPrivateKey)
+    : identity.encryptionKey;
+  const key = await deriveDmKey(encryptionKey, recipientKey, context);
   const aad = createDmAad(identity.publicKey, recipientSigningKey, senderEncryptionKey, recipientEncryptionKey);
   const encrypted = await encryptDm(key, plaintext, aad);
   const createdAt = new Date();
@@ -70,7 +73,9 @@ export async function createDmObject({
       nonce: encrypted.nonce
     },
     replication_policy: { replication_budget: DM_REPLICATION_BUDGET }
-  }, createObjectIdentity({ id: identity.id, publicKey: identity.publicKey, privateKey: identity.privateKey }));
+  }, createObjectIdentity(typeof identity.privateKey === 'string'
+    ? { id: identity.id, publicKey: identity.publicKey, privateKey: identity.privateKey }
+    : { id: identity.id, publicKey: identity.publicKey, signingKey: identity.signingKey }));
 }
 
 export function validateDmPayload(payload: unknown): payload is DmPayload {
@@ -116,7 +121,9 @@ export async function decryptDmObject({
   }
 
   const key = await deriveDmKey(
-    await importEncryptionPrivateKey(identity.encryptionPrivateKey),
+    typeof identity.encryptionPrivateKey === 'string'
+      ? await importEncryptionPrivateKey(identity.encryptionPrivateKey)
+      : identity.encryptionKey,
     await importEncryptionPublicKey(peerEncryptionKey),
     createDmKeyContext(payload.sender_enc_key, payload.recipient_enc_key)
   );

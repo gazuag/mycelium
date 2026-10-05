@@ -46,6 +46,34 @@ async function createDmIdentity(): Promise<LocalIdentityRecord & { id: string; e
   };
 }
 
+async function useNonExtractableKeys(identity: Awaited<ReturnType<typeof createDmIdentity>>) {
+  const signingKey = await crypto.subtle.importKey(
+    'pkcs8',
+    base64ToArrayBuffer(identity.privateKey),
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign']
+  );
+  const encryptionKey = await crypto.subtle.importKey(
+    'pkcs8',
+    base64ToArrayBuffer(identity.encryptionPrivateKey),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    ['deriveBits']
+  );
+  const {
+    privateKey: _privateKey,
+    encryptionPrivateKey: _encryptionPrivateKey,
+    ...publicIdentity
+  } = identity;
+  return { ...publicIdentity, signingKey, encryptionKey };
+}
+
+function base64ToArrayBuffer(value: string): ArrayBuffer {
+  const bytes = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  return bytes.buffer as ArrayBuffer;
+}
+
 async function sendDm(plaintext = 'private note', expiresInMs = DM_TTL_MS) {
   const sender = await createDmIdentity();
   const recipient = await createDmIdentity();
@@ -91,6 +119,51 @@ describe('mycelium.dm objects', () => {
     const { sender, object } = await sendDm('sender can read this');
 
     await expect(decryptDmObject({ object, identity: sender })).resolves.toBe('sender can read this');
+  });
+
+  it('creates and decrypts with non-extractable keys for both recipient and author roles', async () => {
+    const sender = await useNonExtractableKeys(await createDmIdentity());
+    const recipient = await useNonExtractableKeys(await createDmIdentity());
+    const object = await createDmObject({
+      identity: sender,
+      recipientSigningKey: recipient.publicKey,
+      recipientEncryptionKey: recipient.encryptionPublicKey,
+      plaintext: 'non-extractable DM'
+    });
+
+    expect(sender.signingKey.extractable).toBe(false);
+    expect(sender.encryptionKey.extractable).toBe(false);
+    expect(recipient.signingKey.extractable).toBe(false);
+    expect(recipient.encryptionKey.extractable).toBe(false);
+    await expect(crypto.subtle.exportKey('pkcs8', sender.signingKey)).rejects.toThrow();
+    await expect(crypto.subtle.exportKey('pkcs8', sender.encryptionKey)).rejects.toThrow();
+    await expect(crypto.subtle.exportKey('pkcs8', recipient.signingKey)).rejects.toThrow();
+    await expect(crypto.subtle.exportKey('pkcs8', recipient.encryptionKey)).rejects.toThrow();
+
+    await expect(decryptDmObject({
+      object,
+      identity: recipient,
+      expectedSenderEncryptionKey: sender.encryptionPublicKey
+    })).resolves.toBe('non-extractable DM');
+    await expect(decryptDmObject({ object, identity: sender })).resolves.toBe('non-extractable DM');
+  });
+
+  it('interoperates between string-based and CryptoKey-based DM identities', async () => {
+    const sender = await useNonExtractableKeys(await createDmIdentity());
+    const recipient = await createDmIdentity();
+    const object = await createDmObject({
+      identity: sender,
+      recipientSigningKey: recipient.publicKey,
+      recipientEncryptionKey: recipient.encryptionPublicKey,
+      plaintext: 'mixed-key DM'
+    });
+
+    await expect(decryptDmObject({
+      object,
+      identity: recipient,
+      expectedSenderEncryptionKey: sender.encryptionPublicKey
+    })).resolves.toBe('mixed-key DM');
+    await expect(decryptDmObject({ object, identity: sender })).resolves.toBe('mixed-key DM');
   });
 
   it('rejects decryption by a third party', async () => {

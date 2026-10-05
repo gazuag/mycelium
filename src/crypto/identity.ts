@@ -65,6 +65,18 @@ export async function signString(privateKeyBase64: string, data: string) {
   return arrayBufferToBase64(signature);
 }
 
+export async function signStringWithKey(privateKey: CryptoKey, data: string) {
+  const signature = await crypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: 'SHA-256'
+    },
+    privateKey,
+    new TextEncoder().encode(data)
+  );
+  return arrayBufferToBase64(signature);
+}
+
 export async function verifySignedString(publicKeyBase64: string, data: string, signatureBase64: string) {
   const publicKey = await importPublicKey(publicKeyBase64);
   const signatureBuffer = base64ToArrayBuffer(signatureBase64);

@@ -60,11 +60,14 @@ The server listens for peer signalling and discovery on port `8443`. The deploye
 - Build the static site with `npm run build`.
 - Deploy the generated `dist` folder as a static site.
 - The app is a static PWA and does not need a server for the UI.
+- The build generates `dist/_headers` with a report-only Content Security Policy by default. Set `VITE_CSP_ENFORCE=true` for a production build to enforce it. Check the browser DevTools Console for CSP violation reports before enabling enforcement; inspect the document response headers in the Network panel to confirm the policy was served.
+- CSP cannot restrict WebRTC ICE/STUN traffic. The `connect-src` policy covers signalling and Metered HTTPS requests, not peer-connection ICE/STUN activity.
+- Set `VITE_METERED_APP_DOMAIN` to the Metered app hostname when building. An optional `VITE_EXTRA_SIGNAL_ORIGIN` may add one additional `wss://` origin to `connect-src`.
 
 ## Server configuration
 
 - The frontend defaults to `wss://discover.unfilter.ing:8443` for all server communication (signalling and discovery).
-- Override with the `VITE_SIGNAL_SERVER_URL` environment variable.
+- Although the runtime supports a `globalThis.VITE_SIGNAL_SERVER_URL` override, Vite does not automatically expose a `VITE_SIGNAL_SERVER_URL` environment variable as that global. Setting it in a Vite `.env` file alone therefore does not override the server URL.
 
 ## What travels through the signalling server
 

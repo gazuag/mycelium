@@ -14,7 +14,10 @@ import type { DistributedObject, ObjectContent, ObjectIdentity } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
-type TestIdentity = DmObjectIdentity & { privateKey: string };
+type TestIdentity = DmObjectIdentity & {
+  privateKey: string;
+  encryptionPrivateKey: string;
+};
 const stores: IndexedDbObjectStore[] = [];
 const storedObjectIds: string[] = [];
 
