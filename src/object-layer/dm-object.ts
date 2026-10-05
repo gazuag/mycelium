@@ -34,6 +34,7 @@ export interface CreateDmObjectOptions {
   readonly recipientEncryptionKey: string;
   readonly plaintext: string;
   readonly expiresInMs?: number;
+  readonly now?: () => Date;
 }
 
 export interface DecryptDmObjectOptions {
@@ -47,7 +48,8 @@ export async function createDmObject({
   recipientSigningKey,
   recipientEncryptionKey,
   plaintext,
-  expiresInMs = DM_TTL_MS
+  expiresInMs = DM_TTL_MS,
+  now = () => new Date()
 }: CreateDmObjectOptions): Promise<DistributedObject> {
   const senderEncryptionKey = identity.encryptionPublicKey;
   const recipientKey = await importEncryptionPublicKey(recipientEncryptionKey);
@@ -58,7 +60,7 @@ export async function createDmObject({
   const key = await deriveDmKey(encryptionKey, recipientKey, context);
   const aad = createDmAad(identity.publicKey, recipientSigningKey, senderEncryptionKey, recipientEncryptionKey);
   const encrypted = await encryptDm(key, plaintext, aad);
-  const createdAt = new Date();
+  const createdAt = now();
 
   return await createSignedObject({
     object_type: DM_OBJECT_TYPE,
