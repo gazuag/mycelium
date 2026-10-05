@@ -72,7 +72,7 @@ describe('IndexedDbObjectStore recipient index', () => {
     const store = createStore();
     await expect(store.get(existingObject.object_id)).resolves.toEqual(existingObject);
     const upgraded = await (store as unknown as { databasePromise: Promise<IDBDatabase> }).databasePromise;
-    expect(upgraded.version).toBe(4);
+    expect(upgraded.version).toBe(5);
     expect(upgraded.transaction('objects').objectStore('objects').indexNames.contains(RECIPIENT_CREATED_AT_INDEX)).toBe(true);
   });
 
@@ -81,7 +81,7 @@ describe('IndexedDbObjectStore recipient index', () => {
     await store.query();
     const database = await (store as unknown as { databasePromise: Promise<IDBDatabase> }).databasePromise;
 
-    expect(database.version).toBe(4);
+    expect(database.version).toBe(5);
     expect(database.transaction('objects').objectStore('objects').indexNames.contains(RECIPIENT_CREATED_AT_INDEX)).toBe(true);
   });
 

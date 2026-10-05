@@ -2,11 +2,32 @@ import type { DistributedObject, LocalPostMetadata, LocalPostMetadataStore, Obje
 import { isObjectExpired, validateDistributedObject } from './envelope';
 
 const DATABASE_NAME = 'mycelium_objects';
-const DATABASE_VERSION = 4;
+const DATABASE_VERSION = 5;
 const OBJECT_STORE_NAME = 'objects';
 const RECIPIENT_CREATED_AT_INDEX = 'recipient_created_at';
 const LOCAL_POST_METADATA_STORE_NAME = 'local_post_metadata';
 const RECOMMENDATION_SEQUENCE_STORE_NAME = 'recommendation_sequences';
+const OUTBOX_STORE_NAME = 'outbox';
+const DEFAULT_OUTBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface OutboxEntry {
+  readonly object_id: string;
+  readonly created_at: string;
+  readonly expires_at: string;
+  readonly replicated_to: string[];
+  readonly delivered_direct: boolean;
+  readonly attempts: number;
+  readonly last_attempt_at: string | null;
+}
+
+export interface OutboxStore {
+  add(entry: OutboxEntry): Promise<void>;
+  get(objectId: string): Promise<OutboxEntry | null>;
+  listPending(limit: number): Promise<OutboxEntry[]>;
+  update(entry: OutboxEntry): Promise<void>;
+  remove(objectId: string): Promise<void>;
+  pruneExpired(now: Date): Promise<number>;
+}
 
 export class IndexedDbObjectStore implements ObjectStore {
   private readonly databasePromise: Promise<IDBDatabase>;
@@ -136,6 +157,76 @@ export class IndexedDbRecommendationSequenceStore implements RecommendationSeque
   }
 }
 
+export class IndexedDbOutboxStore implements OutboxStore {
+  private readonly databasePromise: Promise<IDBDatabase>;
+
+  constructor() {
+    this.databasePromise = openObjectDatabase();
+  }
+
+  async add(entry: OutboxEntry): Promise<void> {
+    const database = await this.databasePromise;
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(OUTBOX_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(OUTBOX_STORE_NAME);
+      const request = store.get(entry.object_id);
+      request.onsuccess = () => {
+        if (request.result === undefined) store.add(entry);
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('Outbox transaction aborted'));
+    });
+  }
+
+  async get(objectId: string): Promise<OutboxEntry | null> {
+    const database = await this.databasePromise;
+    const entry = await runRequest<OutboxEntry | undefined>(database, 'readonly', (store) => store.get(objectId), OUTBOX_STORE_NAME);
+    return entry ?? null;
+  }
+
+  async listPending(limit: number): Promise<OutboxEntry[]> {
+    const database = await this.databasePromise;
+    const entries = await runRequest<OutboxEntry[]>(database, 'readonly', (store) => store.getAll(), OUTBOX_STORE_NAME);
+    return entries
+      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+      .slice(0, Math.max(0, limit));
+  }
+
+  async update(entry: OutboxEntry): Promise<void> {
+    const database = await this.databasePromise;
+    await runTransaction(database, 'readwrite', (store) => store.put(entry), OUTBOX_STORE_NAME);
+  }
+
+  async remove(objectId: string): Promise<void> {
+    const database = await this.databasePromise;
+    await runTransaction(database, 'readwrite', (store) => store.delete(objectId), OUTBOX_STORE_NAME);
+  }
+
+  async pruneExpired(now: Date): Promise<number> {
+    const database = await this.databasePromise;
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(OUTBOX_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(OUTBOX_STORE_NAME);
+      const request = store.getAll();
+      let removed = 0;
+      request.onsuccess = () => {
+        for (const entry of request.result as OutboxEntry[]) {
+          if (Date.parse(entry.expires_at) <= now.getTime()) {
+            store.delete(entry.object_id);
+            removed += 1;
+          }
+        }
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve(removed);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('Outbox transaction aborted'));
+    });
+  }
+}
+
 function openObjectDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
@@ -152,6 +243,9 @@ function openObjectDatabase(): Promise<IDBDatabase> {
       }
       if (!request.result.objectStoreNames.contains(RECOMMENDATION_SEQUENCE_STORE_NAME)) {
         request.result.createObjectStore(RECOMMENDATION_SEQUENCE_STORE_NAME, { keyPath: 'author' });
+      }
+      if (!request.result.objectStoreNames.contains(OUTBOX_STORE_NAME)) {
+        request.result.createObjectStore(OUTBOX_STORE_NAME, { keyPath: 'object_id' });
       }
     };
     request.onsuccess = () => resolve(request.result);
