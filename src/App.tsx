@@ -4,10 +4,13 @@ import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
+import { wrapFindTransport } from './object-layer/find-transport-adapter';
+import { createDmEvents } from './object-layer/dm-events';
+import { createInboxService } from './object-layer/inbox-service';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
 import { appendBoundedLog, formatMessageLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
-import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage } from './storage/idb';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage, loadInboxCursor, saveInboxCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
@@ -197,6 +200,8 @@ function App() {
   const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
   const recommendationIndexRef = useRef(new RecommendationIndex());
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
+  const dmEventsRef = useRef(createDmEvents());
+  const inboxServiceRef = useRef<ReturnType<typeof createInboxService> | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
   const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
@@ -296,6 +301,30 @@ function App() {
 
   useEffect(() => {
     identityRef.current = identity;
+  }, [identity]);
+
+  useEffect(() => {
+    if (!identity) return;
+    const store = objectStoreRef.current;
+    const objectTransport = objectTransportRef.current;
+    if (!store || !objectTransport) return;
+
+    const signPacket: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+    const service = createInboxService({
+      myPublicKey: identity.publicKey,
+      store,
+      transport: wrapFindTransport({ objectTransport, signPacket }),
+      loadCursor: loadInboxCursor,
+      saveCursor: saveInboxCursor,
+      events: dmEventsRef.current
+    });
+    inboxServiceRef.current = service;
+    service.start();
+
+    return () => {
+      service.stop();
+      if (inboxServiceRef.current === service) inboxServiceRef.current = null;
+    };
   }, [identity]);
 
   useEffect(() => {
@@ -644,6 +673,7 @@ function App() {
     const stored = await receiveObjectPacket(packet, store);
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
     if (stored && packet.type === 'OBJECT_STORE') {
+      inboxServiceRef.current?.notifyObjectStored(packet.payload.object);
       setObjectTestStatus(`Received and stored ${packet.payload.object.object_id} from ${peerId}`);
       void refreshObjectStore();
     }
@@ -995,8 +1025,18 @@ function App() {
         const store = objectStoreRef.current;
         const transport = objectTransportRef.current;
         if (!store || !transport) return;
-        const stored = await receiveAndReplicate(object, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        const existedBefore = await store.get(object.object_id);
+        let stored: boolean;
+        try {
+          stored = await receiveAndReplicate(object, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        } catch (error) {
+          if (!existedBefore && await store.get(object.object_id)) {
+            inboxServiceRef.current?.notifyObjectStored(object);
+          }
+          throw error;
+        }
         if (!stored) return;
+        inboxServiceRef.current?.notifyObjectStored(object);
         recommendationIndexRef.current.add(object);
         setRecommendationRevision((revision) => revision + 1);
         const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
@@ -1046,8 +1086,21 @@ function App() {
         const store = objectStoreRef.current;
         const transport = objectTransportRef.current;
         if (!store || !transport) return;
-        const storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
+        const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
+        let storedFlags: boolean[];
+        try {
+          storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        } catch (error) {
+          for (const object of objects) {
+            if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
+              inboxServiceRef.current?.notifyObjectStored(object);
+            }
+          }
+          throw error;
+        }
         const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+        newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
         const receivedViews: LocalPostView[] = [];
         for (const object of newlyStoredObjects) {
           recommendationIndexRef.current.add(object);
@@ -1079,6 +1132,7 @@ function App() {
         setDataChannelOpen(true);
         setActivePeerId(peer);
         updateContactState(peer, { connected: true });
+        inboxServiceRef.current?.notifyPeerConnected();
         addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
         if (manager) {
