@@ -1,9 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { DistributedObject, ObjectPacket } from '../object-layer/types';
+import type { ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
-import { configureIceServers, PeerConnectionManager, POST_REQUEST_LIMIT_MAX } from './webrtc';
+import { PeerConnectionManager } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
-import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
 class FakeDataChannel {
   readonly label = 'chat';
@@ -29,7 +28,6 @@ class FakePeerConnection {
   static maxActiveRemoteDescriptionCalls = 0;
   static createDataChannelCalls = 0;
   lastDataChannel: FakeDataChannel | null = null;
-  configuration: RTCConfiguration;
 
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -44,8 +42,7 @@ class FakePeerConnection {
   ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null;
   stats = new Map<string, any>();
 
-  constructor(configuration: RTCConfiguration) {
-    this.configuration = configuration;
+  constructor() {
     FakePeerConnection.instances.push(this);
   }
 
@@ -115,7 +112,6 @@ function signal(type: PeerSignalMessage['type'], from = 'peer-b'): PeerSignalMes
 }
 
 beforeEach(() => {
-  configureIceServers(FALLBACK_ICE_SERVERS);
   FakePeerConnection.instances = [];
   FakePeerConnection.activeRemoteDescriptionCalls = 0;
   FakePeerConnection.maxActiveRemoteDescriptionCalls = 0;
@@ -124,124 +120,7 @@ beforeEach(() => {
   Object.defineProperty(globalThis, 'window', { value: { setInterval, clearInterval, setTimeout, clearTimeout }, configurable: true });
 });
 
-describe('POST_REQUEST limit handling', () => {
-  it('clamps the incoming POST_REQUEST limit above the max', () => {
-    const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
-
-    (manager as any).handleMyceliumPacket({
-      type: 'POST_REQUEST',
-      sender: 'peer-b',
-      payload: { since: null, limit: 9999 }
-    });
-
-    expect(requests).toEqual([{ limit: POST_REQUEST_LIMIT_MAX }]);
-  });
-
-  it('falls back to the default POST_REQUEST limit for invalid values', () => {
-    const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
-
-    (manager as any).handleMyceliumPacket({
-      type: 'POST_REQUEST',
-      sender: 'peer-b',
-      payload: { since: null, limit: 0 }
-    });
-    (manager as any).handleMyceliumPacket({
-      type: 'POST_REQUEST',
-      sender: 'peer-b',
-      payload: { since: null, limit: Number.NaN }
-    });
-    (manager as any).handleMyceliumPacket({
-      type: 'POST_REQUEST',
-      sender: 'peer-b',
-      payload: { since: null }
-    });
-
-    expect(requests).toEqual([{ limit: 100 }, { limit: 100 }, { limit: 100 }]);
-  });
-
-  it('passes through a valid POST_REQUEST limit under the max', () => {
-    const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
-
-    (manager as any).handleMyceliumPacket({
-      type: 'POST_REQUEST',
-      sender: 'peer-b',
-      payload: { since: null, limit: 42 }
-    });
-
-    expect(requests).toEqual([{ limit: 42 }]);
-  });
-});
-
 describe('PeerConnectionManager lifecycle', () => {
-  it('uses the configured Metered ICE servers when creating peer connections', () => {
-    const meteredServers: RTCIceServer[] = [
-      { urls: 'stun:metered.example:80' },
-      { urls: 'turn:metered.example:443?transport=tcp', username: 'temporary-user', credential: 'temporary-password' }
-    ];
-    configureIceServers(meteredServers);
-
-    createManager();
-
-    expect(FakePeerConnection.instances[0].configuration.iceServers).toEqual(meteredServers);
-  });
-
   it('logs all checked ICE pairs on failure and the selected pair when connected', async () => {
     const events: string[] = [];
     const manager = new PeerConnectionManager(
@@ -457,80 +336,6 @@ describe('PeerConnectionManager lifecycle', () => {
 
     expect(manager.getDataChannelState()).toBe('open');
     expect(FakePeerConnection.createDataChannelCalls).toBe(1);
-  });
-
-  it('sends canonical object packets and ignores removed legacy post payloads', async () => {
-    const receivedObjects: DistributedObject[] = [];
-    const receivedBatches: DistributedObject[][] = [];
-    const manager = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, (_peerId, object) => receivedObjects.push(object), noop, noop,
-      (_peerId, objects) => receivedBatches.push(objects), noop, noop, noop, noop, noop,
-      undefined, undefined, undefined, undefined
-    );
-    const peerConnection = FakePeerConnection.instances[0];
-    const socket = fakeSocket();
-    await manager.createOffer('peer-b', socket);
-    await manager.handleSignal(signal('answer'), socket);
-    const channel = peerConnection.lastDataChannel!;
-    channel.readyState = 'open';
-    channel.onopen?.();
-
-    const object = {
-      object_id: 'a'.repeat(64),
-      object_type: 'mycelium.post',
-      author: 'author',
-      created_at: '2026-08-25T00:00:00.000Z',
-      payload: { content: 'wire object' },
-      replication_policy: {},
-      signature: 'object-signature'
-    } as DistributedObject;
-    manager.sendObject(object);
-    manager.sendObjectsBatch([object]);
-    const directObjectPacket = {
-      protocol: 'mycelium',
-      version: 1,
-      id: 'direct-object-packet',
-      type: 'OBJECT_STORE',
-      timestamp: '2026-10-05T12:00:00.000Z',
-      sender: 'peer-a',
-      recipient: 'peer-b',
-      payload: { object },
-      signature: 'packet-signature'
-    } as ObjectPacket;
-    manager.sendObjectPacket(directObjectPacket);
-    await Promise.resolve();
-
-    expect(channel.send).toHaveBeenCalledWith(JSON.stringify(directObjectPacket));
-    const sentTypes = channel.send.mock.calls.map(([payload]) => JSON.parse(payload).type);
-    expect(sentTypes).toContain('OBJECT_STORE');
-    expect(sentTypes).toContain('OBJECT_BATCH');
-    expect(sentTypes).not.toContain('POST');
-    expect(sentTypes).not.toContain('POST_BATCH');
-
-    channel.onmessage?.({ data: JSON.stringify({ type: 'signed-post', post: object }) } as MessageEvent);
-    channel.onmessage?.({ data: JSON.stringify({ type: 'posts-batch', posts: [object] }) } as MessageEvent);
-    channel.onmessage?.({ data: JSON.stringify({ type: 'request-posts', since: null }) } as MessageEvent);
-    expect(receivedObjects).toEqual([]);
-    expect(receivedBatches).toEqual([]);
-  });
-
-  it('rejects object packet sends when the channel is not open or send throws', async () => {
-    const manager = createManager();
-    const peerConnection = FakePeerConnection.instances[0];
-    const objectPacket = { type: 'OBJECT_STORE' } as ObjectPacket;
-
-    await expect(async () => manager.sendObjectPacket(objectPacket)).rejects.toThrow('Object packet send failed');
-
-    await manager.createOffer('peer-b', fakeSocket());
-    await manager.handleSignal(signal('answer'), fakeSocket());
-    const channel = peerConnection.lastDataChannel!;
-    channel.readyState = 'open';
-    channel.onopen?.();
-    channel.send.mockImplementationOnce(() => {
-      throw new Error('channel failure');
-    });
-
-    expect(() => manager.sendObjectPacket(objectPacket)).toThrow('Object packet send failed');
   });
 
   it('keeps an answerer waiting for ondatachannel after signalling returns to stable', async () => {
