@@ -1,0 +1,21 @@
+#!/bin/sh
+
+repo_root=$(git rev-parse --show-toplevel) || {
+  echo "Pre-commit safety check failed: could not locate the repository root." >&2
+  exit 1
+}
+
+cd "$repo_root" || {
+  echo "Pre-commit safety check failed: could not enter the repository root." >&2
+  exit 1
+}
+
+if ! npm run build; then
+  echo "Pre-commit blocked: production build failed." >&2
+  exit 1
+fi
+
+if ! npm test; then
+  echo "Pre-commit blocked: test suite failed." >&2
+  exit 1
+fi

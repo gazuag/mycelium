@@ -33,8 +33,11 @@ python3 -m pip install -r requirements.txt
 ### Frontend
 
 ```bash
+npm run setup-hooks
 npm run dev
 ```
+
+Run `npm run setup-hooks` once in each clone to enable the pre-commit check. It runs the production build and test suite before commits. Avoid bypassing it with `git commit --no-verify`.
 
 Open the local URL printed by Vite.
 
