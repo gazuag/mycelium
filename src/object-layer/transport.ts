@@ -445,7 +445,41 @@ export class FindAggregation {
     this.completed = true;
     if (this.graceTimer) clearTimeout(this.graceTimer);
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
-    await this.onComplete([...this.objects.values()], reason);
+    this.graceTimer = null;
+    this.deadlineTimer = null;
+    try {
+      await this.onComplete([...this.objects.values()], reason);
+    } catch {
+      console.warn('FIND aggregation completion callback failed');
+    }
+  }
+}
+
+export async function forwardFindRequestToChild(
+  aggregation: FindAggregation,
+  peerId: string,
+  send: () => Promise<void>
+): Promise<boolean> {
+  try {
+    await send();
+    return true;
+  } catch {
+    await aggregation.failChild(peerId);
+    return false;
+  }
+}
+
+export async function sendFindPacketToConnectedPeer(
+  transport: Pick<ObjectTransport, 'connectedPeers' | 'send'> | null,
+  peerId: string,
+  packet: ObjectPacket
+): Promise<boolean> {
+  if (!transport || !transport.connectedPeers().includes(peerId)) return false;
+  try {
+    await transport.send(peerId, packet);
+    return true;
+  } catch {
+    return false;
   }
 }
 

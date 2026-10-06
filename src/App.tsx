@@ -27,7 +27,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
@@ -510,28 +510,35 @@ function App() {
         addLog(`upstream recorded: ${peerId}`);
         let aggregation: FindAggregation;
         aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
-          const responseObjects = await prepareFindQueryResponse(objects, queryFields);
-          addLog('aggregate complete');
-          addLog(`reason: ${reason}`);
-          addLog(`returning: ${responseObjects.length} objects`);
-          addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
-          addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${responseObjects.length} upstream=${peerId}`);
-          const response = await buildFindResponseObjectsPacket(
-            identityRef.current?.id ?? 'unknown',
-            peerId,
-            requestId,
-            responseObjects,
-            undefined,
-            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-            expiresAt
-          );
-          await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
-          addLog(`aggregate sent upstream to ${peerId}`);
-          addLog(`PHASE6 AGG CLEANUP BEFORE DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
-          findAggregationRef.current.delete(requestId);
-          findRequestRouteRef.current.delete(requestId);
-          findRequestCacheRef.current.delete(requestId);
-          addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
+          try {
+            const transport = objectTransportRef.current;
+            if (!transport || !transport.connectedPeers().includes(peerId)) return;
+            const responseObjects = await prepareFindQueryResponse(objects, queryFields);
+            addLog('aggregate complete');
+            addLog(`reason: ${reason}`);
+            addLog(`returning: ${responseObjects.length} objects`);
+            addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
+            addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${responseObjects.length} upstream=${peerId}`);
+            const response = await buildFindResponseObjectsPacket(
+              identityRef.current?.id ?? 'unknown',
+              peerId,
+              requestId,
+              responseObjects,
+              undefined,
+              typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+              expiresAt
+            );
+            if (!await sendFindPacketToConnectedPeer(transport, peerId, response)) return;
+            addLog(`aggregate sent upstream to ${peerId}`);
+          } finally {
+            addLog(`PHASE6 AGG CLEANUP BEFORE DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
+            if (findAggregationRef.current.get(requestId)?.aggregation === aggregation) {
+              findAggregationRef.current.delete(requestId);
+            }
+            findRequestRouteRef.current.delete(requestId);
+            findRequestCacheRef.current.delete(requestId);
+            addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
+          }
         }, undefined, isPhase7Query);
         findAggregationRef.current.set(requestId, {
           aggregation,
@@ -549,37 +556,42 @@ function App() {
         if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
             const origin = typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender;
-            const forwardedPacket = isPhase7Query
-              ? await buildForwardedFindPacket(
-                queryFields,
-                requestId,
-                identityRef.current?.id ?? 'unknown',
-                nextPeer,
-                requestedObjectIds,
-                packet.payload.ttl - 1,
-                origin,
-                expiresAt
-              )
-              : await buildFindPacket(
-                identityRef.current?.id ?? 'unknown',
-                nextPeer,
-                requestedObjectIds,
-                undefined,
-                requestId,
-                packet.payload.ttl - 1,
-                origin,
-                expiresAt
-              );
-            try {
-              await objectTransportRef.current?.send(nextPeer, forwardedPacket);
+            const forwarded = await forwardFindRequestToChild(aggregation, nextPeer, async () => {
+              const forwardedPacket = isPhase7Query
+                ? await buildForwardedFindPacket(
+                  queryFields,
+                  requestId,
+                  identityRef.current?.id ?? 'unknown',
+                  nextPeer,
+                  requestedObjectIds,
+                  packet.payload.ttl - 1,
+                  origin,
+                  expiresAt
+                )
+                : await buildFindPacket(
+                  identityRef.current?.id ?? 'unknown',
+                  nextPeer,
+                  requestedObjectIds,
+                  undefined,
+                  requestId,
+                  packet.payload.ttl - 1,
+                  origin,
+                  expiresAt
+                );
+              const transport = objectTransportRef.current;
+              if (!transport || !transport.connectedPeers().includes(nextPeer)) {
+                throw new Error('FIND child is unavailable');
+              }
+              await transport.send(nextPeer, forwardedPacket);
+            });
+            if (forwarded) {
               addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
-            } catch {
+            } else {
               addLog(`child ${nextPeer} failed before response`);
-              aggregation.failChild(nextPeer);
             }
           }
         } else {
-          for (const nextPeer of nextPeers) aggregation.failChild(nextPeer);
+          for (const nextPeer of nextPeers) await aggregation.failChild(nextPeer);
         }
         return;
       }
