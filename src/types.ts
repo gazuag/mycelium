@@ -15,7 +15,6 @@ export interface Contact {
   lastConnectionStatus?: string;
   lastSeen?: string;
   unreadMessages?: number;
-  queuedMessages?: number;
   encryptionPublicKey?: string;
   encryptionKeyChanged?: boolean;
 }
@@ -42,13 +41,4 @@ export interface SignedProfile {
   bio?: string;
   tags?: string[];
   signature: string;
-}
-
-export interface QueuedMessage {
-  id: string;
-  recipient: string;
-  text: string;
-  timestamp: string;
-  status: 'queued' | 'sent';
-  chatMessageId?: string;
 }

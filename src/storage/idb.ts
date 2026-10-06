@@ -2,13 +2,11 @@ import { Contact, SignedProfile } from '../types';
 import { exportEncryptionPrivateKey, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
 const DISCOVERY_STORE = 'discovery_interactions';
-const QUEUE_STORE = 'message_queue';
-const DIRECT_CHAT_STORE = 'direct_chat_messages';
 const INBOX_CURSOR_STORE = 'inbox_cursors';
 let identityLoadPromise: Promise<CompleteLocalIdentityRecord | null> | null = null;
 
@@ -61,6 +59,8 @@ export async function openDatabase() {
 
     request.onupgradeneeded = () => {
       const db = request.result;
+      if (db.objectStoreNames.contains('message_queue')) db.deleteObjectStore('message_queue');
+      if (db.objectStoreNames.contains('direct_chat_messages')) db.deleteObjectStore('direct_chat_messages');
       if (!db.objectStoreNames.contains(IDENTITY_STORE)) {
         db.createObjectStore(IDENTITY_STORE, { keyPath: 'key' });
       }
@@ -73,15 +73,6 @@ export async function openDatabase() {
       if (db.objectStoreNames.contains('posts')) db.deleteObjectStore('posts');
       if (!db.objectStoreNames.contains(DISCOVERY_STORE)) {
         db.createObjectStore(DISCOVERY_STORE, { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains(QUEUE_STORE)) {
-        const queueStore = db.createObjectStore(QUEUE_STORE, { keyPath: 'id' });
-        queueStore.createIndex('recipient', 'recipient');
-      }
-      if (!db.objectStoreNames.contains(DIRECT_CHAT_STORE)) {
-        const directChatStore = db.createObjectStore(DIRECT_CHAT_STORE, { keyPath: 'id' });
-        directChatStore.createIndex('peerId', 'peerId');
-        directChatStore.createIndex('timestamp', 'timestamp');
       }
       if (!db.objectStoreNames.contains(INBOX_CURSOR_STORE)) {
         db.createObjectStore(INBOX_CURSOR_STORE, { keyPath: 'identity' });
@@ -286,108 +277,11 @@ export async function loadDiscoveryInteractions() {
   });
 }
 
-export async function saveMessageQueue(message: { id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent'; chatMessageId?: string }) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(QUEUE_STORE, 'readwrite');
-    const store = tx.objectStore(QUEUE_STORE);
-    store.put(message);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function loadMessageQueue(): Promise<Array<{ id: string; recipient: string; text: string; timestamp: string; status: 'queued' | 'sent'; chatMessageId?: string }>> {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(QUEUE_STORE, 'readonly');
-    const store = tx.objectStore(QUEUE_STORE);
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function deleteMessageQueue(id: string) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(QUEUE_STORE, 'readwrite');
-    const store = tx.objectStore(QUEUE_STORE);
-    store.delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function saveDirectChatMessage(message: { id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' }) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
-    const store = tx.objectStore(DIRECT_CHAT_STORE);
-    store.put(message);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function deleteDirectChatMessage(id: string) {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
-    const store = tx.objectStore(DIRECT_CHAT_STORE);
-    store.delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function loadDirectChatMessages(): Promise<Array<{ id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' }>> {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DIRECT_CHAT_STORE, 'readonly');
-    const store = tx.objectStore(DIRECT_CHAT_STORE);
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function updateDirectChatMessageStatus(id: string, deliveryStatus: 'queued' | 'sent') {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
-    const store = tx.objectStore(DIRECT_CHAT_STORE);
-    const request = store.get(id);
-    request.onsuccess = () => {
-      const existing = request.result as { id: string; peerId: string; text: string; timestamp: string; isMine: boolean; deliveryStatus?: 'queued' | 'sent' } | undefined;
-      if (!existing) {
-        resolve();
-        return;
-      }
-      store.put({ ...existing, deliveryStatus });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function clearDirectChatMessages() {
-  const db = await openDatabase();
-  return new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(DIRECT_CHAT_STORE, 'readwrite');
-    const store = tx.objectStore(DIRECT_CHAT_STORE);
-    store.clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
 export async function clearAllLocalData() {
   const db = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(
-      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, DISCOVERY_STORE, QUEUE_STORE, DIRECT_CHAT_STORE, INBOX_CURSOR_STORE],
+      [IDENTITY_STORE, CONTACT_STORE, PROFILE_STORE, DISCOVERY_STORE, INBOX_CURSOR_STORE],
       'readwrite'
     );
 
@@ -396,8 +290,6 @@ export async function clearAllLocalData() {
       tx.objectStore(CONTACT_STORE),
       tx.objectStore(PROFILE_STORE),
       tx.objectStore(DISCOVERY_STORE),
-      tx.objectStore(QUEUE_STORE),
-      tx.objectStore(DIRECT_CHAT_STORE),
       tx.objectStore(INBOX_CURSOR_STORE)
     ];
 

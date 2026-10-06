@@ -32,7 +32,6 @@ export class PeerConnectionManager {
   private makingOffer = false;
   private polite = false;
   private onState: (peerId: string, state: ConnectionState) => void;
-  private onData: (peerId: string, message: string) => void;
   private onObject: (peerId: string, object: DistributedObject) => void;
   private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
   private onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void;
@@ -42,13 +41,11 @@ export class PeerConnectionManager {
   private onClose: (peerId: string) => void;
   private onEvent: (peerId: string, event: string) => void;
   private onProfileRequest: (peerId: string) => void;
-  private onMessageAck: (peerId: string, messageId: string) => void;
   private onObjectPacket?: (peerId: string, packet: ObjectPacket) => void;
   private packetSigner?: PacketSigner;
   private helloSent = false;
   private remoteSupportsMyp = false;
   private pingIntervalId: number | null = null;
-  private pendingMessageAcks = new Map<string, { text: string; sentAt: string }>();
   private capabilities: string[];
   private softwareVersion: string;
   private readonly managerId = `manager-${nextManagerId++}`;
@@ -65,7 +62,6 @@ export class PeerConnectionManager {
   constructor(
     localId: string,
     onState: (peerId: string, state: ConnectionState) => void,
-    onData: (peerId: string, message: string) => void,
     onSignal: (message: SignalMessage) => void,
     onObject: (peerId: string, object: DistributedObject) => void,
     onMetadata: (peerId: string, metadata: PeerMetadata) => void,
@@ -75,7 +71,6 @@ export class PeerConnectionManager {
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
     onProfileRequest: (peerId: string) => void,
-    onMessageAck: (peerId: string, messageId: string) => void,
     packetSigner?: PacketSigner,
     capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1'],
     softwareVersion = 'mycelium-web/0.1',
@@ -83,7 +78,6 @@ export class PeerConnectionManager {
   ) {
     this.localId = localId;
     this.onState = onState;
-    this.onData = onData;
     this.onObject = onObject;
     this.onMetadata = onMetadata;
     this.onRequestPosts = onRequestPosts;
@@ -93,7 +87,6 @@ export class PeerConnectionManager {
     this.onClose = onClose;
     this.onEvent = onEvent;
     this.onProfileRequest = onProfileRequest;
-    this.onMessageAck = onMessageAck;
     this.packetSigner = packetSigner;
     this.onObjectPacket = onObjectPacket;
     this.capabilities = capabilities;
@@ -266,7 +259,6 @@ export class PeerConnectionManager {
     this.dataChannel.onmessage = (event) => {
       if (this.dataChannel !== channel) return;
       const data = event.data;
-      const peerId = this.remoteId ?? '<unknown>';
       if (typeof data === 'string') {
         try {
           const parsed = JSON.parse(data);
@@ -275,15 +267,7 @@ export class PeerConnectionManager {
             this.handleMyceliumPacket(parsed);
             return;
           }
-          if (parsed?.type === 'chat' && typeof parsed.text === 'string') {
-            if (typeof parsed.id === 'string') {
-              this.sendData({ type: 'chat-ack', messageId: parsed.id });
-            }
-            this.onData(peerId, parsed.text);
-            return;
-          }
-          if (parsed?.type === 'chat-ack' && typeof parsed.messageId === 'string') {
-            this.onMessageAck(peerId, parsed.messageId);
+          if (parsed?.type === 'chat' || parsed?.type === 'chat-ack') {
             return;
           }
           if (parsed?.type === 'metadata' && parsed.metadata) {
@@ -291,10 +275,9 @@ export class PeerConnectionManager {
             return;
           }
         } catch {
-          // Fall back to raw text if parsing fails
+          return;
         }
       }
-      this.onData(peerId, String(data));
     };
   }
 
@@ -338,30 +321,6 @@ export class PeerConnectionManager {
         return;
       }
       case 'MESSAGE': {
-        const messageObj = packet.payload?.message as { id?: string; ciphertext?: string; text?: string } | undefined;
-        const text = typeof messageObj?.text === 'string'
-          ? messageObj.text
-          : typeof messageObj?.ciphertext === 'string'
-            ? messageObj.ciphertext
-            : '';
-
-        if (text) {
-          this.onData(peerId, text);
-        }
-
-        void this.sendPacket('MESSAGE_ACK', {
-          messageId: messageObj?.id ?? packet.id,
-          deliveredAt: new Date().toISOString()
-        });
-        return;
-      }
-      case 'MESSAGE_ACK': {
-        const messageId = typeof packet.payload?.messageId === 'string' ? packet.payload.messageId : null;
-        if (messageId && this.pendingMessageAcks.has(messageId)) {
-          this.pendingMessageAcks.delete(messageId);
-          this.onEvent(peerId, `Message ${messageId} acknowledged`);
-          this.onMessageAck(peerId, messageId);
-        }
         return;
       }
       case 'PROFILE_REQUEST': {
@@ -484,36 +443,6 @@ export class PeerConnectionManager {
       window.clearInterval(this.pingIntervalId);
       this.pingIntervalId = null;
     }
-  }
-
-  public sendChatMessage(text: string) {
-    if (this.remoteSupportsMyp) {
-      const messageId = createPacketId();
-      this.pendingMessageAcks.set(messageId, {
-        text,
-        sentAt: new Date().toISOString()
-      });
-      void this.sendPacket('MESSAGE', {
-        message: {
-          id: messageId,
-          from: this.localId,
-          to: this.remoteId,
-          created: new Date().toISOString(),
-          ciphertext: text,
-          text,
-          signature: 'unsigned-v1'
-        }
-      });
-      return messageId;
-    }
-
-    const messageId = createPacketId();
-    this.pendingMessageAcks.set(messageId, {
-      text,
-      sentAt: new Date().toISOString()
-    });
-    this.sendData({ type: 'chat', id: messageId, text });
-    return messageId;
   }
 
   public sendObject(object: DistributedObject) {
@@ -736,10 +665,6 @@ export class PeerConnectionManager {
 
   private sendSignal(socket: WebSocket, message: SignalMessage) {
     socket.send(JSON.stringify(message));
-  }
-
-  public sendMessage(text: string) {
-    this.sendChatMessage(text);
   }
 
   public closeConnection() {

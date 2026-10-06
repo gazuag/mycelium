@@ -103,10 +103,25 @@ class FakePeerConnection {
 const noop = () => {};
 const fakeSocket = () => ({ send: vi.fn() } as unknown as WebSocket);
 
-function createManager() {
+function createManager(options: {
+  localId?: string;
+  onRequestPosts?: (peerId: string, since?: string | null, limit?: number) => void;
+  onEvent?: (peerId: string, event: string) => void;
+  onObject?: (peerId: string, object: DistributedObject) => void;
+  onObjectsBatch?: (peerId: string, objects: DistributedObject[]) => void;
+} = {}) {
   return new PeerConnectionManager(
-    'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
-    undefined, undefined, undefined, undefined
+    options.localId ?? 'peer-a',
+    noop,
+    noop,
+    options.onObject ?? noop,
+    noop,
+    options.onRequestPosts ?? noop,
+    options.onObjectsBatch ?? noop,
+    noop,
+    noop,
+    options.onEvent ?? noop,
+    noop
   );
 }
 
@@ -127,25 +142,7 @@ beforeEach(() => {
 describe('POST_REQUEST limit handling', () => {
   it('clamps the incoming POST_REQUEST limit above the max', () => {
     const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
+    const manager = createManager({ onRequestPosts: (_peerId, _since, limit) => requests.push({ limit }) });
 
     (manager as any).handleMyceliumPacket({
       type: 'POST_REQUEST',
@@ -158,25 +155,7 @@ describe('POST_REQUEST limit handling', () => {
 
   it('falls back to the default POST_REQUEST limit for invalid values', () => {
     const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
+    const manager = createManager({ onRequestPosts: (_peerId, _since, limit) => requests.push({ limit }) });
 
     (manager as any).handleMyceliumPacket({
       type: 'POST_REQUEST',
@@ -199,25 +178,7 @@ describe('POST_REQUEST limit handling', () => {
 
   it('passes through a valid POST_REQUEST limit under the max', () => {
     const requests: Array<{ limit?: number }> = [];
-    const manager = new PeerConnectionManager(
-      'peer-a',
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      (peerId, since, limit) => requests.push({ limit }),
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      noop,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
+    const manager = createManager({ onRequestPosts: (_peerId, _since, limit) => requests.push({ limit }) });
 
     (manager as any).handleMyceliumPacket({
       type: 'POST_REQUEST',
@@ -244,10 +205,7 @@ describe('PeerConnectionManager lifecycle', () => {
 
   it('logs all checked ICE pairs on failure and the selected pair when connected', async () => {
     const events: string[] = [];
-    const manager = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const manager = createManager({ onEvent: (peerId, event) => events.push(`${peerId} ${event}`) });
     const connection = FakePeerConnection.instances[0];
     connection.stats = new Map([
       ['local-1', { id: 'local-1', type: 'local-candidate', foundation: 'local-foundation', candidateType: 'host', protocol: 'udp', address: '192.0.2.1', port: 5000, relatedAddress: '10.0.0.1', relatedPort: 5000 }],
@@ -285,10 +243,7 @@ describe('PeerConnectionManager lifecycle', () => {
 
   it('logs queued and successful remote ICE candidate application', async () => {
     const events: string[] = [];
-    const manager = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const manager = createManager({ onEvent: (peerId, event) => events.push(`${peerId} ${event}`) });
     const candidate = { candidate: 'candidate:1 1 udp 2122260223 192.168.1.20 54321 typ host', sdpMid: '0', sdpMLineIndex: 0 };
     const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
     await manager.createOffer('peer-b', socket);
@@ -304,10 +259,7 @@ describe('PeerConnectionManager lifecycle', () => {
 
   it('ignores signalling messages from a stale connection generation', async () => {
     const events: string[] = [];
-    const manager = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => events.push(`${peerId} ${event}`), noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const manager = createManager({ onEvent: (peerId, event) => events.push(`${peerId} ${event}`) });
     const socket = fakeSocket();
     await manager.createOffer('peer-b', socket);
     const activeId = manager.getConnectionId();
@@ -322,14 +274,8 @@ describe('PeerConnectionManager lifecycle', () => {
   });
 
   it('shares the offerer negotiation ID across peers with different local connection IDs', async () => {
-    const offerer = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
-      undefined, undefined, undefined, undefined
-    );
-    const answerer = new PeerConnectionManager(
-      'peer-b', noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const offerer = createManager();
+    const answerer = createManager({ localId: 'peer-b' });
     const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
     await offerer.createOffer('peer-b', socket);
     const offer = JSON.parse(socket.send.mock.calls[0][0]) as PeerSignalMessage;
@@ -347,14 +293,8 @@ describe('PeerConnectionManager lifecycle', () => {
   it('resolves simultaneous offers deterministically and rejects ICE from the abandoned negotiation', async () => {
     const aEvents: string[] = [];
     const bEvents: string[] = [];
-    const a = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => aEvents.push(`${peerId} ${event}`), noop, noop,
-      undefined, undefined, undefined, undefined
-    );
-    const b = new PeerConnectionManager(
-      'peer-b', noop, noop, noop, noop, noop, noop, noop, noop, noop, (peerId, event) => bEvents.push(`${peerId} ${event}`), noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const a = createManager({ onEvent: (peerId, event) => aEvents.push(`${peerId} ${event}`) });
+    const b = createManager({ localId: 'peer-b', onEvent: (peerId, event) => bEvents.push(`${peerId} ${event}`) });
     const aSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
     const bSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
     const aOfferSocket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
@@ -462,11 +402,10 @@ describe('PeerConnectionManager lifecycle', () => {
   it('sends canonical object packets and ignores removed legacy post payloads', async () => {
     const receivedObjects: DistributedObject[] = [];
     const receivedBatches: DistributedObject[][] = [];
-    const manager = new PeerConnectionManager(
-      'peer-a', noop, noop, noop, (_peerId, object) => receivedObjects.push(object), noop, noop,
-      (_peerId, objects) => receivedBatches.push(objects), noop, noop, noop, noop, noop,
-      undefined, undefined, undefined, undefined
-    );
+    const manager = createManager({
+      onObject: (_peerId, object) => receivedObjects.push(object),
+      onObjectsBatch: (_peerId, objects) => receivedBatches.push(objects)
+    });
     const peerConnection = FakePeerConnection.instances[0];
     const socket = fakeSocket();
     await manager.createOffer('peer-b', socket);
@@ -512,6 +451,31 @@ describe('PeerConnectionManager lifecycle', () => {
     channel.onmessage?.({ data: JSON.stringify({ type: 'request-posts', since: null }) } as MessageEvent);
     expect(receivedObjects).toEqual([]);
     expect(receivedBatches).toEqual([]);
+  });
+
+  it('silently ignores inbound legacy MESSAGE packets without calling persistence handlers', () => {
+    const receivedObjects: DistributedObject[] = [];
+    const events: string[] = [];
+    const manager = createManager({
+      onObject: (_peerId, object) => receivedObjects.push(object),
+      onEvent: (_peerId, event) => events.push(event)
+    });
+    events.length = 0;
+
+    expect(() => (manager as any).handleMyceliumPacket({
+      protocol: 'mycelium',
+      version: 1,
+      id: 'legacy-message',
+      type: 'MESSAGE',
+      timestamp: '2026-10-06T00:00:00.000Z',
+      sender: 'peer-b',
+      recipient: 'peer-a',
+      payload: { message: { text: 'legacy plaintext' } },
+      signature: 'signature'
+    })).not.toThrow();
+
+    expect(receivedObjects).toEqual([]);
+    expect(events).toEqual([]);
   });
 
   it('rejects object packet sends when the channel is not open or send throws', async () => {

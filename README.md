@@ -317,36 +317,13 @@ Single new post.
 
 ⸻
 
-## Messaging
+## Encrypted direct messages
 
-
-~~~
-MESSAGE
-~~~
-
-Carries an encrypted direct message.
-Payload contains encrypted message object.
-Only sender and recipient should be able to decrypt it.
-
-⸻
-
-~~~
-MESSAGE_ACK
-~~~
-
-Acknowledges successful receipt.
-This only confirms delivery.
-It does NOT imply the message has been read.
-
-⸻
-
-~~~
-READ_RECEIPT (optional)
-~~~
-
-Optional feature.
-Should be user-configurable.
-Disabled by default.
+Direct messages are signed `mycelium.dm` objects stored and replicated through
+the object transport. Their encrypted payload is opened only by the intended
+recipient (or the author on the authoring device). Delivery status comes from
+the local outbox and replication state; there is no separate plaintext chat
+packet or receipt packet.
 
 ⸻
 
@@ -473,17 +450,11 @@ Edits create new posts.
 
 ⸻
 
-## Direct Message
+## Direct Message Object
 
-- id
-- from
-- to
-- created
-- ciphertext
-- signature
-
-  
-The ciphertext contains the actual message.
+A direct message is a signed object with an author, recipient, creation time,
+and encrypted payload. The payload contains ciphertext and a nonce; the
+plaintext is never stored in the object database.
 
 ⸻
 

@@ -8,8 +8,6 @@ interface SettingsPageProps {
   contacts: number;
   posts: number;
   onResetApp: () => void;
-  onClearOldMessages: () => void;
-  onClearAllMessages: () => void;
   logs: LogEntry[];
   onClearLogs: () => void;
   signalEndpoint: string;
@@ -66,8 +64,6 @@ export function SettingsPage({
   contacts,
   posts,
   onResetApp,
-  onClearOldMessages,
-  onClearAllMessages,
   logs,
   onClearLogs,
   signalEndpoint,
@@ -82,7 +78,6 @@ export function SettingsPage({
   const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
     pingPong: true,
     discovery: true,
-    chat: true,
     postRequests: true,
     objectStorage: true,
     ice: true,
@@ -272,7 +267,7 @@ export function SettingsPage({
         <h3>Diagnostics</h3>
         <p className="note">Live runtime log of events, discovery fetches, and peer sync activity.</p>
         <div className="row">
-          {(['pingPong', 'discovery', 'chat', 'postRequests', 'objectStorage', 'ice', 'general'] as const).map((category) => (
+          {(['pingPong', 'discovery', 'postRequests', 'objectStorage', 'ice', 'general'] as const).map((category) => (
             <label key={category}>
               <input
                 type="checkbox"
@@ -299,8 +294,6 @@ export function SettingsPage({
       <div className="card">
         <div className="row">
           <button className="btn secondary destructive" onClick={onResetApp}>Reset local state</button>
-          <button className="btn secondary destructive" onClick={onClearOldMessages}>Clear up old messages</button>
-          <button className="btn secondary destructive" onClick={onClearAllMessages}>Clear up ALL messages</button>
         </div>
       </div>
     </section>

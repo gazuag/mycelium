@@ -3,14 +3,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { clearAllLocalData, loadInboxCursor, openDatabase, saveInboxCursor } from './idb';
 
 const DATABASE_NAME = 'mycelium_p2p';
-const EXISTING_STORES = [
+const PRESERVED_STORES = [
   'identity',
   'contacts',
   'profiles',
   'discovery_interactions',
-  'message_queue',
-  'direct_chat_messages'
+  'inbox_cursors'
 ];
+const REMOVED_STORES = ['message_queue', 'direct_chat_messages'];
 
 beforeAll(async () => {
   await deleteDatabase();
@@ -25,9 +25,9 @@ function deleteDatabase(): Promise<void> {
   });
 }
 
-function seedVersionFiveDatabase(): Promise<void> {
+function seedDatabase(version: 5 | 6): Promise<void> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, 5);
+    const request = indexedDB.open(DATABASE_NAME, version);
     request.onupgradeneeded = () => {
       const db = request.result;
       db.createObjectStore('identity', { keyPath: 'key' });
@@ -39,23 +39,29 @@ function seedVersionFiveDatabase(): Promise<void> {
       const chats = db.createObjectStore('direct_chat_messages', { keyPath: 'id' });
       chats.createIndex('peerId', 'peerId');
       chats.createIndex('timestamp', 'timestamp');
+      db.createObjectStore('inbox_cursors', { keyPath: 'identity' });
     };
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
-      const transaction = db.transaction(EXISTING_STORES, 'readwrite');
-      transaction.objectStore('identity').put({ key: 'local', publicKey: 'preserved-key', privateKey: 'preserved-private-key' });
-      transaction.objectStore('contacts').put({ publicKey: 'preserved-contact' });
-      transaction.objectStore('profiles').put({ author: 'preserved-author' });
-      transaction.objectStore('discovery_interactions').put({ id: 'preserved-interaction' });
-      transaction.objectStore('message_queue').put({ id: 'preserved-queue', recipient: 'preserved-recipient' });
-      transaction.objectStore('direct_chat_messages').put({ id: 'preserved-chat', peerId: 'preserved-peer', timestamp: '2026-10-04T00:00:00.000Z' });
-      transaction.oncomplete = () => {
+      const tx = db.transaction([...PRESERVED_STORES, ...REMOVED_STORES], 'readwrite');
+      tx.objectStore('identity').put({ key: 'local', publicKey: 'preserved-key' });
+      tx.objectStore('contacts').put({ publicKey: 'preserved-contact' });
+      tx.objectStore('profiles').put({ author: 'preserved-author' });
+      tx.objectStore('discovery_interactions').put({ id: 'preserved-interaction' });
+      tx.objectStore('inbox_cursors').put({
+        identity: 'preserved-identity',
+        cursor: '2026-10-04T10:00:00.000Z',
+        updated_at: '2026-10-04T10:00:00.000Z'
+      });
+      tx.objectStore('message_queue').put({ id: 'old-queue', text: 'legacy plaintext' });
+      tx.objectStore('direct_chat_messages').put({ id: 'old-chat', text: 'legacy plaintext' });
+      tx.oncomplete = () => {
         db.close();
         resolve();
       };
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error ?? new Error('Version 5 seed transaction aborted'));
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error(`Version ${version} seed transaction aborted`));
     };
   });
 }
@@ -68,29 +74,40 @@ function readRecord<T>(db: IDBDatabase, storeName: string, key: IDBValidKey): Pr
   });
 }
 
-describe('inbox cursor IndexedDB persistence', () => {
-  it('creates inbox_cursors in a fresh version 6 database', async () => {
-    const db = await openDatabase();
+async function expectUpgradedDatabase(version: 5 | 6): Promise<void> {
+  await deleteDatabase();
+  await seedDatabase(version);
+  const db = await openDatabase();
 
-    expect(db.version).toBe(6);
-    expect(db.objectStoreNames.contains('inbox_cursors')).toBe(true);
-    db.close();
+  expect(db.version).toBe(7);
+  for (const storeName of PRESERVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(true);
+  for (const storeName of REMOVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(false);
+  await expect(readRecord(db, 'identity', 'local')).resolves.toMatchObject({ publicKey: 'preserved-key' });
+  await expect(readRecord(db, 'contacts', 'preserved-contact')).resolves.toBeDefined();
+  await expect(readRecord(db, 'profiles', 'preserved-author')).resolves.toBeDefined();
+  await expect(readRecord(db, 'discovery_interactions', 'preserved-interaction')).resolves.toBeDefined();
+  await expect(readRecord(db, 'inbox_cursors', 'preserved-identity')).resolves.toMatchObject({
+    cursor: '2026-10-04T10:00:00.000Z'
+  });
+  db.close();
+}
+
+describe('inbox cursor IndexedDB persistence', () => {
+  it('upgrades version 5, removes plaintext chat stores, and preserves application data', async () => {
+    await expectUpgradedDatabase(5);
   });
 
-  it('upgrades version 5 while preserving existing stores and data', async () => {
-    await deleteDatabase();
-    await seedVersionFiveDatabase();
+  it('upgrades version 6, removes plaintext chat stores, and preserves application data', async () => {
+    await expectUpgradedDatabase(6);
+  });
 
+  it('creates a fresh version 7 database without plaintext chat stores', async () => {
+    await deleteDatabase();
     const db = await openDatabase();
-    expect(db.version).toBe(6);
+
+    expect(db.version).toBe(7);
     expect(db.objectStoreNames.contains('inbox_cursors')).toBe(true);
-    for (const storeName of EXISTING_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(true);
-    await expect(readRecord(db, 'identity', 'local')).resolves.toMatchObject({ publicKey: 'preserved-key' });
-    await expect(readRecord(db, 'contacts', 'preserved-contact')).resolves.toBeDefined();
-    await expect(readRecord(db, 'profiles', 'preserved-author')).resolves.toBeDefined();
-    await expect(readRecord(db, 'discovery_interactions', 'preserved-interaction')).resolves.toBeDefined();
-    await expect(readRecord(db, 'message_queue', 'preserved-queue')).resolves.toBeDefined();
-    await expect(readRecord(db, 'direct_chat_messages', 'preserved-chat')).resolves.toBeDefined();
+    for (const storeName of REMOVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(false);
     db.close();
   });
 
@@ -119,7 +136,6 @@ describe('inbox cursor IndexedDB persistence', () => {
     await saveInboxCursor(identity, '2026-10-04T10:00:00.000Z');
 
     await expect(saveInboxCursor(identity, '2026-10-04T11:00:00.000Z')).resolves.toBe('2026-10-04T11:00:00.000Z');
-    await expect(loadInboxCursor(identity)).resolves.toBe('2026-10-04T11:00:00.000Z');
   });
 
   it('isolates cursors by identity key', async () => {
@@ -140,11 +156,28 @@ describe('inbox cursor IndexedDB persistence', () => {
     await expect(saveInboxCursor('   ', '2026-10-04T10:00:00.000Z')).rejects.toThrow('identity key');
   });
 
-  it('removes inbox cursors through clearAllLocalData', async () => {
-    await saveInboxCursor('reset-identity', '2026-10-04T10:00:00.000Z');
+  it('clearAllLocalData clears remaining local stores', async () => {
+    const db = await openDatabase();
+    const tx = db.transaction(PRESERVED_STORES, 'readwrite');
+    tx.objectStore('identity').put({ key: 'local', publicKey: 'key' });
+    tx.objectStore('contacts').put({ publicKey: 'contact' });
+    tx.objectStore('profiles').put({ author: 'author' });
+    tx.objectStore('discovery_interactions').put({ id: 'interaction' });
+    tx.objectStore('inbox_cursors').put({ identity: 'clear-me', cursor: '2026-10-04T10:00:00.000Z' });
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
 
     await clearAllLocalData();
 
-    await expect(loadInboxCursor('reset-identity')).resolves.toBeNull();
+    await expect(loadInboxCursor('clear-me')).resolves.toBeNull();
+    const clearedDb = await openDatabase();
+    await expect(readRecord(clearedDb, 'identity', 'local')).resolves.toBeUndefined();
+    await expect(readRecord(clearedDb, 'contacts', 'contact')).resolves.toBeUndefined();
+    await expect(readRecord(clearedDb, 'profiles', 'author')).resolves.toBeUndefined();
+    await expect(readRecord(clearedDb, 'discovery_interactions', 'interaction')).resolves.toBeUndefined();
+    clearedDb.close();
   });
 });
