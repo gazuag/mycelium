@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
@@ -9,7 +9,7 @@ import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
 import { createDmService } from './object-layer/dm-service';
 import { createOutboxService } from './object-layer/outbox-service';
-import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
+import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, formatMessageLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
 import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage, loadInboxCursor, saveInboxCursor } from './storage/idb';
@@ -20,7 +20,7 @@ import { HomePage } from './pages/HomePage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { PeoplePage } from './pages/PeoplePage';
 import { ProfilePage } from './pages/ProfilePage';
-import { ChatPage } from './pages/ChatPage';
+import { DmChatPage } from './pages/DmChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
@@ -198,6 +198,7 @@ function App() {
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
+  const outboxStoreRef = useRef<IndexedDbOutboxStore | null>(null);
   const localPostMetadataStoreRef = useRef<LocalPostMetadataStore | null>(null);
   const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
   const recommendationIndexRef = useRef(new RecommendationIndex());
@@ -205,6 +206,7 @@ function App() {
   const dmEventsRef = useRef(createDmEvents());
   const inboxServiceRef = useRef<ReturnType<typeof createInboxService> | null>(null);
   const dmServiceRef = useRef<ReturnType<typeof createDmService> | null>(null);
+  const [, setDmServiceRevision] = useState(0);
   const dmOutboxIntervalRef = useRef<number | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
@@ -213,6 +215,9 @@ function App() {
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore();
+  }
+  if (!outboxStoreRef.current) {
+    outboxStoreRef.current = new IndexedDbOutboxStore();
   }
   if (!localPostMetadataStoreRef.current) {
     localPostMetadataStoreRef.current = new IndexedDbLocalPostMetadataStore();
@@ -322,7 +327,8 @@ function App() {
       saveCursor: saveInboxCursor,
       events: dmEventsRef.current
     });
-    const outboxStore = new IndexedDbOutboxStore();
+    const outboxStore = outboxStoreRef.current;
+    if (!outboxStore) return;
     const outboxService = createOutboxService({
       outbox: outboxStore,
       objectStore: store,
@@ -361,6 +367,7 @@ function App() {
     });
     inboxServiceRef.current = service;
     dmServiceRef.current = dmService;
+    setDmServiceRevision((revision) => revision + 1);
     service.start();
     const outboxInterval = window.setInterval(() => {
       void dmService.flushOutbox();
@@ -2890,6 +2897,17 @@ function App() {
     };
   }, [identity, myProfile.displayName, myProfile.bio]);
   const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
+  const getDmIdentity = useCallback(() => identity ? ({
+    id: identity.id,
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    encryptionPublicKey: identity.encryptionPublicKey,
+    encryptionPrivateKey: identity.encryptionPrivateKey
+  }) : null, [identity]);
+  const resolveDmSenderEncryptionKey = useCallback((publicKey: string) => {
+    const contact = contactsRef.current.find((candidate) => candidate.publicKey === publicKey);
+    return contact ? getContactEncryptionKey(contact) : null;
+  }, [contacts]);
 
   if (!identity) {
     return (
@@ -3096,13 +3114,16 @@ function App() {
           />
         )}
 
-        {page === 'chat' && activeChatContact && (
-          <ChatPage
+        {page === 'chat' && activeChatContact && identity && objectStoreRef.current && outboxStoreRef.current && (
+          <DmChatPage
             contact={activeChatContact}
-            messages={currentChatMessages}
-            messageDraft={message}
-            onMessageChange={setMessage}
-            onSendMessage={handleSendDirectMessage}
+            counterparty={activeChatContact.publicKey}
+            getIdentity={getDmIdentity}
+            store={objectStoreRef.current}
+            outbox={outboxStoreRef.current}
+            resolveSenderEncryptionKey={resolveDmSenderEncryptionKey}
+            dmService={dmServiceRef.current}
+            events={dmEventsRef.current}
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
           />
         )}

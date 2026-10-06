@@ -942,6 +942,42 @@ body, html, #root {
   min-width: 0;
 }
 
+.dm-compose-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.dm-compose textarea {
+  width: 100%;
+  min-height: 2.5rem;
+  max-height: 8rem;
+  resize: vertical;
+  font: inherit;
+}
+
+.dm-character-count,
+.dm-compose-note {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.dm-character-count {
+  text-align: right;
+}
+
+.dm-character-count.over-limit,
+.dm-message-placeholder.key_changed {
+  color: #ffc36b;
+}
+
+.dm-compose-note {
+  margin: 0;
+  padding: 0.35rem 1rem 0.6rem;
+}
+
 .profile-edit-card textarea,
 .profile-edit-card input,
 .profile-edit-card label {
