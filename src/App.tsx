@@ -1,33 +1,46 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
-import { PeerConnectionManager } from './p2p/webrtc';
+import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
-import { loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, savePost, loadPosts, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deletePost, deleteDirectChatMessage } from './storage/idb';
-import { createSignedPost, verifySignedPost } from './crypto/signed';
-import { publishPost, fetchDiscovery, handleDiscoveryResult } from './services/discovery';
+import { wrapFindTransport } from './object-layer/find-transport-adapter';
+import { createDmEvents } from './object-layer/dm-events';
+import { createInboxService } from './object-layer/inbox-service';
+import { createDmService } from './object-layer/dm-service';
+import { createOutboxService } from './object-layer/outbox-service';
+import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
+import { appendBoundedLog, formatMessageLog, redactNetworkAddresses } from './diagnostics';
+import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, saveMessageQueue, loadMessageQueue, deleteMessageQueue, saveDirectChatMessage, loadDirectChatMessages, clearDirectChatMessages, clearAllLocalData, updateDirectChatMessageStatus, saveProfile, loadProfile, deleteDirectChatMessage, loadInboxCursor, saveInboxCursor } from './storage/idb';
+import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { PeoplePage } from './pages/PeoplePage';
 import { ProfilePage } from './pages/ProfilePage';
-import { ChatPage } from './pages/ChatPage';
+import { DmChatPage } from './pages/DmChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
+import { HiddenPostList } from './components/HiddenPostList';
+import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, createObjectIdentity, createSignedObject, findObject, findObjects, FindAggregation, getFindObjectIds, IndexedDbObjectStore, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects, validateObject, type ObjectPacket, type ObjectStore } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
-import type { ConnectionState, Contact, PeerMetadata, SignedPost, StoredPost, QueuedMessage } from './types';
+import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
+import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
+import type { ConnectionState, Contact, PeerMetadata, QueuedMessage } from './types';
 
 interface IdentityRecord {
   key: string;
   publicKey: string;
   privateKey: string;
   id: string;
+  encryptionPublicKey: string;
+  encryptionPrivateKey: string;
 }
 
 export type LogCategory = 'pingPong' | 'discovery' | 'chat' | 'postRequests' | 'objectStorage' | 'ice' | 'general';
@@ -40,7 +53,7 @@ function classifyLogEntry(entry: string): LogCategory {
   if (/\b(PING|PONG|ping loop|keep.?alive)\b/i.test(entry)) return 'pingPong';
   if (/\bDISCOVERY\b|discovery/i.test(entry)) return 'discovery';
   if (/\bICE\b|candidate pair|candidate-pair/i.test(entry)) return 'ice';
-  if (/\b(OBJECT|FIND|generic object)\b|PHASE 6/i.test(entry)) return 'objectStorage';
+  if (/\b(OBJECT|FIND|generic object)\b|PHASE ?[67]/i.test(entry)) return 'objectStorage';
   if (/\b(chat|message|messages)\b/i.test(entry)) return 'chat';
   if (/\b(post|posts|feed|recommendation|home updates)\b/i.test(entry)) return 'postRequests';
   return 'general';
@@ -104,7 +117,7 @@ function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
-  const postsRef = useRef<StoredPost[]>([]);
+  const postViewsRef = useRef<LocalPostView[]>([]);
   const messageQueueRef = useRef<Record<string, QueuedMessage[]>>({});
   const outboundAckTimersRef = useRef<Record<string, number>>({});
   const outboundChatMessageIdsRef = useRef<Record<string, string>>({});
@@ -113,6 +126,7 @@ function App() {
   const chatContactIdRef = useRef<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
+  const [connectedPeerIds, setConnectedPeerIds] = useState<string[]>([]);
   const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
   const [remoteId, setRemoteId] = useState('');
   const [message, setMessage] = useState('');
@@ -125,7 +139,7 @@ function App() {
   const [messageQueue, setMessageQueue] = useState<Record<string, QueuedMessage[]>>({});
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [posts, setPosts] = useState<StoredPost[]>([]);
+  const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [page, setPage] = useState<PageKey>('home');
   const [profileContactId, setProfileContactId] = useState<string | null>(null);
   const [chatContactId, setChatContactId] = useState<string | null>(null);
@@ -133,6 +147,8 @@ function App() {
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
+  const [blockedPeersOpen, setBlockedPeersOpen] = useState(false);
+  const [hiddenPostsOpen, setHiddenPostsOpen] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const blockedPeersRef = useRef<Set<string>>(new Set());
   const [myProfile, setMyProfile] = useState({
@@ -151,7 +167,11 @@ function App() {
     chat: 0,
     settings: 0
   });
-  const [discoveryPosts, setDiscoveryPosts] = useState<StoredPost[]>([]);
+  const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
+  const [possiblePeerIds, setPossiblePeerIds] = useState<string[]>([]);
+  const [popularPeers, setPopularPeers] = useState<PopularPeer[]>([]);
+  const [contactsLoaded, setContactsLoaded] = useState(false);
+    const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
@@ -161,13 +181,33 @@ function App() {
   const [objectTestIds, setObjectTestIds] = useState('');
   const [suppressPhase6FindResponses, setSuppressPhase6FindResponses] = useState(false);
   const [objectTestLastId, setObjectTestLastId] = useState<string | null>(null);
-  const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; payload: unknown }>>([]);
+  const [phase7Author, setPhase7Author] = useState('');
+  const [phase7StartTime, setPhase7StartTime] = useState('10:03');
+  const [phase7EndTime, setPhase7EndTime] = useState('10:09');
+  const [phase7QueryStatus, setPhase7QueryStatus] = useState('');
+  const [phase7SelectedObjectId, setPhase7SelectedObjectId] = useState('');
+  const [phase7Results, setPhase7Results] = useState<Array<{ object_id: string; created_at: string; author: string }>>([]);
+  const [phase7RequestId, setPhase7RequestId] = useState('');
+  const [objectStoreObjects, setObjectStoreObjects] = useState<Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>>([]);
   const lastObjectTestRef = useRef<Awaited<ReturnType<typeof createSignedObject>> | null>(null);
+  const peerPoolRequestedRef = useRef(false);
+  const popularPeersRequestedRef = useRef(false);
+  const turnIceInitializationRef = useRef<Promise<void> | null>(null);
+  const turnIceConfiguredRef = useRef(false);
   const selectedContactIdRef = useRef<string | null>(null);
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
+  const outboxStoreRef = useRef<IndexedDbOutboxStore | null>(null);
+  const localPostMetadataStoreRef = useRef<LocalPostMetadataStore | null>(null);
+  const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
+  const recommendationIndexRef = useRef(new RecommendationIndex());
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
+  const dmEventsRef = useRef(createDmEvents());
+  const inboxServiceRef = useRef<ReturnType<typeof createInboxService> | null>(null);
+  const dmServiceRef = useRef<ReturnType<typeof createDmService> | null>(null);
+  const [, setDmServiceRevision] = useState(0);
+  const dmOutboxIntervalRef = useRef<number | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
   const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
@@ -176,9 +216,39 @@ function App() {
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore();
   }
+  if (!outboxStoreRef.current) {
+    outboxStoreRef.current = new IndexedDbOutboxStore();
+  }
+  if (!localPostMetadataStoreRef.current) {
+    localPostMetadataStoreRef.current = new IndexedDbLocalPostMetadataStore();
+  }
+  if (!recommendationSequenceStoreRef.current) {
+    recommendationSequenceStoreRef.current = new IndexedDbRecommendationSequenceStore();
+  }
   if (!objectTransportRef.current) {
     objectTransportRef.current = new PeerConnectionObjectTransport(() => peerManagersRef.current);
   }
+
+  const refreshTurnIceServers = async () => {
+    try {
+      const iceServers = await fetchMeteredIceServers();
+      configureIceServers(iceServers);
+      turnIceConfiguredRef.current = true;
+      addLog(`Loaded ${iceServers.length} Metered ICE server entries`);
+    } catch (error) {
+      if (!turnIceConfiguredRef.current) {
+        configureIceServers(FALLBACK_ICE_SERVERS);
+      }
+      addLog(`Metered TURN credentials unavailable; ${turnIceConfiguredRef.current ? 'retaining last configured servers' : 'using STUN-only fallback'}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const ensureTurnIceServers = () => {
+    if (!turnIceInitializationRef.current) {
+      turnIceInitializationRef.current = refreshTurnIceServers();
+    }
+    return turnIceInitializationRef.current;
+  };
 
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
@@ -197,8 +267,34 @@ function App() {
   }, [contacts]);
 
   useEffect(() => {
-    postsRef.current = posts;
-  }, [posts]);
+    postViewsRef.current = postViews;
+  }, [postViews]);
+
+  useEffect(() => {
+    const objectStore = objectStoreRef.current;
+    const metadataStore = localPostMetadataStoreRef.current;
+    if (!objectStore || !metadataStore) return;
+    void hydratePostViews(objectStore, metadataStore, (error) => {
+      addLog(`Post hydration failed: ${error instanceof Error ? error.message : String(error)}`);
+    }, resolvePostAuthorFingerprint).then((hydratedViews) => {
+      const hydratedWithMetadata = hydratedViews.filter((view) => view.authorDisplayName !== undefined || view.notInterested !== undefined || view.hidden !== undefined).length;
+      addLog(`Hydrated ${hydratedViews.length} posts from storage (${hydratedWithMetadata} with metadata)`);
+      setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
+    });
+  }, []);
+
+  useEffect(() => {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    void store.query({ object_type: 'mycelium.recommendation' }).then((objects) => {
+      recommendationIndexRef.current.rebuild(objects);
+    });
+  }, []);
+
+  const getRecommendationSummary = (postId: string): RecommendationSummary => {
+    const followedAuthors = contactsRef.current.filter((contact) => contact.followed).map((contact) => contact.publicKey);
+    return recommendationIndexRef.current.getSummary(postId, followedAuthors, identityRef.current?.publicKey);
+  };
 
   useEffect(() => {
     messageQueueRef.current = messageQueue;
@@ -217,13 +313,99 @@ function App() {
   }, [identity]);
 
   useEffect(() => {
+    if (!identity) return;
+    const store = objectStoreRef.current;
+    const objectTransport = objectTransportRef.current;
+    if (!store || !objectTransport) return;
+
+    const signPacket: PacketSigner = (packet) => signString(identity.privateKey, canonicalize(packet));
+    const service = createInboxService({
+      myPublicKey: identity.publicKey,
+      store,
+      transport: wrapFindTransport({ objectTransport, signPacket }),
+      loadCursor: loadInboxCursor,
+      saveCursor: saveInboxCursor,
+      events: dmEventsRef.current
+    });
+    const outboxStore = outboxStoreRef.current;
+    if (!outboxStore) return;
+    const outboxService = createOutboxService({
+      outbox: outboxStore,
+      objectStore: store,
+      sendDirect: async (peerId, object) => {
+        const packet = await buildObjectStorePacket(identity.id, peerId, object, signPacket);
+        await objectTransport.send(peerId, packet);
+        return true;
+      },
+      replicate: async (object, alreadyReplicatedTo) => {
+        const result = await replicateObject(
+          identity.id,
+          object,
+          objectTransport,
+          signPacket,
+          alreadyReplicatedTo
+        );
+        return [...result.stored];
+      },
+      resolveRecipientPeerId: (recipientPublicKey) => (
+        contactsRef.current.find((contact) => contact.publicKey === recipientPublicKey)?.fingerprint ?? null
+      ),
+      connectedPeers: () => objectTransport.connectedPeers()
+    });
+    const dmService = createDmService({
+      getIdentity: () => ({
+        id: identity.id,
+        publicKey: identity.publicKey,
+        privateKey: identity.privateKey,
+        encryptionPublicKey: identity.encryptionPublicKey,
+        encryptionPrivateKey: identity.encryptionPrivateKey
+      }),
+      getContact: (publicKey) => contactsRef.current.find((contact) => contact.publicKey === publicKey) ?? null,
+      store,
+      outbox: outboxService,
+      connectedPeers: () => objectTransport.connectedPeers()
+    });
+    inboxServiceRef.current = service;
+    dmServiceRef.current = dmService;
+    setDmServiceRevision((revision) => revision + 1);
+    service.start();
+    const outboxInterval = window.setInterval(() => {
+      void dmService.flushOutbox();
+    }, 30_000);
+    dmOutboxIntervalRef.current = outboxInterval;
+
+    return () => {
+      service.stop();
+      if (inboxServiceRef.current === service) inboxServiceRef.current = null;
+      window.clearInterval(outboxInterval);
+      if (dmOutboxIntervalRef.current === outboxInterval) dmOutboxIntervalRef.current = null;
+      if (dmServiceRef.current === dmService) dmServiceRef.current = null;
+    };
+  }, [identity]);
+
+  useEffect(() => {
     suppressPhase6FindResponsesRef.current = suppressPhase6FindResponses;
   }, [suppressPhase6FindResponses]);
+
+  useEffect(() => {
+    const refreshConnectedPeers = () => {
+      const next = (objectTransportRef.current?.connectedPeers() ?? []).sort();
+      setConnectedPeerIds((previous) => (
+        previous.length === next.length && previous.every((peerId, index) => peerId === next[index])
+          ? previous
+          : next
+      ));
+    };
+    refreshConnectedPeers();
+    const timer = window.setInterval(refreshConnectedPeers, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
   const addLog = (entry: string) => {
-    setLogs((prev) => [...prev, { text: `${new Date().toLocaleTimeString()}: ${entry}`, category: classifyLogEntry(entry) }]);
+    const timestampedEntry = `${new Date().toLocaleTimeString()}: ${entry}`;
+    setLogs((prev) => appendBoundedLog(prev, { text: timestampedEntry, category: classifyLogEntry(entry) }));
   };
 
   const statusLabel = useMemo(() => {
@@ -279,18 +461,31 @@ function App() {
     const now = Date.now();
     for (const [requestId, route] of findRequestRouteRef.current.entries()) {
       if (route.expiresAt <= now) {
+        addLog(`PHASE6 ROUTE CLEANUP requestId=${requestId} upstream=${route.upstreamPeer} expiresAt=${route.expiresAt} now=${now}`);
         findRequestRouteRef.current.delete(requestId);
       }
     }
     for (const [seenRequestId, expiresAt] of findRequestCacheRef.current.entries()) {
       if (expiresAt <= now) {
+        addLog(`PHASE6 CACHE CLEANUP requestId=${seenRequestId} expiresAt=${expiresAt} now=${now}`);
         findRequestCacheRef.current.delete(seenRequestId);
       }
     }
     if (packet.type === 'FIND') {
+      const hasRecipientField = Object.prototype.hasOwnProperty.call(packet.payload, 'recipient');
+      if (hasRecipientField && (typeof packet.payload.recipient !== 'string' || packet.payload.recipient.trim().length === 0)) {
+        addLog(`Rejected FIND with invalid recipient: requestId=${packet.payload.requestId}`);
+        return;
+      }
+      const parsedQueryFields = getFindQueryCriteria(packet);
+      const queryFields = parsedQueryFields ?? {};
+      const isPhase7Query = parsedQueryFields !== null;
+      if (isPhase7Query) {
+        addLog(`PHASE7 QUERY RECEIVED requestId=${packet.payload.requestId} peer=${peerId} author=${queryFields.author ?? 'unknown'} lower=${queryFields.created_after ?? 'none'} upper=${queryFields.created_before ?? 'none'}`);
+      }
       addLog(`FIND ${String(packet.payload.requestId).slice(0, 12)} received`);
       const requestedObjectIds = getFindObjectIds(packet);
-      if (requestedObjectIds && requestedObjectIds.length > 1) {
+      if (requestedObjectIds && (requestedObjectIds.length > 1 || isPhase7Query)) {
         if (suppressPhase6FindResponsesRef.current) {
           addLog(`PHASE 6 FIND response suppressed for deterministic partial test: requestId=${packet.payload.requestId}`);
           return;
@@ -300,10 +495,12 @@ function App() {
         const expiresAtMs = Date.parse(expiresAt);
         if (!requestId || Number.isNaN(expiresAtMs) || now >= expiresAtMs || findRequestCacheRef.current.has(requestId)) return;
         findRequestCacheRef.current.set(requestId, expiresAtMs);
-        const localObjects = (await Promise.all(requestedObjectIds.map(async (objectId) => {
-          const object = await store.get(objectId);
-          return object && await validateObject(object) ? object : null;
-        }))).filter((object): object is NonNullable<typeof object> => object !== null);
+        const localObjects = isPhase7Query
+          ? await filterObjectsByFindQuery(store, buildLocalQueryCriteria(queryFields))
+          : (await Promise.all(requestedObjectIds.map(async (objectId) => {
+            const object = await store.get(objectId);
+            return object && await validateObject(object) ? object : null;
+          }))).filter((object): object is NonNullable<typeof object> => object !== null);
         const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
         const nextPeers = selectFindPeers(connectedPeers, peerId, identityRef.current?.id ?? '', 2);
         const aggregationStartedAt = Date.now();
@@ -313,25 +510,29 @@ function App() {
         addLog(`upstream recorded: ${peerId}`);
         let aggregation: FindAggregation;
         aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
+          const responseObjects = await prepareFindQueryResponse(objects, queryFields);
           addLog('aggregate complete');
           addLog(`reason: ${reason}`);
-          addLog(`returning: ${objects.length} objects`);
+          addLog(`returning: ${responseObjects.length} objects`);
           addLog(`elapsed: ${Date.now() - aggregationStartedAt}ms`);
+          addLog(`PHASE6 AGG COMPLETE callback requestId=${requestId} reason=${reason} objects=${responseObjects.length} upstream=${peerId}`);
           const response = await buildFindResponseObjectsPacket(
             identityRef.current?.id ?? 'unknown',
             peerId,
             requestId,
-            objects,
+            responseObjects,
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
             expiresAt
           );
           await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
           addLog(`aggregate sent upstream to ${peerId}`);
+          addLog(`PHASE6 AGG CLEANUP BEFORE DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
           findAggregationRef.current.delete(requestId);
           findRequestRouteRef.current.delete(requestId);
           findRequestCacheRef.current.delete(requestId);
-        });
+          addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
+        }, undefined, isPhase7Query);
         findAggregationRef.current.set(requestId, {
           aggregation,
           requestedObjectIds: new Set(requestedObjectIds),
@@ -341,11 +542,34 @@ function App() {
         });
         findRequestRouteRef.current.set(requestId, { upstreamPeer: peerId, expiresAt: expiresAtMs });
         addLog(`PHASE 6 aggregation state created: requestId=${requestId} upstream=${peerId} requested=${requestedObjectIds.length}`);
+        addLog(`PHASE6 AGG CREATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} upstream=${peerId} children=${nextPeers.join(',') || 'none'} requested=${requestedObjectIds.length} localHits=${localObjects.length}`);
+        addLog(`PHASE6 AGG STORED requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
         for (const nextPeer of nextPeers) aggregation.addChild(nextPeer);
         aggregation.addLocal(localObjects);
-        if (!aggregation.isComplete() && requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId)) && packet.payload.ttl > 0) {
+        if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
-            const forwardedPacket = await buildFindPacket(identityRef.current?.id ?? 'unknown', nextPeer, requestedObjectIds, undefined, requestId, packet.payload.ttl - 1, typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender, expiresAt);
+            const origin = typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender;
+            const forwardedPacket = isPhase7Query
+              ? await buildForwardedFindPacket(
+                queryFields,
+                requestId,
+                identityRef.current?.id ?? 'unknown',
+                nextPeer,
+                requestedObjectIds,
+                packet.payload.ttl - 1,
+                origin,
+                expiresAt
+              )
+              : await buildFindPacket(
+                identityRef.current?.id ?? 'unknown',
+                nextPeer,
+                requestedObjectIds,
+                undefined,
+                requestId,
+                packet.payload.ttl - 1,
+                origin,
+                expiresAt
+              );
             try {
               await objectTransportRef.current?.send(nextPeer, forwardedPacket);
               addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
@@ -354,10 +578,8 @@ function App() {
               aggregation.failChild(nextPeer);
             }
           }
-          aggregation.startGracePeriod();
         } else {
           for (const nextPeer of nextPeers) aggregation.failChild(nextPeer);
-          aggregation.startGracePeriod();
         }
         return;
       }
@@ -373,6 +595,7 @@ function App() {
         async (response) => {
           addLog(`OBJECT FIND_RESPONSE generated: requestId=${response.payload.requestId} object=${response.payload.object ? 'present' : 'missing'} to=${peerId}`);
           const route = response.payload.requestId ? findRequestRouteRef.current.get(response.payload.requestId) : undefined;
+          const aggregationState = response.payload.requestId ? findAggregationRef.current.get(response.payload.requestId) : undefined;
           if (route && route.upstreamPeer !== peerId && typeof response.payload.origin === 'string') {
             const relayed = await buildFindResponsePacket(
               identityRef.current?.id ?? 'unknown',
@@ -384,7 +607,11 @@ function App() {
               response.payload.origin,
               response.payload.expiresAt
             );
-            findRequestRouteRef.current.delete(response.payload.requestId);
+            if (!shouldRetainFindRequestRoute(peerId, route, aggregationState)) {
+              findRequestRouteRef.current.delete(response.payload.requestId);
+            } else {
+              addLog(`OBJECT FIND_RESPONSE route retained: requestId=${response.payload.requestId} sender=${peerId} remainingChildren=${aggregationState?.aggregation.pendingChildren().join(', ') || 'none'}`);
+            }
             addLog(`OBJECT FIND_RESPONSE relayed: requestId=${response.payload.requestId} ${peerId} -> ${route.upstreamPeer}`);
             await objectTransportRef.current?.send(route.upstreamPeer, relayed);
             return;
@@ -393,7 +620,7 @@ function App() {
         },
         identityRef.current?.id ?? 'unknown',
         findRequestCacheRef.current,
-        async ({ objectId, requestId, ttl, fromPeer, origin, expiresAt }) => {
+        async ({ objectId, requestId, ttl, fromPeer, origin, expiresAt, query }) => {
           addLog(`OBJECT FIND local lookup missed: requestId=${requestId} object=${objectId} ttl=${ttl + 1}`);
           const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
           const nextPeers = connectedPeers.filter((candidate) => candidate !== fromPeer && candidate !== identityRef.current?.id);
@@ -416,12 +643,13 @@ function App() {
           const forwardedPacket = await buildFindPacket(
             identityRef.current?.id ?? 'unknown',
             nextPeer,
-            objectId,
+            query ? [] : objectId,
             undefined,
             requestId,
             ttl,
             origin,
-            expiresAt
+            expiresAt,
+            query
           );
           findRequestRouteRef.current.set(requestId, { upstreamPeer: fromPeer, expiresAt: Date.parse(expiresAt) });
           addLog(`OBJECT FIND forwarded: requestId=${requestId} ${fromPeer} -> ${nextPeer} ttl=${ttl} expiresAt=${expiresAt}`);
@@ -441,13 +669,22 @@ function App() {
     if (packet.type === 'FIND_RESPONSE') {
       const requestId = typeof packet.payload?.requestId === 'string' ? packet.payload.requestId : null;
       const aggregationState = requestId ? findAggregationRef.current.get(requestId) : undefined;
-      addLog(`FIND_RESPONSE received: requestId=${requestId ?? 'unknown'} aggregationState=${aggregationState ? 'present' : 'absent'}`);
+      const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
+      addLog(`FIND_RESPONSE received: requestId=${requestId ?? 'unknown'} aggregationState=${aggregationState ? 'present' : 'absent'} route=${route?.upstreamPeer ?? 'none'} routePresent=${Boolean(route)}`);
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; since?: string; limit?: number; order?: 'created_at_desc' };
+          const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
+          if (isPhase7Query) {
+            addLog(`PHASE7 CHILD RESPONSE requestId=${requestId} from=${peerId} objects=${objects.map((object) => object.object_id).join(', ') || 'none'} aggregate=${aggregationState.aggregation.aggregateSize() + objects.length}`);
+          }
           addLog(`child ${peerId} response received`);
           addLog(`objects: ${objects.length}`);
+          addLog(`PHASE6 CHILD RESPONSE local=${identityRef.current?.id ?? 'unknown'} from=${peerId} requestId=${requestId} objects=${objects.length} pendingBefore=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           await aggregationState.aggregation.addChildObjects(peerId, objects);
+          aggregationState.aggregation.startGracePeriod();
+          addLog(`PHASE6 AGG UPDATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} aggregate=${aggregationState.aggregation.aggregateSize()} pendingAfter=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           addLog(`aggregate: ${aggregationState.aggregation.aggregateSize()} unique objects`);
           addLog(`children pending: ${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
         } else {
@@ -455,24 +692,33 @@ function App() {
         }
         return;
       }
-      const route = requestId ? findRequestRouteRef.current.get(requestId) : undefined;
+      addLog(`PHASE6 RESPONSE PATH CHECK requestId=${requestId ?? 'unknown'} aggregationPresent=${Boolean(aggregationState)} routePresent=${Boolean(route)} routeUpstream=${route?.upstreamPeer ?? 'none'} sender=${peerId}`);
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
-      if (Array.isArray(packet.payload?.objects)) {
-        addLog(`PHASE 6 FIND_RESPONSE ignored: no active aggregation state for requestId=${requestId ?? 'unknown'}`);
-        return;
-      }
       if (route && route.upstreamPeer !== peerId) {
-        const relayed = await buildFindResponsePacket(
-          identityRef.current?.id ?? 'unknown',
-          route.upstreamPeer,
-          packet.payload.object_id,
-          requestId!,
-          packet.payload.object,
-          undefined,
-          typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-          typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
-        );
-        findRequestRouteRef.current.delete(requestId!);
+        const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
+        const relayed = Array.isArray(packet.payload.objects) && !packet.payload.object
+          ? await buildFindResponseObjectsPacket(
+            identityRef.current?.id ?? 'unknown',
+            route.upstreamPeer,
+            requestId!,
+            [...packet.payload.objects],
+            undefined,
+            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+          )
+          : await buildFindResponsePacket(
+            identityRef.current?.id ?? 'unknown',
+            route.upstreamPeer,
+            packet.payload.object_id,
+            requestId!,
+            packet.payload.object,
+            undefined,
+            typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+          );
+        if (!shouldRetainRoute) {
+          findRequestRouteRef.current.delete(requestId!);
+        }
         addLog(`OBJECT FIND_RESPONSE relayed: requestId=${requestId} ${peerId} -> ${route.upstreamPeer}`);
         await objectTransportRef.current?.send(route.upstreamPeer, relayed);
       } else if (!route) {
@@ -483,6 +729,7 @@ function App() {
     const stored = await receiveObjectPacket(packet, store);
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
     if (stored && packet.type === 'OBJECT_STORE') {
+      inboxServiceRef.current?.notifyObjectStored(packet.payload.object);
       setObjectTestStatus(`Received and stored ${packet.payload.object.object_id} from ${peerId}`);
       void refreshObjectStore();
     }
@@ -490,7 +737,7 @@ function App() {
 
   const refreshObjectStore = async () => {
     const objects = await objectStoreRef.current?.query();
-    setObjectStoreObjects((objects ?? []) as Array<{ object_id: string; object_type: string; author: string; payload: unknown }>);
+    setObjectStoreObjects((objects ?? []) as Array<{ object_id: string; object_type: string; author: string; created_at: string; payload: unknown }>);
   };
 
   useEffect(() => {
@@ -520,27 +767,48 @@ function App() {
 
   const getLocalDisplayName = () => myProfile.displayName.trim() || generatedDisplayName || 'Me';
 
-  const buildPeerMetadata = (peerId: string, followingOverride?: boolean) => {
+  const buildPeerMetadata = async (peerId: string, followingOverride?: boolean) => {
     const p = myProfileRef.current;
     const id = identityRef.current;
     const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
-    return {
+    const metadata = {
       author: id?.id ?? '',
+      publicKey: id?.publicKey,
       displayName: p.displayName.trim() || fallbackName || 'Me',
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
       bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
       tags: []
     };
+    return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;
   };
 
-  const handlePeerMetadata = (peerId: string, metadata: any) => {
+  const sendPeerMetadata = async (manager: PeerConnectionManager, peerId: string, followingOverride?: boolean) => {
+    manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
+  };
+
+  const handlePeerMetadata = async (peerId: string, metadata: PeerMetadata) => {
+    const metadataPublicKey = typeof metadata?.publicKey === 'string' && metadata.publicKey.trim()
+      ? metadata.publicKey.trim()
+      : undefined;
+    const existingContact = contactsRef.current.find((contact) => contact.fingerprint === peerId);
+    const bindingUpdate = await applyEncryptionKeyBinding(
+      metadata.encryptionKeyBinding,
+      metadataPublicKey,
+      existingContact ? {
+        encryptionPublicKey: existingContact.encryptionPublicKey,
+        encryptionKeyChanged: existingContact.encryptionKeyChanged
+      } : {}
+    );
+    if (bindingUpdate.keyChanged) {
+      console.warn(`Peer encryption key changed for ${peerId}; keeping previously trusted key`);
+    }
     const normalizedProfile: Contact['profile'] = {
       protocol: 'mycelium',
       version: 1,
       type: 'profile',
       id: peerId,
-      author: peerId,
+      author: metadataPublicKey ?? peerId,
       timestamp: typeof metadata?.timestamp === 'string' ? metadata.timestamp : new Date().toISOString(),
       displayName: typeof metadata?.displayName === 'string' ? metadata.displayName : undefined,
       bio: typeof metadata?.bio === 'string' ? metadata.bio : undefined,
@@ -553,6 +821,8 @@ function App() {
       const updatedContact: Contact = existing
         ? {
             ...existing,
+            ...bindingUpdate.contactFields,
+            publicKey: metadataPublicKey ?? existing.publicKey,
             displayName: metadata.displayName,
             profile: normalizedProfile,
             follower: metadata.following,
@@ -560,8 +830,9 @@ function App() {
             connected: true
           }
         : {
-            publicKey: peerId,
+          publicKey: metadataPublicKey ?? peerId,
             fingerprint: peerId,
+            ...bindingUpdate.contactFields,
             displayName: metadata.displayName,
             profile: normalizedProfile,
             addedAt: new Date().toISOString(),
@@ -639,7 +910,9 @@ function App() {
       queuedMessages: 0
     };
     await saveContact(contact);
-    setContacts((prev) => dedupeContactsByFingerprint([...prev, contact]));
+    const nextContacts = dedupeContactsByFingerprint([...contactsRef.current, contact]);
+    contactsRef.current = nextContacts;
+    setContacts(nextContacts);
   };
 
   const refreshMessageQueue = async () => {
@@ -694,7 +967,7 @@ function App() {
     messageQueueRef.current = nextQueue;
     setMessageQueue(nextQueue);
     updateContactState(peerId, { queuedMessages: (contacts.find((c) => c.fingerprint === peerId)?.queuedMessages || 0) + 1 });
-    addLog(`Queued direct message for ${peerId}: ${text.slice(0, 80)}`);
+    addLog(formatMessageLog('queued', { peerId, messageId: chatMessageId, textLength: text.length }));
     return queuedMessageId;
   };
 
@@ -722,7 +995,7 @@ function App() {
         await updateDirectChatMessageStatus(queuedMessage.chatMessageId, 'sent');
         markDirectMessageDelivered(peerId, queuedMessage.chatMessageId, 'sent');
       }
-      addLog(`Queued message sent to ${peerId}: ${queuedMessage.text.slice(0, 80)}`);
+      addLog(formatMessageLog('sent', { peerId, messageId: queuedMessage.chatMessageId ?? queuedMessage.id, textLength: queuedMessage.text.length }));
     }
 
     const nextQueue = { ...(messageQueueRef.current ?? {}) };
@@ -734,6 +1007,10 @@ function App() {
   };
 
   const ensurePeerManager = (peerId: string) => {
+    if (!identity?.id || peerId === identity.id) {
+      if (peerId === identity?.id) addLog(`Ignoring self peer manager request for ${peerId}`);
+      return null;
+    }
     const existing = peerManagersRef.current[peerId];
     if (existing) {
       if (!existing.needsReplacement()) {
@@ -778,7 +1055,7 @@ function App() {
           return;
         }
 
-        addLog(`Direct message received from ${peer}: ${incoming.slice(0, 80)}`);
+        addLog(formatMessageLog('incoming', { peerId: peer, textLength: incoming.length }));
         saveDirectMessage(peer, incoming, true);
         const chatIsOpenForPeer = pageRef.current === 'chat' && chatContactIdRef.current === peer;
         if (!chatIsOpenForPeer) {
@@ -795,26 +1072,37 @@ function App() {
           socket.send(JSON.stringify(signal));
         }
       },
-      async (peer: string, post: SignedPost) => {
+      async (peer: string, object: DistributedObject) => {
         if (!isCurrentManager(peer)) return;
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} post ignored`);
           return;
         }
-        const valid = await verifySignedPost(post);
-        const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
-        const stored: StoredPost = {
-          ...post,
-          source: 'peer',
-          receivedAt: new Date().toISOString(),
-          valid,
-          authorFingerprint
-        };
-        await savePost(stored);
-        setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
-        addLog(`Received ${valid ? 'verified' : 'invalid'} post from ${peer}`);
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!store || !transport) return;
+        const existedBefore = await store.get(object.object_id);
+        let stored: boolean;
+        try {
+          stored = await receiveAndReplicate(object, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        } catch (error) {
+          if (!existedBefore && await store.get(object.object_id)) {
+            inboxServiceRef.current?.notifyObjectStored(object);
+          }
+          throw error;
+        }
+        if (!stored) return;
+        inboxServiceRef.current?.notifyObjectStored(object);
+        recommendationIndexRef.current.add(object);
+        setRecommendationRevision((revision) => revision + 1);
+        const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+        const view = object.object_type === 'mycelium.post'
+          ? createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' })
+          : null;
+        if (view) setPostViews((prev) => upsertLocalPostView(prev, view));
+        addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
-      (peer: string, metadata: PeerMetadata) => {
+      async (peer: string, metadata: PeerMetadata) => {
         if (!isCurrentManager(peer)) return;
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
@@ -824,7 +1112,7 @@ function App() {
           addLog(`Blocked peer ${peer} metadata ignored`);
           return;
         }
-        handlePeerMetadata(peer, metadata);
+        await handlePeerMetadata(peer, metadata);
       },
       async (peer: string, since: string | null = null, limit = 100) => {
         if (!isCurrentManager(peer)) return;
@@ -833,77 +1121,57 @@ function App() {
           return;
         }
 
-        const sinceMs = since ? Date.parse(since) : 0;
-        const feedPosts = postsRef.current
-          .filter((post) => !isBlockedPost(post))
-          .filter((post) => {
-            const authorFingerprint = post.authorFingerprint ?? post.author;
-            return authorFingerprint === identityRef.current?.id
-              || post.author === identityRef.current?.publicKey
-              || contactsRef.current.some((contact) => contact.followed && (contact.fingerprint === authorFingerprint || contact.publicKey === post.author));
-          })
-          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, Math.max(1, limit));
-
-        const recommendations = postsRef.current
-          .filter((post) => post.isRecommendation && post.recommendedBy)
-          .filter((post) => !isBlockedPost(post))
-          .filter((post) => !since || new Date(post.timestamp).getTime() >= sinceMs)
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, Math.max(1, limit));
+        const store = objectStoreRef.current;
+        const feedObjects = store && identityRef.current
+          ? await queryFeedObjectsForPeer(store, identityRef.current.publicKey, { since, limit: Math.max(1, limit) })
+          : [];
 
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendPostsBatch(feedPosts, recommendations);
-          addLog(`Sent ${feedPosts.length} posts and ${recommendations.length} recommendations to ${peer}`);
+          manager.sendObjectsBatch(feedObjects);
+          addLog(`Sent ${feedObjects.length} canonical posts to ${peer}`);
         }
       },
-      async (peer: string, posts: SignedPost[], recommendations: SignedPost[] = []) => {
+      async (peer: string, objects: DistributedObject[]) => {
         if (!isCurrentManager(peer)) return;
-        const uniqueById = new Map<string, StoredPost>();
-        const allPosts = [...posts, ...recommendations];
-
-        for (const post of allPosts) {
-          const valid = await verifySignedPost(post);
-          const authorFingerprint = await resolvePostAuthorFingerprint(post.author);
-          const stored: StoredPost = {
-            ...post,
-            source: 'peer',
-            receivedAt: new Date().toISOString(),
-            valid,
-            authorFingerprint,
-            isRecommendation: recommendations.some((recommendation) => recommendation.id === post.id),
-            recommendedBy: recommendations.some((recommendation) => recommendation.id === post.id) ? peer : undefined
-          };
-          uniqueById.set(stored.id, stored);
-        }
-
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} batch ignored`);
           return;
         }
 
-        for (const stored of uniqueById.values()) {
-          await savePost(stored);
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!store || !transport) return;
+        const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
+        const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
+        let storedFlags: boolean[];
+        try {
+          storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+        } catch (error) {
+          for (const object of objects) {
+            if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
+              inboxServiceRef.current?.notifyObjectStored(object);
+            }
+          }
+          throw error;
+        }
+        const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+        newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
+        const receivedViews: LocalPostView[] = [];
+        for (const object of newlyStoredObjects) {
+          recommendationIndexRef.current.add(object);
+          setRecommendationRevision((revision) => revision + 1);
+          const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+          if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
         }
 
-        setPosts((prev) => {
-          const merged = new Map<string, StoredPost>();
-          for (const existing of prev) {
-            merged.set(existing.id, existing);
-          }
-          for (const next of uniqueById.values()) {
-            merged.set(next.id, next);
-          }
-          return [...merged.values()].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-        });
+        setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
         // Only advance the cursor when something was actually received, and use the newest
         // post timestamp (not wall-clock now) so an empty/partial batch never causes older,
         // not-yet-synced posts to become permanently unreachable on future requests.
-        if (allPosts.length > 0) {
-          const latestTimestamp = allPosts.reduce(
-            (latest, post) => Math.max(latest, new Date(post.timestamp).getTime()),
+        if (newlyStoredObjects.length > 0) {
+          const latestTimestamp = newlyStoredObjects.reduce(
+            (latest, object) => Math.max(latest, new Date(object.created_at).getTime()),
             0
           );
           const cursorKey = `myceliumHomeSync:${peer}`;
@@ -913,21 +1181,23 @@ function App() {
             localStorage.setItem(cursorKey, new Date(latestTimestamp).toISOString());
           }
         }
-        addLog(`Received ${allPosts.length} posts and recommendations from ${peer}`);
+        addLog(`Received ${newlyStoredObjects.length} canonical posts from ${peer}`);
       },
       async (peer: string) => {
         if (!isCurrentManager(peer)) return;
         setDataChannelOpen(true);
         setActivePeerId(peer);
         updateContactState(peer, { connected: true });
+        inboxServiceRef.current?.notifyPeerConnected();
+        void dmServiceRef.current?.flushOutbox();
         addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendMetadata(buildPeerMetadata(peer));
+          await sendPeerMetadata(manager, peer);
           const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
           if (contact?.followed) {
-            const since = localStorage.getItem(`myceliumHomeSync:${peer}`);
-            manager.sendRequestPosts(since, 100);
+            manager.sendRequestPosts(null, 200);
+            addLog(`Requested full home feed from ${peer} after data channel opened`);
           }
         }
         await flushQueuedMessages(peer);
@@ -951,15 +1221,16 @@ function App() {
       },
       (peer: string, event: string) => {
         if (!isCurrentManager(peer)) return;
-        addLog(`Peer ${peer}: ${event}`);
+        addLog(redactNetworkAddresses(`Peer ${peer}: ${event}`));
       },
       (peer: string) => {
         if (!isCurrentManager(peer)) return;
         // Respond to PROFILE_REQUEST with our current profile
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendMetadata(buildPeerMetadata(peer));
-          addLog(`Sent profile to ${peer} (on request)`);
+          void sendPeerMetadata(manager, peer)
+            .then(() => addLog(`Sent profile to ${peer} (on request)`))
+            .catch((error: unknown) => addLog(`Failed to send profile to ${peer}: ${error instanceof Error ? error.message : String(error)}`));
         }
       },
       async (peer: string, transportMessageId: string) => {
@@ -980,6 +1251,15 @@ function App() {
     return manager;
   };
 
+  const requestPeerOffer = (peerId: string, manager: PeerConnectionManager, socket: WebSocket) => {
+    if (!identity?.id || peerId === identity.id) return;
+    if (identity.id > peerId) {
+      addLog(`Waiting for ${peerId} to initiate the peer connection`);
+      return;
+    }
+    void manager.createOffer(peerId, socket);
+  };
+
   const registerMessageAckTimeout = (peerId: string, transportMessageId: string, chatMessageId: string, text: string) => {
     scheduleMessageAckTimeout(outboundAckTimersRef.current, outboundChatMessageIdsRef.current, transportMessageId, chatMessageId, async () => {
       addLog(`Direct-message ACK timeout fired for ${peerId} message ${transportMessageId}`);
@@ -994,46 +1274,60 @@ function App() {
       const socket = signallingSocketRef.current;
       const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && manager) {
-        manager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, manager, socket);
       }
     });
   };
 
   const handlePeerList = async (peers: string[]) => {
+    const localPeerId = identity?.id;
+    if (!localPeerId) return;
     const validPeers = peers.filter((peerId) => {
-      if (!peerId || peerId === identity?.id) return false;
+      if (!peerId || peerId === localPeerId) return false;
       return isValidPeerFingerprint(peerId) && !blockedPeersRef.current.has(peerId);
     });
-    const invalidPeers = peers.filter((peerId) => !validPeers.includes(peerId) && !blockedPeersRef.current.has(peerId) && peerId !== identity?.id);
+    const invalidPeers = peers.filter((peerId) => !validPeers.includes(peerId) && !blockedPeersRef.current.has(peerId) && peerId !== localPeerId);
     if (invalidPeers.length) {
       addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
     }
+    addLog(`Peer-list received: ${peers.length} announced, ${validPeers.length} valid online peers`);
 
-    await Promise.all(validPeers.map((peerId) => addKnownPeer(peerId)));
+    for (const peerId of validPeers) {
+      await addKnownPeer(peerId);
+    }
 
-    setContacts((prev) =>
-      dedupeContactsByFingerprint(prev).map((contact) => ({
-        ...contact,
-        online: validPeers.includes(contact.fingerprint)
-      }))
-    );
+    const onlinePeerIds = new Set(validPeers);
+    const nextContacts = dedupeContactsByFingerprint(contactsRef.current).map((contact) => ({
+      ...contact,
+      online: onlinePeerIds.has(contact.fingerprint)
+    }));
+    contactsRef.current = nextContacts;
+    setContacts(nextContacts);
 
     const socket = signallingSocketRef.current;
-    validPeers.forEach((peerId) => {
-      if (!peerId || peerId === identity?.id) return;
-      const contact = contactsRef.current.find((c) => c.fingerprint === peerId);
+    for (const peerId of validPeers) {
       const manager = ensurePeerManager(peerId);
-      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) return;
+      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) {
+        addLog(`Peer-list dial skipped for ${peerId}: signalling=${socket?.readyState === WebSocket.OPEN ? 'open' : 'closed'} manager=${manager ? 'ready' : 'missing'}`);
+        continue;
+      }
 
       const channelState = manager.getDataChannelState();
-      const shouldReconnect = !contact?.connected || channelState === 'closed' || channelState === 'missing' || channelState === 'connecting';
-      if (shouldReconnect) {
-        const freshManager = ensurePeerManager(peerId);
-        if (freshManager) {
-          freshManager.createOffer(peerId, socket);
-        }
+      if (localPeerId > peerId) {
+        addLog(`Peer-list dial deferred for ${peerId}: local ID is not the initiator`);
+        continue;
       }
-    });
+      if (channelState === 'open') {
+        addLog(`Peer-list dial skipped for ${peerId}: data channel already open`);
+        continue;
+      }
+      if (channelState === 'connecting' || manager.isNegotiating()) {
+        addLog(`Peer-list dial deferred for ${peerId}: channel=${channelState} negotiating=${manager.isNegotiating()}`);
+        continue;
+      }
+      addLog(`Peer-list initiating connection to ${peerId}: channel=${channelState}`);
+      requestPeerOffer(peerId, manager, socket);
+    }
 
     for (const peerId of validPeers) {
       if (messageQueueRef.current[peerId]?.length) {
@@ -1048,7 +1342,9 @@ function App() {
       if (stored) {
         const id = stored.id ?? (await deriveFingerprint(stored.publicKey));
         const loadedIdentity = { ...stored, id };
+        await ensureTurnIceServers();
         setIdentity(loadedIdentity);
+        addLog(`Identity loaded: ${loadedIdentity.id}`);
       }
       const rawProfile = localStorage.getItem('myProfile');
       if (rawProfile) {
@@ -1096,9 +1392,10 @@ function App() {
   useEffect(() => {
     async function loadLocalData() {
       const cs = await loadContacts();
-      setContacts(dedupeContactsByFingerprint(cs || []));
-      const ps = await loadPosts();
-      setPosts(ps || []);
+      const loadedContacts = dedupeContactsByFingerprint(cs || []);
+      setContacts(loadedContacts);
+      setContactsLoaded(true);
+      addLog(`Contacts loaded: ${loadedContacts.length}`);
       const loadedDirectMessages = await loadDirectChatMessages();
       const groupedDirectMessages = loadedDirectMessages.reduce((acc, message) => {
         acc[message.peerId] = [
@@ -1175,7 +1472,16 @@ function App() {
           return;
         }
 
+        if (message.type === 'peer-discovery-result') {
+          handlePeerDiscoveryResult(message.packet);
+          return;
+        }
+
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
+          if (message.from === identityRef.current?.id) {
+            addLog(`Ignoring signalling message from self: ${message.type}`);
+            return;
+          }
           const manager = ensurePeerManager(message.from);
           if (manager) {
             await manager.handleSignal(message, socket);
@@ -1221,17 +1527,15 @@ function App() {
       dedupeContactsByFingerprint(contactsRef.current).forEach((contact) => {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
         const hasQueuedMessages = (messageQueueRef.current[contact.fingerprint]?.length ?? 0) > 0;
+        if (!contact.online && !hasQueuedMessages) return;
         const manager = ensurePeerManager(contact.fingerprint);
         if (!manager) return;
 
-        const shouldReconnect = (contact.online || hasQueuedMessages) && (
-          !contact.connected ||
-          manager.needsReplacement()
-        );
+        const shouldReconnect = manager.needsReplacement() || !manager.isDataChannelOpen();
 
         if (shouldReconnect && !manager.isNegotiating() && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
           addLog(`Reconnect attempt to ${contact.fingerprint}`);
-          manager.createOffer(contact.fingerprint, socket);
+          requestPeerOffer(contact.fingerprint, manager, socket);
         }
       });
     }, 30000);
@@ -1242,8 +1546,20 @@ function App() {
   useEffect(() => {
     if (!identity?.id) return;
     void handleRefreshHomeFeed();
-    void handleFetchDiscovery();
   }, [identity?.id]);
+
+  useEffect(() => {
+    if (!identity?.id) return;
+    const interval = window.setInterval(() => {
+      void refreshTurnIceServers();
+    }, 10 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [identity?.id]);
+
+  useEffect(() => {
+    if (!identity?.id || signallingStatus !== 'connected') return;
+    void handleFetchDiscovery();
+  }, [identity?.id, signallingStatus]);
 
   useEffect(() => {
     if (page !== 'discover' || discoveryPosts.length > 0) return;
@@ -1253,7 +1569,32 @@ function App() {
   useEffect(() => {
     if (!identity?.id || page !== 'home') return;
     void handleRefreshHomeFeed();
-  }, [page, identity?.id]);
+  }, [page, identity?.id, contacts.length]);
+
+  useEffect(() => {
+    if (!identity?.id || !contactsLoaded || connectedPeerIds.length > 0 || signallingStatus !== 'connected' || peerPoolRequestedRef.current) return;
+    const socket = signallingSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    peerPoolRequestedRef.current = true;
+    void fetchPeerPool(socket).then((peerIds) => {
+      setPossiblePeerIds(peerIds.filter((peerId) => peerId !== identity.id && !blockedPeersRef.current.has(peerId)));
+      addLog(`Loaded ${peerIds.length} possible peers from discovery`);
+    }).catch((error: unknown) => {
+      addLog(`Peer pool request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [identity?.id, contactsLoaded, connectedPeerIds.length, signallingStatus]);
+
+  useEffect(() => {
+    if (!identity?.id || !contactsLoaded || contacts.some((contact) => contact.followed) || signallingStatus !== 'connected' || popularPeersRequestedRef.current) return;
+    const socket = signallingSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    popularPeersRequestedRef.current = true;
+    void fetchPopularPeers(socket).then((peers) => {
+      setPopularPeers(peers.filter((peer) => peer.peer_id !== identity.id && !blockedPeersRef.current.has(peer.peer_id)));
+    }).catch((error: unknown) => {
+      addLog(`Popular peers request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [identity?.id, contactsLoaded, contacts, signallingStatus]);
 
   useEffect(() => {
     if (!identity?.id) return;
@@ -1338,7 +1679,7 @@ function App() {
     const socket = signallingSocketRef.current;
     const manager = ensurePeerManager(fingerprint);
     if (socket && socket.readyState === WebSocket.OPEN && manager) {
-      manager.createOffer(fingerprint, socket);
+      requestPeerOffer(fingerprint, manager, socket);
       addLog(`Attempting connection to ${fingerprint}`);
     } else {
       addLog('Peer added. Waiting for signalling connection to connect.');
@@ -1368,9 +1709,9 @@ function App() {
     const manager = peerManagersRef.current[fingerprint] ?? ensurePeerManager(fingerprint);
     if (socket?.readyState === WebSocket.OPEN && manager) {
       if (manager.isDataChannelOpen()) {
-        manager.sendMetadata(buildPeerMetadata(fingerprint, updated.followed));
+        await sendPeerMetadata(manager, fingerprint, updated.followed);
       } else {
-        void manager.createOffer(fingerprint, socket);
+        requestPeerOffer(fingerprint, manager, socket);
       }
     }
     addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint || updated.publicKey}`);
@@ -1382,93 +1723,141 @@ function App() {
     addLog(`Removed contact`);
   }
 
-  const handleHidePost = (postId: string) => {
+  const handleHidePost = async (postId: string) => {
     setHiddenPostIds((prev) => {
       const next = new Set(prev);
       next.add(postId);
       localStorage.setItem('hiddenPosts', JSON.stringify(Array.from(next)));
       return next;
     });
+    const target = postViews.find((post) => post.object.object_id === postId);
+    if (target) {
+      await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
+      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+    }
   };
 
-  const handleHideDiscoveryPost = (postId: string) => {
+  const handleUnhidePost = async (postId: string) => {
+    setHiddenPostIds((prev) => {
+      const next = new Set(prev);
+      next.delete(postId);
+      localStorage.setItem('hiddenPosts', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    setHiddenDiscoveryIds((prev) => {
+      const next = new Set(prev);
+      next.delete(postId);
+      localStorage.setItem('hiddenDiscovery', JSON.stringify(Array.from(next)));
+      return next;
+    });
+    const target = postViews.find((post) => post.object.object_id === postId);
+    if (target) {
+      const next = { ...target, hidden: false };
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      setPostViews((prev) => upsertLocalPostView(prev, next));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+    }
+  };
+
+  const handleHideDiscoveryPost = async (postId: string) => {
     setHiddenDiscoveryIds((prev) => {
       const next = new Set(prev);
       next.add(postId);
       localStorage.setItem('hiddenDiscovery', JSON.stringify(Array.from(next)));
       return next;
     });
-  };
-
-  const handleLikePost = async (postId: string) => {
-    const target = discoveryPosts.find((post) => post.id === postId) ?? posts.find((post) => post.id === postId);
-    if (target && identity && target.author !== identity.id && target.author !== identity.publicKey) {
-      const isLiked = target.reaction === 'like' && target.recommendedBy === identity.id;
-      const next = {
-        ...target,
-        reaction: isLiked ? undefined : 'like' as const,
-        isRecommendation: !isLiked,
-        recommendedBy: isLiked ? undefined : identity.id
-      } as StoredPost;
-      setPosts((prev) => {
-        const hasPost = prev.some((post) => post.id === postId);
-        return hasPost ? prev.map((post) => (post.id === postId ? { ...post, ...next } : post)) : [next, ...prev];
-      });
-      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      await savePost(next);
-      addLog(`Liked post ${postId}`);
-    }
-  };
-
-  const handleDislikePost = async (postId: string) => {
-    const target = posts.find((post) => post.id === postId) ?? discoveryPosts.find((post) => post.id === postId);
+    const target = discoveryPosts.find((post) => post.object.object_id === postId);
     if (target) {
-      const next = { ...target, reaction: 'dislike', notInterested: true } as StoredPost;
-      setPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      setDiscoveryPosts((prev) => prev.map((post) => (post.id === postId ? next : post)));
-      await savePost(next);
-      addLog(`Disliked post ${postId}`);
+      await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
+      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
     }
   };
 
-  async function handleCreatePost(publishToDiscovery = false, replyTo?: string) {
+  const handleLikePost = async (objectId: string) => {
+    const target = discoveryPosts.find((post) => post.object.object_id === objectId) ?? postViews.find((post) => post.object.object_id === objectId);
+    if (target && identity && target.object.author !== identity.publicKey) {
+      const isLiked = getRecommendationSummary(objectId).recommended_by_me;
+      const sequence = await recommendationSequenceStoreRef.current!.next(identity.publicKey);
+      const recommendation = await createSignedRecommendationObject(objectId, isLiked ? 'withdraw' : 'recommend', sequence, createObjectIdentity(identity));
+      await objectStoreRef.current?.put(recommendation);
+      recommendationIndexRef.current.add(recommendation);
+      setRecommendationRevision((revision) => revision + 1);
+      setPostViews((prev) => upsertLocalPostView(prev, target));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, target));
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(target));
+      addLog(`Liked post ${objectId}`);
+    }
+  };
+
+  const handleDislikePost = async (objectId: string) => {
+    const target = postViews.find((post) => post.object.object_id === objectId) ?? discoveryPosts.find((post) => post.object.object_id === objectId);
+    if (target) {
+      const next = { ...target, notInterested: true };
+      setPostViews((prev) => upsertLocalPostView(prev, next));
+      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+      await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
+      addLog(`Disliked post ${objectId}`);
+    }
+  };
+
+  async function handleCreatePost(publishToDiscovery = false, replyTo?: string, replyContent?: string) {
     if (!identity) return;
-    const content = newPostContent.trim();
+    const isReply = Boolean(replyTo);
+    const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
-    const id = await sha256(identity.publicKey + Date.now().toString());
-    const tags = newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
-    const signed = await createSignedPost(id, identity.publicKey, identity.privateKey, content, tags, { replyTo });
-    const stored: StoredPost = {
-      ...signed,
-      source: 'local',
-      receivedAt: new Date().toISOString(),
-      valid: true,
-      replyCount: 0,
-      authorFingerprint: identity.id
-    };
-    await savePost(stored);
-    setPosts((prev) => [stored, ...prev]);
-    addLog('Created local post');
-    setNewPostContent('');
-    setNewPostTags('');
+    const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
+    const replyTarget = replyTo ? postViews.find((post) => post.object.object_id === replyTo) : undefined;
+    const objectIdentity = createObjectIdentity(identity);
+    const postObject = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: new Date().toISOString(),
+      payload: {
+        content,
+        tags,
+        ...(replyTo ? { reply_to: replyTo, ...(replyTarget ? { reply_to_author: replyTarget.authorFingerprint } : {}) } : {})
+      },
+      replication_policy: {}
+    }, objectIdentity) as PostObject;
+    const objectStore = objectStoreRef.current;
+    if (!objectStore) throw new Error('Object store is unavailable');
+    await objectStore.put(postObject);
+
+    const localPostView = createLocalPostView(postObject, identity.id, { source: 'local' });
+    setPostViews((prev) => upsertLocalPostView(prev, localPostView));
+    await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
+
+    addLog(`Created and stored object post ${postObject.object_id}`);
+    if (!isReply) {
+      setNewPostContent('');
+      setNewPostTags('');
+    }
 
     if (replyTo) {
-      const targetPost = posts.find((post) => post.id === replyTo);
-      const targetPeer = targetPost?.author;
-      if (targetPeer) {
-        const targetManager = peerManagersRef.current[targetPeer];
-        if (targetManager && targetManager.isDataChannelOpen()) {
-          targetManager.sendSignedPost(stored);
-          addLog(`Pushed reply ${stored.id} to ${targetPeer}`);
-        }
+      const targetPost = replyTarget;
+      const targetPeer = targetPost
+        ? targetPost.authorFingerprint
+        : undefined;
+      if (targetPost && targetPeer && identity) {
+        const replyIdentity = createObjectIdentity(identity);
+        const replyObject = await createSignedObject({
+          object_type: 'mycelium.reply',
+          created_at: new Date().toISOString(),
+          payload: createReplyObjectPayload(replyTo, targetPeer),
+          replication_policy: {}
+        }, replyIdentity);
+        const replyResult = await sendReplyToAuthor(identity.id, replyObject, objectTransportRef.current!, targetPeer, (packet) => signString(identity.privateKey, canonicalize(packet)));
+        addLog(replyResult.sent
+          ? `Pushed reply object ${replyObject.object_id} to ${targetPeer}`
+          : `Reply object ${replyObject.object_id} author ${targetPeer} is not connected`);
       }
     }
 
     Object.entries(peerManagersRef.current).forEach(([peerId, manager]) => {
       const contact = contacts.find((c) => c.fingerprint === peerId);
       if (contact?.followed && contact.connected && manager) {
-        manager.sendSignedPost(stored);
-        addLog(`Shared post with connected followed peer ${peerId}`);
+        manager.sendObject(postObject);
+        addLog(`Shared canonical post ${postObject.object_id} with connected followed peer ${peerId}`);
       }
     });
 
@@ -1476,8 +1865,8 @@ function App() {
       const socket = signallingSocketRef.current;
       if (socket && socket.readyState === WebSocket.OPEN) {
         try {
-          await publishPost(signed, socket);
-          addLog('Published post to discovery');
+          await publishObject(postObject, socket);
+          addLog('Published canonical object to discovery');
         } catch (err: any) {
           addLog(`Discovery publish failed: ${err.message}`);
         }
@@ -1488,8 +1877,9 @@ function App() {
   }
 
   const blockedPeerSet = useMemo(() => new Set(myProfile.blockedPeers), [myProfile.blockedPeers]);
-  const isBlockedPost = (post: StoredPost) => blockedPeerSet.has(post.author) || Boolean(post.authorFingerprint && blockedPeerSet.has(post.authorFingerprint));
-  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !hiddenDiscoveryIds.has(post.id) && !isBlockedPost(post));
+  const isBlockedPost = (post: LocalPostView) => blockedPeerSet.has(post.object.author) || blockedPeerSet.has(post.authorFingerprint);
+  const isHiddenPost = (post: LocalPostView) => hiddenPostIds.has(post.object.object_id) || hiddenDiscoveryIds.has(post.object.object_id) || post.hidden === true;
+  const visibleDiscoveryPosts = discoveryPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
 
   const visibleContacts = useMemo(
     () => contacts.filter((contact) => {
@@ -1501,76 +1891,40 @@ function App() {
   );
 
   const discoverFeedPosts = useMemo(() => {
-    return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
   }, [visibleDiscoveryPosts]);
 
   const visibleHomePosts = useMemo(() => {
-    const followedContacts = contacts.filter((contact) => contact.followed);
-    const isByFollowedAuthor = (post: StoredPost) => {
-      const authorFingerprint = post.authorFingerprint ?? post.author;
-      return followedContacts.some((contact) => contact.fingerprint === authorFingerprint || contact.publicKey === post.author);
-    };
-
-    const authoredByFollowed = posts
-      .filter((post) => !hiddenPostIds.has(post.id))
-      .filter((post) => !isBlockedPost(post))
-      .filter((post) => isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    const likedByFollowed = posts
-      .filter((post) => !hiddenPostIds.has(post.id))
-      .filter((post) => !isBlockedPost(post))
-      .filter((post) => post.reaction === 'like')
-      .filter((post) => post.author && post.author !== 'local' && isByFollowedAuthor(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    const totalRatio = Math.max(1, myProfile.feedMix.followedAuthors + myProfile.feedMix.followedLikes);
-    const totalItems = 30;
-    const authoredQuota = Math.floor((totalItems * myProfile.feedMix.followedAuthors) / totalRatio);
-    const likedQuota = Math.max(0, totalItems - authoredQuota);
-
-    const selected: StoredPost[] = [];
-    const seen = new Set<string>();
-
-    const take = (source: StoredPost[], maxItems: number) => {
-      let remaining = maxItems;
-      for (const item of source) {
-        if (selected.length >= totalItems || remaining <= 0) break;
-        if (seen.has(item.id)) continue;
-        selected.push(item);
-        seen.add(item.id);
-        remaining -= 1;
-      }
-    };
-
-    take(authoredByFollowed, authoredQuota);
-    take(likedByFollowed, likedQuota);
-
-    const fallback = [...authoredByFollowed, ...likedByFollowed]
-      .filter((item) => !seen.has(item.id))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-
-    for (const item of fallback) {
-      if (selected.length >= totalItems) break;
-      selected.push(item);
-      seen.add(item.id);
-    }
-
-    return selected.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [posts, hiddenPostIds, contacts, myProfile.feedMix]);
+    const followedAuthorKeys = new Set([
+      ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
+      ...(identity ? [identity.id, identity.publicKey] : [])
+    ]);
+    const computedHomePosts = selectFollowedPosts(postViews.filter((post) => !isHiddenPost(post)), followedAuthorKeys)
+      .map((post) => ({
+        ...post,
+        homeFeedSource: 'followed' as const,
+        recommendationSummary: getRecommendationSummary(post.object.object_id)
+      }));
+    addLog(`Home feed computed: ${computedHomePosts.length} visible posts (${postViews.length} total in postViews); feedMix=${myProfile.feedMix.followedAuthors}/${myProfile.feedMix.followedLikes}/${myProfile.feedMix.discoveryRandom}; hiddenPostIds=${hiddenPostIds.size}`);
+    return computedHomePosts;
+  }, [postViews, contacts, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
   const profilePosts = profileContactId
-    ? posts
+    ? postViews
       // post.author is the raw public key, not the fingerprint - match on authorFingerprint too
-      .filter((post) => profileAuthorIds.has(post.authorFingerprint ?? post.author) || profileAuthorIds.has(post.author))
+      .filter((post) => profileAuthorIds.has(post.authorFingerprint) || profileAuthorIds.has(post.object.author))
+      .filter((post) => !isHiddenPost(post))
       .filter((post) => !isBlockedPost(post))
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
   const likedProfilePosts = profileContactId
-    ? posts.filter((post) => post.recommendedBy === profileContactId && !isBlockedPost(post)).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    ? postViews.filter((post) => {
+      const summary = getRecommendationSummary(post.object.object_id);
+      return summary.active_recommenders.includes(profileContact?.publicKey ?? profileContactId) && !isHiddenPost(post) && !isBlockedPost(post);
+    }).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
   const currentChatMessages = chatContactId ? (directChats[chatContactId] || []).filter((entry) => !blockedPeerSet.has(chatContactId)) : [];
@@ -1615,8 +1969,8 @@ function App() {
       return nextProfile;
     });
     setContacts((prev) => prev.filter((candidate) => candidate.fingerprint !== peerId));
-    setPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
-    setDiscoveryPosts((prev) => prev.filter((post) => post.author !== peerId && post.authorFingerprint !== peerId));
+    setPostViews((prev) => prev.filter((post) => post.authorFingerprint !== peerId && post.object.author !== peerId));
+    setDiscoveryPosts((prev) => prev.filter((post) => post.object.author !== peerId && post.authorFingerprint !== peerId));
     setDirectChats((prev) => {
       const next = { ...prev };
       delete next[peerId];
@@ -1682,13 +2036,12 @@ function App() {
         if (!manager) continue;
 
         if (manager.isDataChannelOpen()) {
-          const since = localStorage.getItem(`myceliumHomeSync:${contact.fingerprint}`);
-          manager.sendRequestPosts(since, 100);
-          addLog(`Requested home updates from ${contact.fingerprint}${since ? ` since ${since}` : ' (last 100)'}`);
+          manager.sendRequestPosts(null, 200);
+          addLog(`Requested full home feed from ${contact.fingerprint}`);
         } else if (contact.online) {
           const channelState = manager.getDataChannelState();
           if (channelState === 'closed' || channelState === 'missing') {
-            manager.createOffer(contact.fingerprint, socket);
+            requestPeerOffer(contact.fingerprint, manager, socket);
             addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
           }
         }
@@ -1709,93 +2062,50 @@ function App() {
     addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(socket, 20);
-      const verifiedPosts = await Promise.all(items.map(async (post) => {
-        const cachedPost = posts.find((cached) => cached.id === post.id);
-        try {
-          const valid = await verifySignedPost(post);
+      let unsupportedObjectCount = 0;
+      let invalidObjectCount = 0;
+      const verificationResults = await Promise.all(items.map(async (object) => {
+          if (object.object_type !== 'mycelium.post') {
+            unsupportedObjectCount += 1;
+            return null;
+          }
+          if (!(await validateObject(object))) {
+            invalidObjectCount += 1;
+            return null;
+          }
+          const cachedPost = discoveryPosts.find((cached) => cached.object.object_id === object.object_id)
+            ?? postViews.find((cached) => cached.object.object_id === object.object_id);
           const knownContact = contactsRef.current.find((contact) =>
-            contact.fingerprint === post.author || contact.publicKey === post.author
+            contact.fingerprint === object.author || contact.publicKey === object.author
           );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
+          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
           const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-          return {
-            ...post,
-            ...(cachedPost ? {
-              reaction: cachedPost.reaction,
-              isRecommendation: cachedPost.isRecommendation,
-              recommendedBy: cachedPost.recommendedBy,
-              authorFingerprint: cachedPost.authorFingerprint,
-              authorDisplayName: cachedPost.authorDisplayName
-            } : {}),
-            source: 'discovery' as const,
-            receivedAt: new Date().toISOString(),
-            valid,
-            authorFingerprint,
-            authorDisplayName: authorDisplayName || undefined
-          };
-        } catch {
-          const knownContact = contactsRef.current.find((contact) =>
-            contact.fingerprint === post.author || contact.publicKey === post.author
-          );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
-          const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-          return {
-            ...post,
-            ...(cachedPost ? {
-              reaction: cachedPost.reaction,
-              isRecommendation: cachedPost.isRecommendation,
-              recommendedBy: cachedPost.recommendedBy,
-              authorFingerprint: cachedPost.authorFingerprint,
-              authorDisplayName: cachedPost.authorDisplayName
-            } : {}),
-            source: 'discovery' as const,
-            receivedAt: new Date().toISOString(),
-            valid: false,
-            authorFingerprint,
-            authorDisplayName: authorDisplayName || undefined
-          };
-        }
-      }));
-      setDiscoveryPosts(verifiedPosts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
-      addLog(`Fetched ${verifiedPosts.length} discovery posts`);
+            return createLocalPostView(object as PostObject, authorFingerprint, {
+              source: 'discovery',
+              authorDisplayName: authorDisplayName || cachedPost?.authorDisplayName
+          });
+          }));
+          const verifiedPosts = verificationResults.filter((view): view is LocalPostView => view !== null);
+      setDiscoveryPosts((prev) => {
+        const merged = mergeLocalPostViews(prev, verifiedPosts);
+        return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
+      });
+      addLog(`Discovery result: received=${items.length} accepted=${verifiedPosts.length} unsupported=${unsupportedObjectCount} invalid=${invalidObjectCount}`);
     } catch (err: any) {
       const message = err?.message || String(err);
       addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);
     }
   }
 
-  async function handleSaveDiscoveryPost(post: SignedPost) {
-    if (blockedPeersRef.current.has(post.author)) {
-      addLog(`Blocked peer ${post.author} discovery post ignored`);
-      return;
-    }
-    const valid = await verifySignedPost(post);
-    const knownContact = contactsRef.current.find((contact) =>
-      contact.fingerprint === post.author || contact.publicKey === post.author
-    );
-    const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(post.author) ? post.author : await deriveFingerprint(post.author).catch(() => post.author));
-    const stored: StoredPost = {
-      ...post,
-      source: 'discovery',
-      receivedAt: new Date().toISOString(),
-      valid,
-      authorFingerprint,
-      authorDisplayName: resolveAuthorDisplayName(authorFingerprint, knownContact) || undefined
-    };
-    await addKnownPeer(post.author);
-    await savePost(stored);
-    setPosts((prev) => [stored, ...prev.filter((existing) => existing.id !== stored.id)]);
-    await saveDiscoveryInteraction({ id: post.id, type: 'saved', timestamp: new Date().toISOString() });
-    addLog(`Saved discovery post locally (${valid ? 'verified' : 'invalid'})`);
-  }
-
   async function handleCreateIdentity() {
+    await ensureTurnIceServers();
     const keys = await generateIdentityKeyPair();
     const publicKey = await exportPublicKey(keys.publicKey);
     const privateKey = await exportPrivateKey(keys.privateKey);
     const identityId = await deriveFingerprint(publicKey);
-    await saveIdentity({ key: 'local', publicKey, privateKey, id: identityId });
-    setIdentity({ key: 'local', publicKey, privateKey, id: identityId });
+    const identityRecord = await ensureIdentityEncryptionKeyPair({ key: 'local', publicKey, privateKey, id: identityId });
+    await saveIdentity(identityRecord);
+    setIdentity(identityRecord as IdentityRecord);
   }
 
   async function handleExportIdentity() {
@@ -1804,12 +2114,7 @@ function App() {
     const exportPayload = {
       version: 1,
       exportedAt: new Date().toISOString(),
-      identity: {
-        key: identity.key,
-        publicKey: identity.publicKey,
-        privateKey: identity.privateKey,
-        id: identity.id
-      },
+      identity: identityBackupFields(identity),
       profile: {
         displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity.id),
         bio: myProfile.bio.trim(),
@@ -1864,15 +2169,18 @@ function App() {
         const importedIdentity = imported?.identity ?? imported;
 
         if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
-          const nextIdentity = {
+          await ensureTurnIceServers();
+          const nextIdentity = await ensureIdentityEncryptionKeyPair({
             key: importedIdentity.key ?? 'local',
             publicKey: importedIdentity.publicKey,
             privateKey: importedIdentity.privateKey,
-            id: importedIdentity.id
-          };
+            id: importedIdentity.id,
+            encryptionPublicKey: typeof importedIdentity.encryptionPublicKey === 'string' ? importedIdentity.encryptionPublicKey : undefined,
+            encryptionPrivateKey: typeof importedIdentity.encryptionPrivateKey === 'string' ? importedIdentity.encryptionPrivateKey : undefined
+          });
 
           await saveIdentity(nextIdentity);
-          setIdentity(nextIdentity);
+          setIdentity(nextIdentity as IdentityRecord);
 
           const profileData = imported?.profile ?? {};
           const safeFeedMix = typeof profileData.feedMix === 'object' && profileData.feedMix !== null
@@ -1936,24 +2244,16 @@ function App() {
   }
 
   async function handleClearOldPeerCache() {
-    const confirmed = window.confirm('Clear cached peer posts and messages older than one week? This keeps your identity, contacts, and local posts.');
+    const confirmed = window.confirm('Clear cached peer messages older than one week? This keeps your identity, contacts, and local posts.');
     if (!confirmed) return;
 
     const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    const remotePosts = await loadPosts();
-    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local' && new Date(post.receivedAt).getTime() <= cutoff);
-    for (const post of stalePeerPosts) {
-      await deletePost(post.id);
-    }
-
     const chatEntries = await loadDirectChatMessages();
     const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine && new Date(entry.timestamp).getTime() <= cutoff);
     for (const entry of stalePeerMessages) {
       await deleteDirectChatMessage(entry.id);
     }
 
-    const refreshedPosts = await loadPosts();
-    setPosts(refreshedPosts);
     const refreshedChats = await loadDirectChatMessages();
     const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
       acc[message.peerId] = [
@@ -1969,18 +2269,12 @@ function App() {
     }, {} as Record<string, ChatEntry[]>);
     setDirectChats(groupedDirectMessages);
 
-    addLog(`Cleared peer cache older than 7 days (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+    addLog(`Cleared peer cache older than 7 days (0 posts, ${stalePeerMessages.length} messages)`);
   }
 
   async function handleClearAllPeerCache() {
-    const confirmed = window.confirm('Clear all cached peer messages and posts? This will not delete your identity, contacts, or your own posts.');
+    const confirmed = window.confirm('Clear all cached peer messages? This will not delete your identity, contacts, or your own posts.');
     if (!confirmed) return;
-
-    const remotePosts = await loadPosts();
-    const stalePeerPosts = remotePosts.filter((post) => post.source !== 'local');
-    for (const post of stalePeerPosts) {
-      await deletePost(post.id);
-    }
 
     const chatEntries = await loadDirectChatMessages();
     const stalePeerMessages = chatEntries.filter((entry) => !entry.isMine);
@@ -1988,8 +2282,6 @@ function App() {
       await deleteDirectChatMessage(entry.id);
     }
 
-    const refreshedPosts = await loadPosts();
-    setPosts(refreshedPosts);
     const refreshedChats = await loadDirectChatMessages();
     const groupedDirectMessages = refreshedChats.reduce((acc, message) => {
       acc[message.peerId] = [
@@ -2005,7 +2297,7 @@ function App() {
     }, {} as Record<string, ChatEntry[]>);
     setDirectChats(groupedDirectMessages);
 
-    addLog(`Cleared all peer cache entries (${stalePeerPosts.length} posts, ${stalePeerMessages.length} messages)`);
+    addLog(`Cleared all peer cache entries (0 posts, ${stalePeerMessages.length} messages)`);
   }
 
   async function handleClearIdentity() {
@@ -2029,8 +2321,13 @@ function App() {
     localStorage.removeItem('myceliumHeaderCollapsed');
 
     setIdentity(null);
+    dmServiceRef.current = null;
+    if (dmOutboxIntervalRef.current !== null) {
+      window.clearInterval(dmOutboxIntervalRef.current);
+      dmOutboxIntervalRef.current = null;
+    }
     setContacts([]);
-    setPosts([]);
+    setPostViews([]);
     setDiscoveryPosts([]);
     setDirectChats({});
     setMessageQueue({});
@@ -2052,7 +2349,7 @@ function App() {
     setSelectedContactId(normalizedRemoteId);
     setChatContactId(normalizedRemoteId);
     addLog(`Starting call to ${normalizedRemoteId}`);
-    manager.createOffer(normalizedRemoteId, socket);
+    requestPeerOffer(normalizedRemoteId, manager, socket);
   }
 
   async function handleSelectContact(peerId: string) {
@@ -2066,7 +2363,7 @@ function App() {
     const manager = ensurePeerManager(peerId);
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
     if (socket && socket.readyState === WebSocket.OPEN && manager && !targetContact?.connected) {
-      manager.createOffer(peerId, socket);
+      requestPeerOffer(peerId, manager, socket);
       addLog(`Opening chat and connecting to ${peerId}`);
     }
   }
@@ -2120,7 +2417,7 @@ function App() {
 
     if (canRequestProfile) {
       if (!resolvedContact.connected && !manager.isDataChannelOpen() && socket) {
-        manager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, manager, socket);
       }
       manager.requestProfile();
       manager.sendRequestPosts(null, 200);
@@ -2128,7 +2425,7 @@ function App() {
     }
 
     if (socket && socket.readyState === WebSocket.OPEN && manager && !resolvedContact.connected) {
-      manager.createOffer(peerId, socket);
+      requestPeerOffer(peerId, manager, socket);
       setProfileNotice(`Profile information for ${peerId.slice(0, 12)} is unavailable at the moment.`);
       return;
     }
@@ -2166,7 +2463,7 @@ function App() {
     const peerId = chatContactId;
     const trimmedMessage = message.trim();
     if (isDuplicateOutboundMessage(peerId, trimmedMessage)) {
-      addLog(`Duplicate message suppressed for ${peerId}: ${trimmedMessage.slice(0, 80)}`);
+      addLog(formatMessageLog('duplicate-suppressed', { peerId, textLength: trimmedMessage.length }));
       setMessage('');
       return;
     }
@@ -2202,7 +2499,7 @@ function App() {
       const socket = signallingSocketRef.current;
       const lazyManager = manager ?? ensurePeerManager(peerId);
       if (socket && socket.readyState === WebSocket.OPEN && lazyManager) {
-        lazyManager.createOffer(peerId, socket);
+        requestPeerOffer(peerId, lazyManager, socket);
         addLog(`Queued message and requested data channel to ${peerId}`);
       }
       addLog(`Queued direct message for ${peerId}`);
@@ -2333,7 +2630,7 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
       await refreshObjectStore();
       addLog(`FIND TEST: removed local copy ${objectId}; querying ${peerId}`);
-      const found = await findObject(identity.id, peerId, objectId, transport, store);
+      const found = await findObject(identity.id, peerId, objectId, transport, store, 2);
       if (!found) {
         setObjectTestStatus(`FIND TEST: FAIL - peer returned no object for ${objectId}`);
         addLog(`FIND TEST: FAIL - no object returned for ${objectId}`);
@@ -2357,7 +2654,7 @@ function App() {
     if (!identity || !peerId || !store || !transport) return;
     const missingObjectId = await sha256(`mycelium.find-missing-test:${identity.id}:${Date.now()}:${Math.random()}`);
     try {
-      const found = await findObject(identity.id, peerId, missingObjectId, transport, store);
+      const found = await findObject(identity.id, peerId, missingObjectId, transport, store, 2);
       const localCopy = await store.get(missingObjectId);
       if (found || localCopy) {
         setObjectTestStatus(`FIND MISSING TEST: FAIL - unexpected object returned for ${missingObjectId}`);
@@ -2403,6 +2700,99 @@ function App() {
       const message = error instanceof Error ? error.message : String(error);
       setObjectTestStatus(`Phase 6 setup failed: ${message}`);
       addLog(`PHASE 6 setup failed: ${message}`);
+    }
+  }
+
+  async function handleCreatePhase7Set() {
+    if (!identity) return;
+    try {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const objectIdentity = createObjectIdentity(identity);
+      const timestamps = ['2026-08-25T10:00:00.000Z', '2026-08-25T10:05:00.000Z', '2026-08-25T10:10:00.000Z'];
+      const objects = await Promise.all(timestamps.map(async (createdAt, index) => createSignedObject({
+        object_type: 'mycelium.phase7-browser-test',
+        created_at: createdAt,
+        payload: { object_number: index + 1, test: 'phase7-time-range-query' },
+        replication_policy: {}
+      }, objectIdentity)));
+      for (const object of objects) await store.put(object);
+      setObjectTestIds(objects.map((object) => object.object_id).join('\n'));
+      setPhase7Author(objects[0]?.author ?? '');
+      setPhase7StartTime('10:03');
+      setPhase7EndTime('10:09');
+      setPhase7SelectedObjectId(objects[0]?.object_id ?? '');
+      setPhase7Results(objects.map((object) => ({ object_id: object.object_id, created_at: object.created_at, author: object.author })));
+      await refreshObjectStore();
+      setPhase7QueryStatus('Created the three Phase 7 signed objects for peer B. Use the existing send controls to distribute them across peers A/B/C.');
+      addLog(`PHASE7 CREATE requestId=manual-batch author=${identity.id} objects=${objects.map((object) => `${object.object_id}@${object.created_at}`).join(', ')}`);
+      setObjectTestStatus('Created three Phase 7 test objects for peer B.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhase7QueryStatus(`Phase 7 setup failed: ${message}`);
+      addLog(`PHASE7 CREATE failed: ${message}`);
+    }
+  }
+
+  async function handleRunPhase7Query(mode: 'narrow' | 'broad') {
+    if (!identity || !objectTestPeerId) {
+      setPhase7QueryStatus('Select a peer before running the Phase 7 query.');
+      return;
+    }
+    const author = phase7Author || identity.publicKey;
+    const lowerBound = mode === 'narrow' ? '2026-08-25T10:03:00.000Z' : '2026-08-25T10:00:00.000Z';
+    const upperBound = mode === 'narrow' ? '2026-08-25T10:09:00.000Z' : '2026-08-25T10:11:00.000Z';
+    const requestId = `phase7-query-${Date.now()}`;
+    const transport = objectTransportRef.current;
+    if (!transport) {
+      setPhase7QueryStatus('Object transport is unavailable.');
+      return;
+    }
+    const observed = new Map<string, { object_id: string; created_at: string; author: string }>();
+    const unsubscribe = transport.onPacket((peerId, packet) => {
+      if (packet.type !== 'FIND_RESPONSE' || packet.payload.requestId !== requestId) return;
+      const objects = Array.isArray(packet.payload.objects) ? packet.payload.objects : packet.payload.object ? [packet.payload.object] : [];
+      for (const object of objects) {
+        if (!object || typeof object !== 'object') continue;
+        const candidate = object as { object_id: string; created_at: string; author: string };
+        if (candidate.object_id) observed.set(candidate.object_id, candidate);
+      }
+    });
+
+    setPhase7RequestId(requestId);
+    setPhase7QueryStatus(`Running Phase 7 query... requestId=${requestId}`);
+    addLog(`PHASE7 QUERY START requestId=${requestId} author=${author} peer=${objectTestPeerId} start=${lowerBound} end=${upperBound}`);
+    const packet = await buildTimeRangeFindPacket(identity.id, objectTestPeerId, author, lowerBound, upperBound, undefined, requestId, 2, identity.id, new Date(Date.now() + 5000).toISOString());
+    await transport.send(objectTestPeerId, packet);
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    unsubscribe();
+    const results = [...observed.values()].filter((object) => object.author === author && new Date(object.created_at) >= new Date(lowerBound) && new Date(object.created_at) <= new Date(upperBound));
+    const uniqueResults = [...new Map(results.map((object) => [object.object_id, object])).values()];
+    setPhase7Results(uniqueResults);
+    setPhase7QueryStatus(`Phase 7 result: ${uniqueResults.length} object(s) returned for ${author} ${lowerBound} -> ${upperBound}: ${uniqueResults.map((object) => object.object_id).join(', ') || 'none'}`);
+    addLog(`PHASE7 QUERY DONE requestId=${requestId} author=${author} peer=${objectTestPeerId} lower=${lowerBound} upper=${upperBound} returned=${uniqueResults.length} ids=${uniqueResults.map((object) => object.object_id).join(', ') || 'none'}`);
+    if (uniqueResults.length > 0) {
+      addLog(`PHASE7 FINAL RETURN requestId=${requestId} ids=${uniqueResults.map((object) => object.object_id).join(', ')}`);
+    }
+  }
+
+  async function handleFindPhase7SingleObject() {
+    const transport = objectTransportRef.current;
+    const store = objectStoreRef.current;
+    const objectId = phase7SelectedObjectId || objectTestLastId || objectTestIds.split(/\s+/).filter(Boolean)[0];
+    if (!identity || !objectTestPeerId || !transport || !store || !objectId) {
+      setPhase7QueryStatus('Select a peer and a valid object ID before running the single-object FIND.');
+      return;
+    }
+    try {
+      const found = await findObject(identity.id, objectTestPeerId, objectId, transport, store, 2);
+      const status = found ? `Single-object FIND returned ${found.object_id}` : `Single-object FIND returned no object for ${objectId}`;
+      setPhase7QueryStatus(status);
+      addLog(`PHASE7 SINGLE FIND requestId=single-${Date.now()} peer=${objectTestPeerId} object=${objectId} result=${found ? found.object_id : 'none'}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPhase7QueryStatus(`Single-object FIND failed: ${message}`);
+      addLog(`PHASE7 SINGLE FIND failed: ${message}`);
     }
   }
 
@@ -2468,15 +2858,17 @@ function App() {
     }
   }
 
-  function handleSendPostToPeer(post: StoredPost) {
+  async function handleSendPostToPeer(post: LocalPostView) {
     if (!selectedContactId) return;
     const manager = peerManagersRef.current[selectedContactId];
     if (!manager || selectedContactId !== activePeerId) return;
-    manager.sendSignedPost(post);
-    addLog(`Sent post ${post.id} to peer ${selectedContactId}`);
+    const object = await objectStoreRef.current?.get(post.object.object_id);
+    if (!object) return;
+    manager.sendObject(object);
+    addLog(`Sent canonical object ${object.object_id} to peer ${selectedContactId}`);
   }
 
-  const connectedPeersCount = contacts.filter((contact) => contact.connected).length;
+  const connectedPeersCount = connectedPeerIds.length;
   const syncStatus = signallingStatus === 'connected' ? 'synced' : signallingStatus;
   const activeProfileContact = profileContactId ? contacts.find((c) => c.fingerprint === profileContactId) : undefined;
   const myProfileContact = useMemo<Contact | undefined>(() => {
@@ -2505,6 +2897,17 @@ function App() {
     };
   }, [identity, myProfile.displayName, myProfile.bio]);
   const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
+  const getDmIdentity = useCallback(() => identity ? ({
+    id: identity.id,
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    encryptionPublicKey: identity.encryptionPublicKey,
+    encryptionPrivateKey: identity.encryptionPrivateKey
+  }) : null, [identity]);
+  const resolveDmSenderEncryptionKey = useCallback((publicKey: string) => {
+    const contact = contactsRef.current.find((candidate) => candidate.publicKey === publicKey);
+    return contact ? getContactEncryptionKey(contact) : null;
+  }, [contacts]);
 
   if (!identity) {
     return (
@@ -2523,6 +2926,7 @@ function App() {
         connectionStatus={connectionStatus}
         signallingStatus={signallingStatus}
         connectedPeers={connectedPeersCount}
+        connectedPeerIds={connectedPeerIds}
         syncStatus={syncStatus}
         myFingerprint={identity?.id}
         unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
@@ -2540,6 +2944,8 @@ function App() {
           <HomePage
             posts={visibleHomePosts}
             contacts={contacts}
+            popularPeers={popularPeers}
+            onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={handleCreatePost}
@@ -2550,8 +2956,7 @@ function App() {
             onDislike={handleDislikePost}
             onReply={(postId, content, publishToDiscovery) => {
               if (content && content.trim()) {
-                void handleCreatePost(Boolean(publishToDiscovery), postId);
-                setNewPostContent(content);
+                void handleCreatePost(Boolean(publishToDiscovery), postId, content);
               }
             }}
             onHide={handleHidePost}
@@ -2562,6 +2967,7 @@ function App() {
         {page === 'people' && (
           <PeoplePage
             contacts={visibleContacts}
+            suggestedPeerIds={possiblePeerIds}
             myPeerId={identity.id}
             onViewProfile={handleOpenPeerProfile}
             onMessage={handleSelectContact}
@@ -2584,7 +2990,7 @@ function App() {
             onDislike={handleDislikePost}
             onHide={handleHideDiscoveryPost}
             onBlock={handleBlockPeer}
-            onSave={handleSaveDiscoveryPost}
+            getRecommendationSummary={getRecommendationSummary}
           />
         )}
 
@@ -2602,18 +3008,20 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            getRecommendationSummary={getRecommendationSummary}
           />
         )}
 
         {page === 'myProfile' && myProfileContact && (
           <ProfilePage
             contact={myProfileContact}
-            posts={posts.filter((post) => post.author === identity?.id || post.author === identity?.publicKey || post.authorFingerprint === identity?.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
-            likedPosts={posts.filter((post) => post.recommendedBy === identity?.id && post.author !== identity?.id && post.author !== identity?.publicKey).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())}
+            posts={postViews.filter((post) => (post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey) && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            getRecommendationSummary={getRecommendationSummary}
             isOwnProfile
             profileSettingsOpen={profileSettingsOpen}
             onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}
@@ -2669,7 +3077,11 @@ function App() {
                     addLog('Profile saved locally');
                     contacts.forEach((contact) => {
                       if (!contact.connected) return;
-                      peerManagersRef.current[contact.fingerprint]?.sendMetadata(buildPeerMetadata(contact.fingerprint));
+                      const manager = peerManagersRef.current[contact.fingerprint];
+                      if (manager) {
+                        void sendPeerMetadata(manager, contact.fingerprint)
+                          .catch((error: unknown) => addLog(`Failed to send profile to ${contact.fingerprint}: ${error instanceof Error ? error.message : String(error)}`));
+                      }
                     });
                   }}>Save Profile</button>
                   <button className="btn secondary" onClick={handleExportIdentity}>Export Identity</button>
@@ -2677,24 +3089,41 @@ function App() {
                 <div className="row">
                   <button className="btn secondary" onClick={handleImportIdentity}>Import Identity</button>
                   <button className="btn secondary" onClick={handleCreateIdentity}>Create New Identity</button>
-                  <button className="btn secondary" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
+                  <button className="btn secondary destructive" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
                 </div>
                 <div className="blocked-peers-settings">
-                  <h3>Blocked Peers</h3>
-                  <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
+                  <CollapsibleSection
+                    title="Blocked Peers"
+                    summary={`${myProfile.blockedPeers.length}`}
+                    isOpen={blockedPeersOpen}
+                    onToggle={() => setBlockedPeersOpen((open) => !open)}
+                  >
+                    <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
+                  </CollapsibleSection>
+                  <CollapsibleSection
+                    title="Hidden Posts"
+                    summary={`${postViews.filter((post) => isHiddenPost(post)).length}`}
+                    isOpen={hiddenPostsOpen}
+                    onToggle={() => setHiddenPostsOpen((open) => !open)}
+                  >
+                    <HiddenPostList posts={postViews.filter((post) => isHiddenPost(post))} contacts={contacts} onUnhide={handleUnhidePost} />
+                  </CollapsibleSection>
                 </div>
               </div>
             }
           />
         )}
 
-        {page === 'chat' && activeChatContact && (
-          <ChatPage
+        {page === 'chat' && activeChatContact && identity && objectStoreRef.current && outboxStoreRef.current && (
+          <DmChatPage
             contact={activeChatContact}
-            messages={currentChatMessages}
-            messageDraft={message}
-            onMessageChange={setMessage}
-            onSendMessage={handleSendDirectMessage}
+            counterparty={activeChatContact.publicKey}
+            getIdentity={getDmIdentity}
+            store={objectStoreRef.current}
+            outbox={outboxStoreRef.current}
+            resolveSenderEncryptionKey={resolveDmSenderEncryptionKey}
+            dmService={dmServiceRef.current}
+            events={dmEventsRef.current}
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
           />
         )}
@@ -2704,7 +3133,7 @@ function App() {
             identityId={identity?.id ?? ''}
             publicKey={identity?.publicKey ?? ''}
             contacts={contacts.length}
-            posts={posts.length}
+            posts={postViews.length}
             logs={logs}
             onClearLogs={() => setLogs([])}
             signalEndpoint={signalEndpoint}
@@ -2731,6 +3160,26 @@ function App() {
               onFindListed: () => { void handleFindPhase6Listed(); },
               onToggleSuppressFindResponses: () => setSuppressPhase6FindResponses((current) => !current),
               onClearObjectStore: () => { void handleClearObjectStore(); },
+              onRefresh: () => { void refreshObjectStore(); }
+            } : undefined}
+            phase7Test={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
+              author: phase7Author,
+              startTime: phase7StartTime,
+              endTime: phase7EndTime,
+              status: phase7QueryStatus,
+              requestId: phase7RequestId,
+              objectIds: objectTestIds,
+              objects: phase7Results,
+              selectedObjectId: phase7SelectedObjectId,
+              onAuthorChange: setPhase7Author,
+              onStartTimeChange: setPhase7StartTime,
+              onEndTimeChange: setPhase7EndTime,
+              onSelectedObjectIdChange: setPhase7SelectedObjectId,
+              onCreateSet: () => { void handleCreatePhase7Set(); },
+              onUseCurrentObjectIds: () => setObjectTestIds(objectTestIds),
+              onRunNarrow: () => { void handleRunPhase7Query('narrow'); },
+              onRunBroad: () => { void handleRunPhase7Query('broad'); },
+              onRunSingleObjectFind: () => { void handleFindPhase7SingleObject(); },
               onRefresh: () => { void refreshObjectStore(); }
             } : undefined}
             onResetApp={() => {

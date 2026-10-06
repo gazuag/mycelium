@@ -86,7 +86,7 @@ export function MyProfilePage({
         <div className="row">
           <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
           <button className="btn secondary" onClick={onCreateIdentity}>Create New Identity</button>
-          <button className="btn secondary" onClick={onClearIdentity}>Clear Identity (Log Out)</button>
+          <button className="btn secondary destructive" onClick={onClearIdentity}>Clear Identity (Log Out)</button>
         </div>
       </div>
 

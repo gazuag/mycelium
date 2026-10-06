@@ -27,7 +27,7 @@ export function BlockButton({ peerId, contacts, onBlock, myPeerId }: BlockButton
   if (isFollowed || isOwnPeer) return null;
 
   return (
-    <button className="btn secondary" onClick={() => onBlock(peerId)} type="button">
+    <button className="btn secondary destructive" onClick={() => onBlock(peerId)} type="button">
       Block
     </button>
   );

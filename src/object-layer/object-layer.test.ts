@@ -2,12 +2,15 @@ import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString } from '../crypto/identity';
-import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
+import { canonicalizeObjectContent, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
-import { IndexedDbObjectStore } from './local-store';
-import { buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectStorePacket, findObject, FindAggregation, getFindObjectIds, receiveObjectPacket, respondToFindPacket, selectFindPeers, validateFindResponseObjects } from './transport';
+import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
+import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
+import { RecommendationIndex, recommendationWeight, selectRecommendationCandidates } from './recommendations';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, queryFeedObjectsForPeer, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { buildPacket } from '../p2p/protocol';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
-import type { DistributedObject, ObjectPacket, ObjectStore } from './types';
+import type { DistributedObject, FindResponsePacket, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -15,7 +18,7 @@ async function createFixtureObject(content: ImmutableObjectContent): Promise<Dis
   const keys = await generateIdentityKeyPair();
   const publicKey = await exportPublicKey(keys.publicKey);
   const privateKey = await exportPrivateKey(keys.privateKey);
-  const unsigned = { ...content, author: publicKey };
+  const unsigned = { ...content, author: content.author || publicKey };
   const objectId = await calculateObjectId(unsigned);
   const signature = await signString(privateKey, canonicalizeObjectContent({ ...unsigned, object_id: objectId, signature: '' }));
   return { ...unsigned, object_id: objectId, signature };
@@ -34,7 +37,11 @@ async function createSignedObjectWithPayload(payload: unknown): Promise<Distribu
 function createMemoryStore(): ObjectStore {
   const objects = new Map<string, DistributedObject>();
   return {
-    put: async (object) => { objects.set(object.object_id, object); },
+    put: async (object) => {
+      const isNew = !objects.has(object.object_id);
+      objects.set(object.object_id, object);
+      return isNew;
+    },
     get: async (objectId) => objects.get(objectId) ?? null,
     delete: async (objectId) => { objects.delete(objectId); },
     query: async () => [...objects.values()]
@@ -106,6 +113,67 @@ describe('distributed object foundation', () => {
     expect(await validateDistributedObject(objectWithUnsupportedPayload)).toBe(false);
   });
 
+  describe('Stage 2b: mycelium.post objects', () => {
+    it('creates a post object with the expected immutable type and fields', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'hello', tags: ['phase2b'] },
+        replication_policy: {}
+      });
+
+      expect(object.object_type).toBe('mycelium.post');
+      expect(object.payload).toEqual({ content: 'hello', tags: ['phase2b'] });
+      expect(object.created_at).toBe('2026-08-25T00:00:00.000Z');
+      expect(object.author).toBeTruthy();
+    });
+
+    it('validates the DistributedObject signature for post content', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'signed content', tags: [] },
+        replication_policy: {}
+      });
+
+      expect(await validateObject(object)).toBe(true);
+      expect(await validateObject({ ...object, payload: { content: 'tampered', tags: [] } })).toBe(false);
+    });
+
+    it('stores reply_to inside the post payload when present', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'reply', tags: [], reply_to: 'parent-post-id' },
+        replication_policy: {}
+      });
+
+      expect(object.payload).toEqual({ content: 'reply', tags: [], reply_to: 'parent-post-id' });
+      expect(await validateObject(object)).toBe(true);
+    });
+
+    it('excludes mutable and local legacy fields from the signed post object', async () => {
+      const object = await createFixtureObject({
+        object_type: 'mycelium.post',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { content: 'immutable', tags: [] },
+        replication_policy: {}
+      });
+
+      expect(object).not.toHaveProperty('replyCount');
+      expect(object).not.toHaveProperty('reaction');
+      expect(object).not.toHaveProperty('valid');
+      expect(object).not.toHaveProperty('source');
+      expect(object).not.toHaveProperty('receivedAt');
+      expect(object).not.toHaveProperty('authorFingerprint');
+      expect(object.payload).toEqual({ content: 'immutable', tags: [] });
+    });
+  });
+
   it('stores, deduplicates, queries, and deletes objects locally', async () => {
     const object = await createFixtureObject({
       object_type: 'example',
@@ -123,6 +191,519 @@ describe('distributed object foundation', () => {
     await expect(store.put({ ...object, signature: 'invalid' })).rejects.toThrow('Invalid distributed object');
     await store.delete(object.object_id);
     expect(await store.get(object.object_id)).toBeNull();
+  });
+
+  it('put returns true when storing a new object', async () => {
+    const object = await createFixtureObject({
+      object_type: 'put-result',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'stored' },
+      replication_policy: {}
+    });
+    const store = new IndexedDbObjectStore();
+
+    expect(await store.put(object)).toBe(true);
+  });
+
+  it('put returns false when overwriting an existing object ID', async () => {
+    const object = await createFixtureObject({
+      object_type: 'put-result-overwrite',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'stored' },
+      replication_policy: {}
+    });
+    const store = new IndexedDbObjectStore();
+    await store.put(object);
+    const duplicateObject = { ...object };
+    expect(duplicateObject).not.toBe(object);
+    expect(await store.put(duplicateObject)).toBe(false);
+  });
+
+  it('put returns true again after an object with that ID is deleted', async () => {
+    const object = await createFixtureObject({
+      object_type: 'put-result-after-delete',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'stored' },
+      replication_policy: {}
+    });
+    const store = new IndexedDbObjectStore();
+
+    expect(await store.put(object)).toBe(true);
+    await store.delete(object.object_id);
+    expect(await store.put({ ...object })).toBe(true);
+  });
+
+  describe('lazy object expiry', () => {
+    it('get returns null and deletes an object past its top-level expires_at', async () => {
+      const object = await createFixtureObject({
+        object_type: 'expiry-get-top-level',
+        author: '',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(object);
+      const deleteSpy = vi.spyOn(store, 'delete');
+
+      expect(await store.get(object.object_id)).toBeNull();
+      expect(deleteSpy).toHaveBeenCalledWith(object.object_id);
+      expect(await store.query({ object_id: object.object_id })).toEqual([]);
+    });
+
+    it('get returns null and deletes an object past replication_policy.expires_at', async () => {
+      const object = await createFixtureObject({
+        object_type: 'expiry-get-policy',
+        author: '',
+        created_at: new Date().toISOString(),
+        payload: {},
+        replication_policy: { expires_at: new Date(Date.now() - 60_000).toISOString() }
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(object);
+      const deleteSpy = vi.spyOn(store, 'delete');
+
+      expect(await store.get(object.object_id)).toBeNull();
+      expect(deleteSpy).toHaveBeenCalledWith(object.object_id);
+      expect(await store.query({ object_id: object.object_id })).toEqual([]);
+    });
+
+    it('get returns an object with a future top-level expires_at', async () => {
+      const object = await createFixtureObject({
+        object_type: 'expiry-get-future',
+        author: '',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(object);
+
+      expect(await store.get(object.object_id)).toEqual(object);
+    });
+
+    it('get returns an object when neither expiry field is set', async () => {
+      const object = await createFixtureObject({
+        object_type: 'expiry-get-none',
+        author: '',
+        created_at: new Date().toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(object);
+
+      expect(await store.get(object.object_id)).toEqual(object);
+    });
+
+    it('get prefers top-level expires_at over replication_policy.expires_at', async () => {
+      const object = await createFixtureObject({
+        object_type: 'expiry-get-precedence',
+        author: '',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        payload: {},
+        replication_policy: { expires_at: new Date(Date.now() + 60_000).toISOString() }
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(object);
+      const deleteSpy = vi.spyOn(store, 'delete');
+
+      expect(await store.get(object.object_id)).toBeNull();
+      expect(deleteSpy).toHaveBeenCalledWith(object.object_id);
+      expect(await store.query({ object_id: object.object_id })).toEqual([]);
+    });
+
+    it('query filters and deletes expired objects while returning live matches', async () => {
+      const expired = await createFixtureObject({
+        object_type: 'expiry-query',
+        author: '',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const live = await createFixtureObject({
+        object_type: 'expiry-query',
+        author: '',
+        created_at: new Date().toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const store = new IndexedDbObjectStore();
+      await store.put(expired);
+      await store.put(live);
+      const deleteSpy = vi.spyOn(store, 'delete');
+
+      expect(await store.query({ object_type: 'expiry-query' })).toEqual([live]);
+      expect(deleteSpy).toHaveBeenCalledWith(expired.object_id);
+      expect(deleteSpy).not.toHaveBeenCalledWith(live.object_id);
+    });
+
+    it('FIND query filtering excludes expired objects without deleting them', async () => {
+      const expired = await createFixtureObject({
+        object_type: 'expiry-find-query',
+        author: '',
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const live = await createFixtureObject({
+        object_type: 'expiry-find-query',
+        author: '',
+        created_at: new Date().toISOString(),
+        payload: {},
+        replication_policy: {}
+      });
+      const store = createMemoryStore();
+      await store.put(expired);
+      await store.put(live);
+
+      expect(await filterObjectsByFindQuery(store, { object_type: 'expiry-find-query' })).toEqual([live]);
+      expect(await store.get(expired.object_id)).toEqual(expired);
+    });
+  });
+
+  it('constructs a LocalPostView directly from a PostObject', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'canonical local post', tags: ['stage4a'] },
+      replication_policy: {}
+    });
+
+    const view = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+    expect(view.object).toBe(object);
+    expect(view.authorFingerprint).toBe('aa:bb:cc:dd:ee:ff:00:11');
+    expect(view.source).toBe('local');
+    expect(view.object.payload).toEqual({ content: 'canonical local post', tags: ['stage4a'] });
+  });
+
+  it('updates local post state immediately without a network round trip', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'available immediately', tags: [] },
+      replication_policy: {}
+    });
+    const view = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+
+    const nextState = upsertLocalPostView([], view);
+    expect(nextState).toEqual([view]);
+    expect(nextState[0].object.object_id).toBe(object.object_id);
+  });
+
+  it('keeps a newly created view visible when it is inserted into post state', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'created now', tags: [] },
+      replication_policy: {}
+    });
+    const localView = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'local' });
+
+    expect(upsertLocalPostView([], localView)).toEqual([localView]);
+  });
+
+  it('preserves an incoming object when hydration resolves after it', async () => {
+    const incomingObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'incoming' }, replication_policy: {} });
+    const hydratedObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'hydrated' }, replication_policy: {} });
+    const incoming = createLocalPostView(incomingObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'peer' });
+    const hydrated = createLocalPostView(hydratedObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:22', { source: 'local' });
+
+    expect(mergeLocalPostViews([incoming], [hydrated]).map((view) => view.object.object_id)).toEqual([hydratedObject.object_id, incomingObject.object_id]);
+  });
+
+  it('keeps an earlier discovery post when a later fetch omits it', async () => {
+    const earlierObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'earlier' }, replication_policy: {} });
+    const laterObject = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'later' }, replication_policy: {} });
+    const earlier = createLocalPostView(earlierObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
+    const later = createLocalPostView(laterObject as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
+
+    expect(mergeLocalPostViews([earlier], [later]).map((view) => view.object.object_id)).toEqual([laterObject.object_id, earlierObject.object_id]);
+  });
+
+  it('promotes a discovery-only post into the main post state', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'discover then like' }, replication_policy: {} });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'discovery' });
+
+    expect(upsertLocalPostView([], liked)[0].source).toBe('discovery');
+  });
+
+  it('preserves local like metadata when the same object is received again', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked object' }, replication_policy: {} });
+    const liked = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { notInterested: false });
+    const received = createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { source: 'peer' });
+
+    const merged = upsertLocalPostView([liked], received);
+    expect(merged[0]).toMatchObject({ source: 'peer', notInterested: false });
+  });
+
+  it('persists local post metadata by object_id', async () => {
+    const store = new IndexedDbLocalPostMetadataStore();
+    const metadata = {
+      object_id: 'a'.repeat(64),
+      authorFingerprint: 'aa:bb:cc:dd:ee:ff:00:11',
+      source: 'local' as const
+    };
+
+    await store.put(metadata);
+    expect(await store.get(metadata.object_id)).toEqual(metadata);
+    expect(await store.query()).toContainEqual(metadata);
+  });
+
+  it('creates valid recommendation objects with increasing sequences and withdrawal', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const privateKey = await exportPrivateKey(keys.privateKey);
+    const identity = createObjectIdentity({ id: 'recommendation-author', publicKey: author, privateKey });
+    const sequenceStore = new IndexedDbRecommendationSequenceStore();
+    const first = await createSignedRecommendationObject('a'.repeat(64), 'recommend', await sequenceStore.next(author), identity);
+    const second = await createSignedRecommendationObject('a'.repeat(64), 'recommend', await sequenceStore.next(author), identity);
+    const withdrawn = await createSignedRecommendationObject('a'.repeat(64), 'withdraw', await sequenceStore.next(author), identity);
+
+    expect(first.sequence).toBe(1);
+    expect(second.sequence).toBe(2);
+    expect(withdrawn.sequence).toBe(3);
+    expect((first.payload as Record<string, unknown>).action).toBe('recommend');
+    expect((withdrawn.payload as Record<string, unknown>).action).toBe('withdraw');
+    expect(isRecommendationObject(first)).toBe(true);
+    expect(await validateDistributedObject(first)).toBe(true);
+    expect(await validateDistributedObject(second)).toBe(true);
+    expect(await validateDistributedObject(withdrawn)).toBe(true);
+  });
+
+  it('reduces recommendations by author and post, keeping the highest sequence despite out-of-order arrival', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const privateKey = await exportPrivateKey(keys.privateKey);
+    const identity = createObjectIdentity({ id: 'reducer-author', publicKey: author, privateKey });
+    const older = await createSignedRecommendationObject('b'.repeat(64), 'recommend', 1, identity);
+    const withdrawn = await createSignedRecommendationObject('b'.repeat(64), 'withdraw', 3, identity);
+    const middle = await createSignedRecommendationObject('b'.repeat(64), 'recommend', 2, identity);
+    const index = new RecommendationIndex();
+
+    index.add(withdrawn);
+    index.add(older);
+    index.add(middle);
+
+    expect(index.getSummary('b'.repeat(64)).active_recommender_count).toBe(0);
+  });
+
+  it('computes followed recommenders and local-user recommendation state', async () => {
+    const makeIdentity = async (id: string) => {
+      const keys = await generateIdentityKeyPair();
+      return createObjectIdentity({ id, publicKey: await exportPublicKey(keys.publicKey), privateKey: await exportPrivateKey(keys.privateKey) });
+    };
+    const local = await makeIdentity('local');
+    const followed = await makeIdentity('followed');
+    const other = await makeIdentity('other');
+    const postId = 'c'.repeat(64);
+    const index = new RecommendationIndex();
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, local));
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, followed));
+    index.add(await createSignedRecommendationObject(postId, 'recommend', 1, other));
+
+    const summary = index.getSummary(postId, [followed.publicKey], local.publicKey);
+    expect(summary.active_recommender_count).toBe(3);
+    expect(summary.followed_recommender_count).toBe(1);
+    expect(summary.followed_recommenders).toEqual([followed.publicKey]);
+    expect(summary.recommended_by_me).toBe(true);
+  });
+
+  it('uses a 20 percent incremental recommendation weight per followed recommender', () => {
+    expect(recommendationWeight(1)).toBeCloseTo(0.2);
+    expect(recommendationWeight(2)).toBeCloseTo(0.36);
+    expect(recommendationWeight(3)).toBeCloseTo(0.488);
+  });
+
+  // Temporarily skipped while the home feed uses followed-author posts only.
+  it.skip('builds a deterministic recommendation pool while excluding followed, hidden, blocked, and withdrawn posts', () => {
+    const makePost = (id: string, author: string): LocalPostView => ({
+      object: {
+        object_id: id,
+        object_type: 'mycelium.post',
+        author,
+        created_at: '2026-09-17T00:00:00.000Z',
+        payload: { content: id },
+        signature: '',
+        replication_policy: {}
+      },
+      authorFingerprint: `${author}-fingerprint`
+    });
+    const summaries = new Map<string, RecommendationSummary>([
+      ['recommended', { post_id: 'recommended', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['followed-author', { post_id: 'followed-author', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['withdrawn', { post_id: 'withdrawn', active_recommenders: [], active_recommender_count: 0, followed_recommenders: [], followed_recommender_count: 0, recommended_by_me: false }],
+      ['hidden', { post_id: 'hidden', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }],
+      ['blocked', { post_id: 'blocked', active_recommenders: ['followed-a'], active_recommender_count: 1, followed_recommenders: ['followed-a'], followed_recommender_count: 1, recommended_by_me: false }]
+    ]);
+    const posts = [
+      makePost('recommended', 'unfollowed-a'),
+      makePost('followed-author', 'followed-author-key'),
+      makePost('withdrawn', 'unfollowed-b'),
+      { ...makePost('hidden', 'unfollowed-c'), hidden: true },
+      makePost('blocked', 'blocked-author')
+    ];
+    const options = {
+      capacity: 10,
+      localIdentity: 'local-identity',
+      feedDay: '2026-09-17',
+      followedAuthorKeys: new Set(['followed-author-key']),
+      isHidden: (post: LocalPostView) => post.hidden === true,
+      isBlocked: (post: LocalPostView) => post.object.author === 'blocked-author'
+    };
+    const getSummary = (postId: string) => summaries.get(postId)!;
+
+    const first = selectRecommendationCandidates(posts, getSummary, options);
+    const second = selectRecommendationCandidates(posts, getSummary, options);
+
+    expect(first.map((post) => post.object.object_id)).toEqual(['recommended']);
+    expect(second.map((post) => post.object.object_id)).toEqual(first.map((post) => post.object.object_id));
+  });
+
+  // Temporarily skipped while the home feed uses followed-author posts only.
+  it.skip('does not duplicate posts already selected from the followed-author pool', () => {
+    const post = {
+      object: { object_id: 'duplicate', object_type: 'mycelium.post', author: 'unfollowed', created_at: '2026-09-17T00:00:00.000Z', payload: {}, signature: '', replication_policy: {} },
+      authorFingerprint: 'unfollowed-fingerprint'
+    } as LocalPostView;
+    const summary: RecommendationSummary = { post_id: 'duplicate', active_recommenders: ['followed'], active_recommender_count: 1, followed_recommenders: ['followed'], followed_recommender_count: 1, recommended_by_me: false };
+    expect(selectRecommendationCandidates([post], () => summary, {
+      capacity: 1,
+      localIdentity: 'local',
+      feedDay: '2026-09-17',
+      followedAuthorKeys: new Set(),
+      alreadySelectedIds: new Set(['duplicate'])
+    })).toEqual([]);
+  });
+
+  it('selects every followed-author post in descending creation order', () => {
+    const makePost = (id: string, author: string, createdAt: string): LocalPostView => ({
+      object: { object_id: id, object_type: 'mycelium.post', author, created_at: createdAt, payload: {}, signature: '', replication_policy: {} },
+      authorFingerprint: `${author}-fingerprint`
+    });
+    const followed = makePost('followed', 'followed-key', '2026-09-17T00:01:00.000Z');
+    const olderFollowed = makePost('older-followed', 'followed-key', '2026-09-17T00:00:00.000Z');
+    const own = makePost('own', 'own-key', '2026-09-17T00:03:00.000Z');
+    const unfollowed = makePost('unfollowed', 'other-key', '2026-09-17T00:02:00.000Z');
+
+    expect(selectFollowedPosts([olderFollowed, unfollowed, followed, own], new Set(['followed-key', 'own-key'])).map((post) => post.object.object_id))
+      .toEqual(['own', 'followed', 'older-followed']);
+  });
+
+  it('keeps recursively nested replies to followed posts in the home selection', () => {
+    const root = createLocalPostView({ object_id: 'root', object_type: 'mycelium.post', author: 'followed-key', created_at: '2026-09-17T00:00:00.000Z', payload: { content: 'root' }, signature: '', replication_policy: {} } as PostObject, 'followed-fingerprint');
+    const reply = createLocalPostView({ object_id: 'reply', object_type: 'mycelium.post', author: 'other-key', created_at: '2026-09-17T00:01:00.000Z', payload: { content: 'reply', reply_to: 'root' }, signature: '', replication_policy: {} } as PostObject, 'other-fingerprint');
+    const nested = createLocalPostView({ object_id: 'nested', object_type: 'mycelium.post', author: 'third-key', created_at: '2026-09-17T00:02:00.000Z', payload: { content: 'nested', reply_to: 'reply' }, signature: '', replication_policy: {} } as PostObject, 'third-fingerprint');
+
+    expect(selectFollowedPosts([nested, reply, root], new Set(['followed-key'])).map((post) => post.object.object_id)).toEqual(['nested', 'reply', 'root']);
+  });
+
+  it('includes only the sender authored recommendations in a feed batch query', async () => {
+    const senderKeys = await generateIdentityKeyPair();
+    const sender = await exportPublicKey(senderKeys.publicKey);
+    const senderPrivateKey = await exportPrivateKey(senderKeys.privateKey);
+    const senderIdentity = createObjectIdentity({ id: 'sender', publicKey: sender, privateKey: senderPrivateKey });
+    const otherKeys = await generateIdentityKeyPair();
+    const other = await exportPublicKey(otherKeys.publicKey);
+    const otherPrivateKey = await exportPrivateKey(otherKeys.privateKey);
+    const otherIdentity = createObjectIdentity({ id: 'other', publicKey: other, privateKey: otherPrivateKey });
+    const store = createMemoryStore();
+    const post = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'post' }, replication_policy: {} }, otherIdentity);
+    const unrelatedPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'unrelated' }, replication_policy: {} }, otherIdentity);
+    const ownPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:02:00.000Z', payload: { content: 'own post' }, replication_policy: {} }, senderIdentity);
+    const ownRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, senderIdentity);
+    const otherRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, otherIdentity);
+    await Promise.all([post, unrelatedPost, ownPost, ownRecommendation, otherRecommendation].map((object) => store.put(object)));
+
+    const results = await queryFeedObjectsForPeer(store, sender, { limit: 20 });
+    expect(results).toContainEqual(post);
+    expect(results).toContainEqual(ownPost);
+    expect(results).toContainEqual(ownRecommendation);
+    expect(results).not.toContainEqual(unrelatedPost);
+    expect(results).not.toContainEqual(otherRecommendation);
+  });
+
+  it('stores a recommendation even when its referenced post is unknown', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.recommendation',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      sequence: 1,
+      payload: { post_id: 'f'.repeat(64), action: 'recommend', sequence: 1 },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [object]);
+    const store = createMemoryStore();
+
+    await expect(receiveObjectBatchPacket(packet, store)).resolves.toEqual([true]);
+    expect(await store.get(object.object_id)).toEqual(object);
+  });
+
+  it('hydrates every mycelium.post even when no metadata record exists', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'no metadata' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+
+    const views = await hydratePostViews(objectStore, metadataStore);
+    expect(views).toHaveLength(1);
+    expect(views[0]).toMatchObject({ source: 'peer', authorFingerprint: object.author });
+    expect(views[0].object.object_id).toBe(object.object_id);
+  });
+
+  it('normalizes hydrated authors through the supplied fingerprint resolver', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'normalize author' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+
+    const views = await hydratePostViews(objectStore, metadataStore, undefined, async () => 'resolved-fingerprint');
+    expect(views[0].authorFingerprint).toBe('resolved-fingerprint');
+  });
+
+  it('restores interaction metadata across fresh hydration', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'liked' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataRecords = [localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', { notInterested: true }))];
+    const metadataStore = { put: async () => undefined, get: async () => metadataRecords[0], delete: async () => undefined, query: async () => metadataRecords };
+
+    const hydrated = await hydratePostViews(objectStore, metadataStore);
+    expect(hydrated[0]).toMatchObject({ notInterested: true });
+  });
+
+  it('reports hydration failures instead of silently returning an unexplained empty result', async () => {
+    const error = new Error('metadata unavailable');
+    const objectStore = { put: async () => true, get: async () => null, delete: async () => undefined, query: async () => { throw error; } };
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+    const errors: unknown[] = [];
+
+    await expect(hydratePostViews(objectStore, metadataStore, (reported) => errors.push(reported))).resolves.toEqual([]);
+    expect(errors).toEqual([error]);
+  });
+
+  it('creates reply payloads with only the canonical parent reference', () => {
+    const payload = createReplyObjectPayload('parent-object-id');
+    expect(payload).toEqual({ reply_to: 'parent-object-id' });
+    expect(payload).not.toHaveProperty('post');
+  });
+
+  it('includes the target author peer ID in reply payloads for discovery tallying', () => {
+    expect(createReplyObjectPayload('parent-object-id', 'parent-peer-id')).toEqual({
+      reply_to: 'parent-object-id',
+      reply_to_author: 'parent-peer-id'
+    });
   });
 
   it('delivers a generic object through the transport adapter and stores it at the receiver', async () => {
@@ -162,6 +743,37 @@ describe('distributed object foundation', () => {
     expect(transport.connectedPeers()).toEqual(['peer-b']);
   });
 
+  it('round-trips canonical objects in a batch, deduplicating by object_id', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'batch object' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [object, object]);
+    const store = createMemoryStore();
+
+    const received = await receiveObjectBatchPacket(packet, store);
+    expect(received).toEqual([true, false]);
+    expect((await store.query()).map((item) => item.object_id)).toEqual([object.object_id]);
+  });
+
+  it('rejects a tampered object in a canonical object batch', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'tamper target' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [{ ...object, payload: { content: 'tampered' } }]);
+    const store = createMemoryStore();
+
+    await expect(receiveObjectBatchPacket(packet, store)).resolves.toEqual([false]);
+    await expect(store.query()).resolves.toEqual([]);
+  });
+
   it('rejects malformed and tampered object packets without storing them', async () => {
     const object = await createFixtureObject({
       object_type: 'transport-test',
@@ -178,6 +790,82 @@ describe('distributed object foundation', () => {
     expect(await receiveObjectPacket({ ...packet, payload: { object: { ...object, signature: 'invalid' } } }, store)).toBe(false);
     expect(await receiveObjectPacket({ ...packet, payload: { object: { ...object, object_id: '0'.repeat(64) } } }, store)).toBe(false);
     expect(await store.get(object.object_id)).toBeNull();
+  });
+
+  it('receiveObjectPacket returns true for a newly stored object', async () => {
+    const object = await createFixtureObject({
+      object_type: 'receive-result',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'receive' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectStorePacket('peer-a', 'peer-b', object);
+    const store = new IndexedDbObjectStore();
+
+    expect(await receiveObjectPacket(packet, store)).toBe(true);
+  });
+
+  it('receiveObjectPacket returns false for an already-stored object', async () => {
+    const object = await createFixtureObject({
+      object_type: 'receive-duplicate',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'receive' },
+      replication_policy: {}
+    });
+    const packet = await buildObjectStorePacket('peer-a', 'peer-b', object);
+    const store = new IndexedDbObjectStore();
+    await store.put(object);
+
+    expect(await receiveObjectPacket(packet, store)).toBe(false);
+  });
+
+  it('receiveObjectPacket returns false and does not store an invalid object', async () => {
+    const object = await createFixtureObject({
+      object_type: 'receive-invalid',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'invalid' },
+      replication_policy: {}
+    });
+    const invalidObject = { ...object, signature: 'invalid' };
+    const packet = await buildObjectStorePacket('peer-a', 'peer-b', invalidObject);
+    const store = new IndexedDbObjectStore();
+
+    expect(await receiveObjectPacket(packet, store)).toBe(false);
+    expect(await store.get(object.object_id)).toBeNull();
+  });
+
+  it('receiveObjectBatchPacket returns one new-storage flag per input object', async () => {
+    const newObject = await createFixtureObject({
+      object_type: 'receive-batch-result',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'new' },
+      replication_policy: {}
+    });
+    const existingObject = await createFixtureObject({
+      object_type: 'receive-batch-result',
+      author: '',
+      created_at: '2026-08-25T00:01:00.000Z',
+      payload: { value: 'existing' },
+      replication_policy: {}
+    });
+    const invalidObject = { ...await createFixtureObject({
+      object_type: 'receive-batch-result',
+      author: '',
+      created_at: '2026-08-25T00:02:00.000Z',
+      payload: { value: 'invalid' },
+      replication_policy: {}
+    }), signature: 'invalid' };
+    const packet = await buildObjectBatchPacket('peer-a', 'peer-b', [newObject, existingObject, invalidObject]);
+    const store = new IndexedDbObjectStore();
+    await store.put(existingObject);
+
+    expect(await receiveObjectBatchPacket(packet, store)).toEqual([true, false, false]);
+    expect(await store.get(newObject.object_id)).toEqual(newObject);
+    expect(await store.get(invalidObject.object_id)).toBeNull();
   });
 
   it('finds an object on a connected peer, validates it, and stores it locally', async () => {
@@ -550,6 +1238,230 @@ describe('distributed object foundation', () => {
     expect(getFindObjectIds(legacy)).toEqual([objectIds[0]]);
   });
 
+  it('supports time-range author queries across multiple peers while preserving existing FIND(object_id) behavior', async () => {
+    const peerBKeys = await generateIdentityKeyPair();
+    const peerBAuthor = await exportPublicKey(peerBKeys.publicKey);
+    const peerBIdentity = createObjectIdentity({ id: 'peer-b', publicKey: peerBAuthor, privateKey: await exportPrivateKey(peerBKeys.privateKey) });
+    const peerXKeys = await generateIdentityKeyPair();
+    const peerXAuthor = await exportPublicKey(peerXKeys.publicKey);
+    const peerXIdentity = createObjectIdentity({ id: 'peer-x', publicKey: peerXAuthor, privateKey: await exportPrivateKey(peerXKeys.privateKey) });
+
+    const inRangePeerA = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:00:00.000Z', payload: { pair: 'a' }, replication_policy: {} }, peerBIdentity);
+    const inRangePeerC = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:05:00.000Z', payload: { pair: 'c' }, replication_policy: {} }, peerBIdentity);
+    const outOfRange = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:20:00.000Z', payload: { pair: 'out' }, replication_policy: {} }, peerBIdentity);
+    const otherAuthor = await createSignedObject({ object_type: 'time-range-query', created_at: '2026-08-25T00:03:00.000Z', payload: { pair: 'other' }, replication_policy: {} }, peerXIdentity);
+
+    const peerAStore = createMemoryStore();
+    const peerCStore = createMemoryStore();
+    const queryStore = createMemoryStore();
+    await peerAStore.put(inRangePeerA);
+    await peerAStore.put(outOfRange);
+    await peerCStore.put(inRangePeerC);
+    await peerCStore.put(outOfRange);
+    await queryStore.put(otherAuthor);
+
+    const queryPacket = await buildTimeRangeFindPacket(
+      'peer-a',
+      'peer-c',
+      peerBAuthor,
+      '2026-08-25T00:00:00.000Z',
+      '2026-08-25T00:10:00.000Z',
+      undefined,
+      'time-range-request',
+      1,
+      'peer-a',
+      new Date(Date.now() + 5000).toISOString(),
+      [inRangePeerA.object_id, inRangePeerC.object_id]
+    );
+
+    const responseObjects = await validateFindResponseObjects(await buildFindResponseObjectsPacket(
+      'peer-c',
+      'peer-a',
+      'time-range-request',
+      [inRangePeerA, inRangePeerC, outOfRange],
+      undefined,
+      'peer-a'
+    ), 'time-range-request', new Set([inRangePeerA.object_id, inRangePeerC.object_id]));
+
+    expect(responseObjects.map((object) => object.object_id)).toEqual([inRangePeerA.object_id, inRangePeerC.object_id]);
+
+    const aggregate = new FindAggregation([inRangePeerA.object_id, inRangePeerC.object_id], Date.now() + 5000, async () => undefined);
+    aggregate.addChild('peer-a');
+    aggregate.addChild('peer-c');
+    await aggregate.addChildObjects('peer-a', [inRangePeerA]);
+    await aggregate.addChildObjects('peer-c', [inRangePeerC, inRangePeerC]);
+    expect(aggregate.aggregateSize()).toBe(2);
+    expect(await filterObjectsByFindQuery(peerAStore, { author: peerBAuthor, created_after: '2026-08-25T00:00:00.000Z', created_before: '2026-08-25T00:10:00.000Z' })).toEqual([inRangePeerA]);
+    expect(await filterObjectsByFindQuery(peerCStore, { author: peerBAuthor, created_after: '2026-08-25T00:00:00.000Z', created_before: '2026-08-25T00:10:00.000Z' })).toEqual([inRangePeerC]);
+    expect(await filterObjectsByFindQuery(peerCStore, { author: peerBAuthor, created_after: '2026-08-25T00:05:00.000Z', created_before: '2026-08-25T00:05:00.000Z' })).toEqual([inRangePeerC]);
+
+    let packetHandler: ((peerId: string, packet: ObjectPacket) => void) | null = null;
+    const transport = {
+      connectedPeers: () => ['peer-c'],
+      onPacket: (handler: (peerId: string, packet: ObjectPacket) => void) => {
+        packetHandler = handler;
+        return () => { packetHandler = null; };
+      },
+      send: async (_peerId: string, packet: ObjectPacket) => {
+        if (packet.type === 'FIND' && packetHandler) {
+          const response = await buildFindResponsePacket('peer-c', 'peer-a', packet.payload.object_id, packet.payload.requestId, inRangePeerC, undefined, 'peer-a');
+          packetHandler('peer-c', response);
+        }
+      }
+    };
+
+    await expect(findObject('peer-a', 'peer-c', inRangePeerC.object_id, transport, peerAStore)).resolves.toEqual(inRangePeerC);
+    expect(queryPacket.payload.author).toBe(peerBAuthor);
+    expect(queryPacket.payload.created_after).toBe('2026-08-25T00:00:00.000Z');
+    expect(queryPacket.payload.created_before).toBe('2026-08-25T00:10:00.000Z');
+    expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
+  });
+
+  it('queryFeedObjectsForPeer defaults to 500 results when no limit is supplied', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const store = createMemoryStore();
+    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
+      object_type: 'mycelium.post',
+      author,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      payload: { content: `post-${index}` },
+      replication_policy: {}
+    })));
+    await Promise.all(posts.map((post) => store.put(post)));
+
+    const results = await queryFeedObjectsForPeer(store, author);
+    expect(results).toHaveLength(500);
+    expect(results[0].created_at).toBe(posts[599].created_at);
+  });
+
+  it('queryFeedObjectsForPeer clamps a supplied limit above 500', async () => {
+    const keys = await generateIdentityKeyPair();
+    const author = await exportPublicKey(keys.publicKey);
+    const store = createMemoryStore();
+    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
+      object_type: 'mycelium.post',
+      author,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      payload: { content: `post-${index}` },
+      replication_policy: {}
+    })));
+    await Promise.all(posts.map((post) => store.put(post)));
+
+    const results = await queryFeedObjectsForPeer(store, author, { limit: 900 });
+    expect(results).toHaveLength(500);
+  });
+
+  it('answers a FIND with the maximum number of object IDs', async () => {
+    const store = createMemoryStore();
+    const ids = Array.from({ length: MAX_FIND_REQUEST_OBJECT_IDS }, (_, index) => {
+      const objectId = `${index.toString(16).padStart(64, '0')}`;
+      return objectId;
+    });
+    const packet = await buildFindPacket('peer-a', 'peer-b', ids, undefined, 'max-id-request', 1, 'peer-a');
+    const sent: FindResponsePacket[] = [];
+    const result = await respondToFindPacket(packet, store, async (response) => { sent.push(response); }, 'peer-b');
+
+    expect(result).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].payload.objects).toEqual([]);
+  });
+
+  it('rejects a FIND request whose object ID list exceeds the maximum and returns nothing', async () => {
+    const store = createMemoryStore();
+    const ids = Array.from({ length: MAX_FIND_REQUEST_OBJECT_IDS + 1 }, (_, index) => `${index.toString(16).padStart(64, '0')}`);
+    const packet = await buildPacket('peer-a', 'peer-b', 'FIND', {
+      requested_objects: ids,
+      object_id: ids[0],
+      requestId: 'oversized-id-request',
+      ttl: 1,
+      expiresAt: new Date(Date.now() + 5000).toISOString(),
+      origin: 'peer-a'
+    });
+    const sent: any[] = [];
+
+    await expect(respondToFindPacket(packet, store, async (response) => { sent.push(response); }, 'peer-b')).resolves.toBe(false);
+    expect(sent).toEqual([]);
+  });
+
+  describe('merged FIND query limits', () => {
+    async function aggregateFromTwoChildren(
+      childObjects: [DistributedObject[], DistributedObject[]],
+      query: { limit?: number; order?: 'created_at_desc' }
+    ): Promise<DistributedObject[]> {
+      const received: DistributedObject[][] = [];
+      const requestedIds = childObjects.flat().map((object) => object.object_id);
+      const aggregation = new FindAggregation(requestedIds, Date.now() + 5000, async (objects) => {
+        received.push(applyFindQueryLimit(objects, query));
+      });
+      aggregation.addChild('peer-a');
+      aggregation.addChild('peer-b');
+      await aggregation.addChildObjects('peer-a', childObjects[0]);
+      await aggregation.addChildObjects('peer-b', childObjects[1]);
+      return received[0] ?? [];
+    }
+
+    async function createOrderedObjects(count: number): Promise<DistributedObject[]> {
+      return Promise.all(Array.from({ length: count }, (_, index) => createFixtureObject({
+        object_type: 'merged-query-limit',
+        author: '',
+        created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+        payload: { index },
+        replication_policy: {}
+      })));
+    }
+
+    it('truncates the merged set to the query limit', async () => {
+      const objects = await createOrderedObjects(10);
+      const result = await aggregateFromTwoChildren([objects.slice(0, 5), objects.slice(5)], { limit: 7 });
+
+      expect(result).toHaveLength(7);
+    });
+
+    it('preserves created_at_desc order when truncating merged results', async () => {
+      const objects = await createOrderedObjects(10);
+      const result = await aggregateFromTwoChildren([objects.slice(0, 5), objects.slice(5)], { limit: 7, order: 'created_at_desc' });
+      const newestSeven = [...objects]
+        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+        .slice(0, 7);
+
+      expect(result.map((object) => object.object_id)).toEqual(newestSeven.map((object) => object.object_id));
+    });
+
+    it('returns every merged result when the result count is within the limit', async () => {
+      const objects = await createOrderedObjects(6);
+      const result = await aggregateFromTwoChildren([objects.slice(0, 3), objects.slice(3)], { limit: 10 });
+
+      expect(result).toHaveLength(6);
+      expect(new Set(result.map((object) => object.object_id))).toEqual(new Set(objects.map((object) => object.object_id)));
+    });
+
+    it('returns all merged results when no limit is set', async () => {
+      const objects = await createOrderedObjects(10);
+      const result = await aggregateFromTwoChildren([objects.slice(0, 5), objects.slice(5)], {});
+
+      expect(result).toHaveLength(10);
+      expect(new Set(result.map((object) => object.object_id))).toEqual(new Set(objects.map((object) => object.object_id)));
+    });
+  });
+
+  it('forwards a limit through buildTimeRangeFindPacket', async () => {
+    const packet = await buildTimeRangeFindPacket(
+      'peer-a', 'peer-b', 'author-key', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z',
+      undefined, 'time-range-limit', 1, 'peer-a', new Date(Date.now() + 5000).toISOString(), [], 5
+    );
+
+    expect(packet.payload.limit).toBe(5);
+  });
+
+  it('omits the limit in buildTimeRangeFindPacket when no limit is provided', async () => {
+    const packet = await buildTimeRangeFindPacket(
+      'peer-a', 'peer-b', 'author-key', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z'
+    );
+
+    expect(packet.payload.limit).toBeUndefined();
+  });
+
   it('aggregates local and child results, deduplicating strictly by object ID', async () => {
     const first = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 1 }, replication_policy: {} });
     const second = await createFixtureObject({ object_type: 'aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 2 }, replication_policy: {} });
@@ -638,6 +1550,14 @@ describe('distributed object foundation', () => {
     expect(sent[0].type === 'FIND_RESPONSE' && sent[0].payload.objects).toEqual([object]);
   });
 
+  it('keeps relayed FIND routes alive while the request is still aggregating child responses', () => {
+    const aggregation = new FindAggregation(['a'.repeat(64), 'b'.repeat(64)], Date.now() + 5000, async () => undefined);
+    aggregation.addChild('peer-c');
+
+    expect(shouldRetainFindRequestRoute('peer-c', { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 }, { aggregation })).toBe(true);
+    expect(shouldRetainFindRequestRoute('peer-a', { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 }, undefined)).toBe(false);
+  });
+
   it('returns partial results when four of five requested objects exist', async () => {
     const objects = await Promise.all([1, 2, 3, 4].map((value) => createFixtureObject({ object_type: 'partial-aggregate', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value }, replication_policy: {} })));
     const missingId = 'f'.repeat(64);
@@ -653,5 +1573,231 @@ describe('distributed object foundation', () => {
     expect(returned).toHaveLength(1);
     expect(returned[0].objects).toHaveLength(4);
     expect(returned[0].reason).toBe('all-children-responded-or-failed');
+  });
+
+  describe('receive and replicate', () => {
+    function createTransport(peerIds: string[]) {
+      const sent: Array<{ peerId: string; packet: ObjectPacket }> = [];
+      const transport: ObjectTransport = {
+        connectedPeers: () => peerIds,
+        send: async (peerId, packet) => { sent.push({ peerId, packet }); },
+        onPacket: () => () => {}
+      };
+      return { transport, sent };
+    }
+
+    it('stores and replicates a newly received object', async () => {
+      const object = await createFixtureObject({ object_type: 'receive-replicate-new', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: {}, replication_policy: {} });
+      const store = createMemoryStore();
+      const { transport, sent } = createTransport(['peer-a', 'peer-b', 'peer-c']);
+
+      await expect(receiveAndReplicate(object, 'peer-a', store, transport, 'local')).resolves.toBe(true);
+      expect(await store.get(object.object_id)).toEqual(object);
+      expect(sent.map(({ peerId }) => peerId)).toEqual(['peer-b', 'peer-c']);
+      expect(sent.every(({ packet }) => packet.type === 'OBJECT_STORE' && packet.payload.object.object_id === object.object_id)).toBe(true);
+    });
+
+    it('does not replicate an object that is already stored', async () => {
+      const object = await createFixtureObject({ object_type: 'receive-replicate-existing', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: {}, replication_policy: {} });
+      const store = createMemoryStore();
+      await store.put(object);
+      const { transport, sent } = createTransport(['peer-a', 'peer-b']);
+
+      await expect(receiveAndReplicate(object, 'peer-a', store, transport, 'local')).resolves.toBe(false);
+      expect(sent).toEqual([]);
+    });
+
+    it('does not send a received object back to its source peer', async () => {
+      const object = await createFixtureObject({ object_type: 'receive-replicate-source', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: {}, replication_policy: {} });
+      const store = createMemoryStore();
+      const { transport, sent } = createTransport(['peer-a', 'peer-b']);
+
+      await receiveAndReplicate(object, 'peer-a', store, transport, 'local');
+
+      expect(sent.map(({ peerId }) => peerId)).toEqual(['peer-b']);
+      expect(sent.some(({ peerId }) => peerId === 'peer-a')).toBe(false);
+    });
+
+    it('rejects invalid objects without storing or replicating them', async () => {
+      const validObject = await createFixtureObject({ object_type: 'receive-replicate-invalid', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: {}, replication_policy: {} });
+      const invalidObject = { ...validObject, signature: 'invalid' };
+      const store = createMemoryStore();
+      const { transport, sent } = createTransport(['peer-a', 'peer-b']);
+
+      await expect(receiveAndReplicate(invalidObject, 'peer-a', store, transport, 'local')).resolves.toBe(false);
+      expect(await store.get(validObject.object_id)).toBeNull();
+      expect(sent).toEqual([]);
+    });
+
+    it('stores successfully when no other peers are connected', async () => {
+      const object = await createFixtureObject({ object_type: 'receive-replicate-alone', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: {}, replication_policy: {} });
+      const store = createMemoryStore();
+      const { transport, sent } = createTransport([]);
+
+      await expect(receiveAndReplicate(object, 'peer-a', store, transport, 'local')).resolves.toBe(true);
+      expect(await store.get(object.object_id)).toEqual(object);
+      expect(sent).toEqual([]);
+    });
+
+    it('replicates only newly stored valid objects from a batch', async () => {
+      const newObject = await createFixtureObject({ object_type: 'receive-replicate-batch', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { value: 'new' }, replication_policy: {} });
+      const existingObject = await createFixtureObject({ object_type: 'receive-replicate-batch', author: '', created_at: '2026-08-25T00:01:00.000Z', payload: { value: 'existing' }, replication_policy: {} });
+      const invalidObject = { ...await createFixtureObject({ object_type: 'receive-replicate-batch', author: '', created_at: '2026-08-25T00:02:00.000Z', payload: { value: 'invalid' }, replication_policy: {} }), signature: 'invalid' };
+      const store = createMemoryStore();
+      await store.put(existingObject);
+      const { transport, sent } = createTransport(['peer-a', 'peer-b']);
+
+      await expect(receiveBatchAndReplicate([newObject, existingObject, invalidObject], 'peer-a', store, transport, 'local'))
+        .resolves.toEqual([true, false, false]);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.peerId).toBe('peer-b');
+      expect(sent[0]?.packet).toMatchObject({ type: 'OBJECT_STORE', payload: { object: newObject } });
+    });
+  });
+
+  describe('Phase 8: replication budgets', () => {
+    function createFakeTransport(peerIds: string[]) {
+      const sent: Array<{ peerId: string; object: DistributedObject }> = [];
+      const stores = new Map<string, ObjectStore>(peerIds.map((peerId) => [peerId, createMemoryStore()]));
+      const transport = {
+        connectedPeers: () => peerIds,
+        onPacket: () => () => {},
+        send: async (peerId: string, packet: ObjectPacket) => {
+          if (packet.type !== 'OBJECT_STORE') return;
+          const peerStore = stores.get(peerId);
+          if (!peerStore) throw new Error(`unknown peer: ${peerId}`);
+          await receiveObjectPacket(packet, peerStore);
+          sent.push({ peerId, object: packet.payload.object });
+        }
+      };
+      return { transport, stores, sent };
+    }
+
+    it('uses the object\'s explicit replication_budget as a target replica count, not a hop count', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'budget-2' },
+        replication_policy: { replication_budget: 2 }
+      });
+      const { transport, stores, sent } = createFakeTransport(['peer-b', 'peer-c', 'peer-d']);
+      const logs: string[] = [];
+
+      const result = await replicateObject('peer-a', object, transport, undefined, new Set(), (message) => logs.push(message));
+
+      expect(getReplicationBudget(object)).toBe(2);
+      expect(result.budget).toBe(2);
+      // Bounded: exactly 2 peers were targeted even though 3 peers were connected (budget is a replica target, not a hop count).
+      expect(result.stored).toHaveLength(2);
+      expect(result.targeted).toEqual(result.stored);
+      expect(await stores.get('peer-b')!.get(object.object_id)).toEqual(object);
+      expect(await stores.get('peer-c')!.get(object.object_id)).toEqual(object);
+      expect(await stores.get('peer-d')!.get(object.object_id)).toBeNull();
+      expect(sent).toHaveLength(2);
+
+      expect(logs.some((line) => line.includes(`REPLICATION considering object_id=${object.object_id} budget=2`))).toBe(true);
+      expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-b`))).toBe(true);
+      expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-c`))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION budget reached') && line.includes('stopping'))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION complete') && line.includes('newReplicas=2'))).toBe(true);
+    });
+
+    it('falls back to the default replication budget for objects without an explicit policy value', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication-default',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'no-explicit-budget' },
+        replication_policy: {}
+      });
+      expect(getReplicationBudget(object)).toBe(DEFAULT_REPLICATION_BUDGET);
+
+      const { transport, sent } = createFakeTransport(['peer-b']);
+      const logs: string[] = [];
+      const result = await replicateObject('peer-a', object, transport, undefined, new Set(), (message) => logs.push(message));
+
+      expect(result.budget).toBe(DEFAULT_REPLICATION_BUDGET);
+      expect(result.stored).toEqual(['peer-b']);
+      expect(sent).toHaveLength(1);
+      expect(logs.some((line) => line.includes('(defaulted)'))).toBe(true);
+    });
+
+    it('does not re-store a duplicate on a peer that already holds the object and stops once the target is met', async () => {
+      const object = await createFixtureObject({
+        object_type: 'phase8-replication-dedup',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'dedup' },
+        replication_policy: { replication_budget: 1 }
+      });
+      const { transport, stores, sent } = createFakeTransport(['peer-b', 'peer-c']);
+
+      const first = await replicateObject('peer-a', object, transport);
+      expect(first.stored).toEqual(['peer-b']);
+      expect(sent).toHaveLength(1);
+
+      // Re-running with local knowledge that peer-b already holds a replica must not duplicate storage there,
+      // and must recognize the budget is already satisfied without contacting any other peer.
+      const logs: string[] = [];
+      const second = await replicateObject('peer-a', object, transport, undefined, new Set(first.stored), (message) => logs.push(message));
+      expect(second.stored).toHaveLength(0);
+      expect(second.targeted).toHaveLength(0);
+      expect(sent).toHaveLength(1);
+      expect(await stores.get('peer-c')!.get(object.object_id)).toBeNull();
+      expect(logs.some((line) => line.includes('already satisfied') && line.includes('stopping'))).toBe(true);
+
+      // A single peer's local store never ends up with more than one copy of the same object_id.
+      const peerBObjects = (await stores.get('peer-b')!.query()).filter((stored) => stored.object_id === object.object_id);
+      expect(peerBObjects).toHaveLength(1);
+    });
+
+    it('sends one reply object directly to a connected author peer', async () => {
+      const replyObject = await createFixtureObject({
+        object_type: 'phase8-reply',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'reply' },
+        replication_policy: {}
+      });
+      const sent: ObjectPacket[] = [];
+      const transport = {
+        connectedPeers: () => ['author-peer'],
+        onPacket: () => () => {},
+        send: async (peerId: string, packet: ObjectPacket) => {
+          sent.push(packet);
+          expect(peerId).toBe('author-peer');
+        }
+      };
+      const trace = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+      const result = await sendReplyToAuthor('reply-peer', replyObject, transport, 'author-peer');
+
+      expect(result).toEqual({ objectId: replyObject.object_id, authorPeerId: 'author-peer', reachable: true, sent: true });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ type: 'OBJECT_STORE', sender: 'reply-peer', recipient: 'author-peer', payload: { object: replyObject } });
+      expect(trace).toHaveBeenCalledWith(`REPLY author connected - sent object_id=${replyObject.object_id} peer=author-peer`);
+      trace.mockRestore();
+    });
+
+    it('reports an unavailable author without sending or retrying', async () => {
+      const replyObject = await createFixtureObject({
+        object_type: 'phase8-reply-unreachable',
+        author: '',
+        created_at: '2026-08-25T00:00:00.000Z',
+        payload: { value: 'reply' },
+        replication_policy: {}
+      });
+      const send = vi.fn(async () => undefined);
+      const transport = { connectedPeers: () => ['other-peer'], onPacket: () => () => {}, send };
+      const trace = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+      const result = await sendReplyToAuthor('reply-peer', replyObject, transport, 'author-peer');
+
+      expect(result).toEqual({ objectId: replyObject.object_id, authorPeerId: 'author-peer', reachable: false, sent: false });
+      expect(send).not.toHaveBeenCalled();
+      expect(trace).toHaveBeenCalledWith(`REPLY author not connected - skipped object_id=${replyObject.object_id} peer=author-peer`);
+      trace.mockRestore();
+    });
   });
 });
