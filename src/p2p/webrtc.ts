@@ -440,7 +440,15 @@ export class PeerConnectionManager {
   }
 
   public sendObjectPacket(packet: ObjectPacket) {
-    this.sendData(packet);
+    const channel = this.dataChannel;
+    if (!channel || channel.readyState !== 'open') {
+      throw new Error('Object packet send failed');
+    }
+    try {
+      channel.send(JSON.stringify(packet));
+    } catch {
+      throw new Error('Object packet send failed');
+    }
   }
 
   private sendLegacyPayload(type: string, payload: Record<string, unknown>) {

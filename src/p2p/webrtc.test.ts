@@ -486,8 +486,21 @@ describe('PeerConnectionManager lifecycle', () => {
     } as DistributedObject;
     manager.sendObject(object);
     manager.sendObjectsBatch([object]);
+    const directObjectPacket = {
+      protocol: 'mycelium',
+      version: 1,
+      id: 'direct-object-packet',
+      type: 'OBJECT_STORE',
+      timestamp: '2026-10-05T12:00:00.000Z',
+      sender: 'peer-a',
+      recipient: 'peer-b',
+      payload: { object },
+      signature: 'packet-signature'
+    } as ObjectPacket;
+    manager.sendObjectPacket(directObjectPacket);
     await Promise.resolve();
 
+    expect(channel.send).toHaveBeenCalledWith(JSON.stringify(directObjectPacket));
     const sentTypes = channel.send.mock.calls.map(([payload]) => JSON.parse(payload).type);
     expect(sentTypes).toContain('OBJECT_STORE');
     expect(sentTypes).toContain('OBJECT_BATCH');
@@ -499,6 +512,25 @@ describe('PeerConnectionManager lifecycle', () => {
     channel.onmessage?.({ data: JSON.stringify({ type: 'request-posts', since: null }) } as MessageEvent);
     expect(receivedObjects).toEqual([]);
     expect(receivedBatches).toEqual([]);
+  });
+
+  it('rejects object packet sends when the channel is not open or send throws', async () => {
+    const manager = createManager();
+    const peerConnection = FakePeerConnection.instances[0];
+    const objectPacket = { type: 'OBJECT_STORE' } as ObjectPacket;
+
+    await expect(async () => manager.sendObjectPacket(objectPacket)).rejects.toThrow('Object packet send failed');
+
+    await manager.createOffer('peer-b', fakeSocket());
+    await manager.handleSignal(signal('answer'), fakeSocket());
+    const channel = peerConnection.lastDataChannel!;
+    channel.readyState = 'open';
+    channel.onopen?.();
+    channel.send.mockImplementationOnce(() => {
+      throw new Error('channel failure');
+    });
+
+    expect(() => manager.sendObjectPacket(objectPacket)).toThrow('Object packet send failed');
   });
 
   it('keeps an answerer waiting for ondatachannel after signalling returns to stable', async () => {

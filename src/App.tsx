@@ -7,6 +7,8 @@ import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import { wrapFindTransport } from './object-layer/find-transport-adapter';
 import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
+import { createDmService } from './object-layer/dm-service';
+import { createOutboxService } from './object-layer/outbox-service';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding } from './crypto/dm-crypto';
 import { appendBoundedLog, formatMessageLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
@@ -25,7 +27,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { acknowledgeMessage, registerMessageAckTimeout as scheduleMessageAckTimeout } from './services/message-ack';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
@@ -202,6 +204,8 @@ function App() {
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
   const dmEventsRef = useRef(createDmEvents());
   const inboxServiceRef = useRef<ReturnType<typeof createInboxService> | null>(null);
+  const dmServiceRef = useRef<ReturnType<typeof createDmService> | null>(null);
+  const dmOutboxIntervalRef = useRef<number | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
   const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
@@ -318,12 +322,57 @@ function App() {
       saveCursor: saveInboxCursor,
       events: dmEventsRef.current
     });
+    const outboxStore = new IndexedDbOutboxStore();
+    const outboxService = createOutboxService({
+      outbox: outboxStore,
+      objectStore: store,
+      sendDirect: async (peerId, object) => {
+        const packet = await buildObjectStorePacket(identity.id, peerId, object, signPacket);
+        await objectTransport.send(peerId, packet);
+        return true;
+      },
+      replicate: async (object, alreadyReplicatedTo) => {
+        const result = await replicateObject(
+          identity.id,
+          object,
+          objectTransport,
+          signPacket,
+          alreadyReplicatedTo
+        );
+        return [...result.stored];
+      },
+      resolveRecipientPeerId: (recipientPublicKey) => (
+        contactsRef.current.find((contact) => contact.publicKey === recipientPublicKey)?.fingerprint ?? null
+      ),
+      connectedPeers: () => objectTransport.connectedPeers()
+    });
+    const dmService = createDmService({
+      getIdentity: () => ({
+        id: identity.id,
+        publicKey: identity.publicKey,
+        privateKey: identity.privateKey,
+        encryptionPublicKey: identity.encryptionPublicKey,
+        encryptionPrivateKey: identity.encryptionPrivateKey
+      }),
+      getContact: (publicKey) => contactsRef.current.find((contact) => contact.publicKey === publicKey) ?? null,
+      store,
+      outbox: outboxService,
+      connectedPeers: () => objectTransport.connectedPeers()
+    });
     inboxServiceRef.current = service;
+    dmServiceRef.current = dmService;
     service.start();
+    const outboxInterval = window.setInterval(() => {
+      void dmService.flushOutbox();
+    }, 30_000);
+    dmOutboxIntervalRef.current = outboxInterval;
 
     return () => {
       service.stop();
       if (inboxServiceRef.current === service) inboxServiceRef.current = null;
+      window.clearInterval(outboxInterval);
+      if (dmOutboxIntervalRef.current === outboxInterval) dmOutboxIntervalRef.current = null;
+      if (dmServiceRef.current === dmService) dmServiceRef.current = null;
     };
   }, [identity]);
 
@@ -1133,6 +1182,7 @@ function App() {
         setActivePeerId(peer);
         updateContactState(peer, { connected: true });
         inboxServiceRef.current?.notifyPeerConnected();
+        void dmServiceRef.current?.flushOutbox();
         addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
         if (manager) {
@@ -2264,6 +2314,11 @@ function App() {
     localStorage.removeItem('myceliumHeaderCollapsed');
 
     setIdentity(null);
+    dmServiceRef.current = null;
+    if (dmOutboxIntervalRef.current !== null) {
+      window.clearInterval(dmOutboxIntervalRef.current);
+      dmOutboxIntervalRef.current = null;
+    }
     setContacts([]);
     setPostViews([]);
     setDiscoveryPosts([]);

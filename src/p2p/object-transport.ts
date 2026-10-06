@@ -19,9 +19,13 @@ export class PeerConnectionObjectTransport implements ObjectTransport {
   async send(peerId: string, packet: ObjectPacket): Promise<void> {
     const manager = this.getManagers()[peerId];
     if (!manager || !manager.isDataChannelOpen()) {
-      throw new Error(`Object transport peer is not connected: ${peerId}`);
+      throw new Error('Object packet send failed');
     }
-    manager.sendObjectPacket(packet);
+    try {
+      manager.sendObjectPacket(packet);
+    } catch {
+      throw new Error('Object packet send failed');
+    }
   }
 
   onPacket(handler: (peerId: string, packet: ObjectPacket) => void): () => void {

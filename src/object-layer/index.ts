@@ -6,3 +6,6 @@ export * from './local-store';
 export * from './post-state';
 export * from './recommendations';
 export * from './transport';
+export * from './dm-send';
+export * from './dm-service';
+export * from './outbox-service';

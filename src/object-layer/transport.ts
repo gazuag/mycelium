@@ -594,7 +594,11 @@ export async function sendReplyToAuthor(
   }
 
   const packet = await buildObjectStorePacket(sender, authorPeerId, replyObject, signer);
-  await transport.send(authorPeerId, packet);
+  try {
+    await transport.send(authorPeerId, packet);
+  } catch {
+    return result;
+  }
   console.debug(`REPLY author connected - sent object_id=${replyObject.object_id} peer=${authorPeerId}`);
   return { ...result, sent: true };
 }

@@ -6,6 +6,7 @@ import type { DistributedObject, ObjectStore } from './types';
 const DEFAULT_MAX_PER_FLUSH = 50;
 const DEFAULT_MAX_ATTEMPTS = 200;
 const DEFAULT_OUTBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_RECENT_REPLICATION_RESULTS = 500;
 
 export interface OutboxServiceConfig {
   readonly maxPerFlush?: number;
@@ -39,6 +40,8 @@ export function createOutboxService({
 }: CreateOutboxServiceOptions): {
   enqueue(object: DistributedObject): Promise<void>;
   flush(): Promise<OutboxFlushResult>;
+  getEntry(objectId: string): Promise<OutboxEntry | null>;
+  getReplicatedTo(objectId: string): readonly string[];
 } {
   const maxPerFlush = config.maxPerFlush ?? DEFAULT_MAX_PER_FLUSH;
   let inFlight: Promise<OutboxFlushResult> | null = null;
@@ -56,6 +59,9 @@ export function createOutboxService({
       attempts: 0,
       last_attempt_at: null
     });
+    if (!lastReplicatedTo.has(object.object_id)) {
+      lastReplicatedTo.set(object.object_id, []);
+    }
   };
 
   const performFlush = async (): Promise<OutboxFlushResult> => {
@@ -97,6 +103,12 @@ export function createOutboxService({
         try {
           const replicatedPeers = await replicate(object, new Set(entry.replicated_to));
           entry = { ...entry, replicated_to: [...new Set([...entry.replicated_to, ...replicatedPeers])] };
+          lastReplicatedTo.delete(entry.object_id);
+          lastReplicatedTo.set(entry.object_id, entry.replicated_to);
+          if (lastReplicatedTo.size > MAX_RECENT_REPLICATION_RESULTS) {
+            const oldestObjectId = lastReplicatedTo.keys().next().value;
+            if (oldestObjectId !== undefined) lastReplicatedTo.delete(oldestObjectId);
+          }
         } catch {
           // Keep any successful direct-send state and retry this entry on a later flush.
         }
@@ -133,6 +145,12 @@ export function createOutboxService({
     return inFlight;
   };
 
+  const getEntry = (objectId: string): Promise<OutboxEntry | null> => outbox.get(objectId);
+
+  const getReplicatedTo = (objectId: string): readonly string[] => (
+    lastReplicatedTo.get(objectId) ?? []
+  );
+
   async function recordAttempt(entry: OutboxEntry): Promise<boolean> {
     const attemptedAt = now();
     const updated: OutboxEntry = {
@@ -148,7 +166,9 @@ export function createOutboxService({
     return false;
   }
 
-  return { enqueue, flush };
+  const lastReplicatedTo = new Map<string, readonly string[]>();
+
+  return { enqueue, flush, getEntry, getReplicatedTo };
 }
 
 function isComplete(entry: OutboxEntry, now: Date): boolean {
