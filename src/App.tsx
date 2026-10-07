@@ -2626,25 +2626,30 @@ function App() {
       }}
     >
     <div className="app-shell">
-      <AppHeader
-        collapsed={collapsedHeader}
-        onToggleCollapse={handleToggleHeader}
-        connectionStatus={connectionStatus}
-        signallingStatus={signallingStatus}
-        connectedPeers={connectedPeersCount}
-        connectedPeerIds={connectedPeerIds}
-        syncStatus={syncStatus}
-        myFingerprint={identity?.id}
-        onOpenMyProfile={() => setPage('myProfile')}
-        onOpenSettings={() => setPage('settings')}
-        onOpenPeopleInbox={() => setPage('people')}
-        onRefresh={() => {
-          void handleRefreshHomeFeed();
-          void handleFetchDiscovery();
-        }}
-      />
+      <aside className="app-sidebar">
+        <TabBar active={page === 'home' || page === 'people' || page === 'discover' ? page : 'home'} onChange={handlePageChange} />
+      </aside>
 
-      <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
+      <div className="app-main-column">
+        <AppHeader
+          collapsed={collapsedHeader}
+          onToggleCollapse={handleToggleHeader}
+          connectionStatus={connectionStatus}
+          signallingStatus={signallingStatus}
+          connectedPeers={connectedPeersCount}
+          connectedPeerIds={connectedPeerIds}
+          syncStatus={syncStatus}
+          myFingerprint={identity?.id}
+          onOpenMyProfile={() => setPage('myProfile')}
+          onOpenSettings={() => setPage('settings')}
+          onOpenPeopleInbox={() => setPage('people')}
+          onRefresh={() => {
+            void handleRefreshHomeFeed();
+            void handleFetchDiscovery();
+          }}
+        />
+
+        <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
         {page === 'home' && (
           <HomePage
             posts={visibleHomePosts}
@@ -2898,9 +2903,8 @@ function App() {
             }}
           />
         )}
-      </main>
-
-      <TabBar active={page === 'home' || page === 'people' || page === 'discover' ? page : 'home'} onChange={handlePageChange} />
+        </main>
+      </div>
     </div>
     </DmUnreadProvider>
   );
