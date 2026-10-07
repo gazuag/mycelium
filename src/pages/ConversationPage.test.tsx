@@ -51,7 +51,7 @@ describe('ConversationPage', () => {
         post={root}
         posts={[root, reply2, nestedReply, reply1]}
         contacts={[contact]}
-        onBack={vi.fn()}
+        onLeave={vi.fn()}
         onOpenPost={vi.fn()}
         onOpenParent={vi.fn()}
         onAuthorClick={vi.fn()}
@@ -66,7 +66,7 @@ describe('ConversationPage', () => {
     expect(html.indexOf('root post')).toBeLessThan(html.indexOf('direct reply 1'));
     expect(html.indexOf('direct reply 1')).toBeLessThan(html.indexOf('direct reply 2'));
     expect(html).not.toContain('nested reply');
-    expect(html).toContain('aria-label="Back to previous view"');
+    expect(html).toContain('aria-label="Return to previous view"');
   });
 
   it('offers parent navigation when the parent post is already loaded', () => {
@@ -76,7 +76,7 @@ describe('ConversationPage', () => {
         post={reply}
         posts={[root, reply]}
         contacts={[contact]}
-        onBack={vi.fn()}
+        onLeave={vi.fn()}
         onOpenPost={vi.fn()}
         onOpenParent={vi.fn()}
         onAuthorClick={vi.fn()}
@@ -90,6 +90,31 @@ describe('ConversationPage', () => {
 
     expect(html).toContain('Replying to Author');
     expect(html).toContain('reply to root');
+    expect(html).toContain('aria-label="View parent post"');
+  });
+
+  it('keeps an unloaded parent explicitly unavailable without enabling retrieval', () => {
+    const reply = makeReply('f'.repeat(64), 'b', 'reply to missing parent', '2026-08-25T00:01:00.000Z');
+    const html = renderToStaticMarkup(
+      <ConversationPage
+        post={reply}
+        posts={[reply]}
+        contacts={[contact]}
+        onLeave={vi.fn()}
+        onOpenPost={vi.fn()}
+        onOpenParent={vi.fn()}
+        onAuthorClick={vi.fn()}
+        onLike={vi.fn()}
+        onDislike={vi.fn()}
+        onHide={vi.fn()}
+        onReply={vi.fn()}
+        getRecommendationSummary={recommendationSummary}
+      />
+    );
+
+    expect(html).toContain('aria-label="Parent post unavailable"');
+    expect(html).toContain('disabled=""');
+    expect(html).toContain('Replying to a post that is not loaded on this device');
   });
 
   it('keeps loaded replies as individual feed posts without expandable thread controls', () => {

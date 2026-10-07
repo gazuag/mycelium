@@ -11,7 +11,7 @@ interface ConversationPageProps {
   myPeerId?: string;
   myPublicKey?: string;
   focusedPostId?: string | null;
-  onBack: () => void;
+  onLeave: () => void;
   onOpenPost: (postId: string) => void;
   onOpenParent: (parentPostId: string, currentPostId: string) => void;
   onAuthorClick: (peerId: string) => void;
@@ -29,7 +29,7 @@ export function ConversationPage({
   myPeerId,
   myPublicKey,
   focusedPostId,
-  onBack,
+  onLeave,
   onOpenPost,
   onOpenParent,
   onAuthorClick,
@@ -152,10 +152,24 @@ export function ConversationPage({
   return (
     <section className="page-view conversation-page">
       <header className="conversation-header">
-        <button className="btn secondary conversation-back" type="button" onClick={onBack} aria-label="Back to previous view">
-          <span aria-hidden="true">←</span>
-          <span>Back</span>
-        </button>
+        {parentId ? (
+          parentPost ? (
+            <button className="btn secondary conversation-back" type="button" onClick={() => onOpenParent(parentId, post.object.object_id)} aria-label="View parent post">
+              <span aria-hidden="true">←</span>
+              <span>Parent</span>
+            </button>
+          ) : (
+            <button className="btn secondary conversation-back" type="button" disabled aria-label="Parent post unavailable">
+              <span aria-hidden="true">←</span>
+              <span>Parent unavailable</span>
+            </button>
+          )
+        ) : (
+          <button className="btn secondary conversation-back" type="button" onClick={onLeave} aria-label="Return to previous view">
+            <span aria-hidden="true">←</span>
+            <span>Return</span>
+          </button>
+        )}
         <h2>Post</h2>
       </header>
 

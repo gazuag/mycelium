@@ -16,7 +16,6 @@ interface AppHeaderProps {
   onOpenMyProfile: () => void;
   onOpenSettings: () => void;
   onOpenPeopleInbox: () => void;
-  onRefresh?: () => void;
 }
 
 export function AppHeader({
@@ -30,9 +29,8 @@ export function AppHeader({
   myFingerprint,
   onOpenMyProfile,
   onOpenSettings,
-  onOpenPeopleInbox,
-  onRefresh
-}: AppHeaderProps & { onRefresh?: () => void }) {
+  onOpenPeopleInbox
+}: AppHeaderProps) {
   const { total: unreadCount } = useDmUnread();
   const [peersExpanded, setPeersExpanded] = useState(false);
   const isGood = signallingStatus === 'connected';
@@ -86,7 +84,6 @@ export function AppHeader({
             <button className="btn secondary" onClick={onOpenPeopleInbox}>Unread inbox ({unreadCount})</button>
           ) : null}
           <button className="btn" onClick={onOpenMyProfile}>My profile</button>
-          {onRefresh ? <button className="btn secondary" onClick={onRefresh}>Refresh</button> : null}
           <button className="btn secondary" onClick={onOpenSettings}>Diagnostics</button>
         </div>
       </div>

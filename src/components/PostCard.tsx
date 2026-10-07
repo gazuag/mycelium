@@ -74,7 +74,10 @@ export function PostCard({
           'aria-label': `Open conversation for post by ${authorName}: ${content}`,
           onClick: (event: React.MouseEvent<HTMLDivElement>) => {
             const target = event.target;
-            if (target instanceof Element && target !== event.currentTarget && target.closest('button, a, input, textarea, select, [role="button"]')) return;
+            const interactiveTarget = target instanceof Element
+              ? target.closest('button, a, input, textarea, select, [role="button"]')
+              : null;
+            if (interactiveTarget && interactiveTarget !== event.currentTarget) return;
             onOpenPost();
           },
           onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {

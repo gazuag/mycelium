@@ -63,6 +63,50 @@ function classifyLogEntry(entry: string): LogCategory {
 
 type PageKey = 'home' | 'people' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
 
+interface AppNavigationState {
+  page: PageKey;
+  conversationPostId: string | null;
+  focusedReplyId: string | null;
+  profileContactId: string | null;
+  chatContactId: string | null;
+  scrollTop: number;
+  conversationReturnScrollTop: number | null;
+}
+
+const APP_NAVIGATION_STATE_KEY = 'myceliumNavigation';
+const PAGE_KEYS: PageKey[] = ['home', 'people', 'discover', 'profile', 'myProfile', 'chat', 'settings'];
+
+function readAppNavigationState(state: unknown): AppNavigationState {
+  const historyState = state && typeof state === 'object' ? state as Record<string, unknown> : {};
+  const navigation = historyState[APP_NAVIGATION_STATE_KEY];
+  const appState = navigation && typeof navigation === 'object' ? navigation as Record<string, unknown> : {};
+  const page = PAGE_KEYS.includes(appState.page as PageKey) ? appState.page as PageKey : 'home';
+  const legacyConversationId = historyState.myceliumConversationPostId;
+  const conversationPostId = typeof appState.conversationPostId === 'string'
+    ? appState.conversationPostId
+    : typeof legacyConversationId === 'string' ? legacyConversationId : null;
+  const legacyFocusedReplyId = historyState.myceliumFocusedReplyId;
+  return {
+    page,
+    conversationPostId,
+    focusedReplyId: typeof appState.focusedReplyId === 'string'
+      ? appState.focusedReplyId
+      : typeof legacyFocusedReplyId === 'string' ? legacyFocusedReplyId : null,
+    profileContactId: typeof appState.profileContactId === 'string' ? appState.profileContactId : null,
+    chatContactId: typeof appState.chatContactId === 'string' ? appState.chatContactId : null,
+    scrollTop: typeof appState.scrollTop === 'number' && Number.isFinite(appState.scrollTop) ? appState.scrollTop : 0,
+    conversationReturnScrollTop: typeof appState.conversationReturnScrollTop === 'number'
+      && Number.isFinite(appState.conversationReturnScrollTop)
+      ? appState.conversationReturnScrollTop
+      : null
+  };
+}
+
+function withAppNavigationState(historyState: unknown, navigation: AppNavigationState): Record<string, unknown> {
+  const state = historyState && typeof historyState === 'object' ? historyState as Record<string, unknown> : {};
+  return { ...state, [APP_NAVIGATION_STATE_KEY]: navigation };
+}
+
 interface FeedMixSettings {
   followedAuthors: number;
   followedLikes: number;
@@ -98,18 +142,15 @@ function App() {
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
-  const [page, setPage] = useState<PageKey>('home');
-  const [conversationPostId, setConversationPostId] = useState<string | null>(() => {
-    const state = window.history.state as { myceliumConversationPostId?: unknown } | null;
-    return typeof state?.myceliumConversationPostId === 'string' ? state.myceliumConversationPostId : null;
-  });
-  const [conversationFocusPostId, setConversationFocusPostId] = useState<string | null>(() => {
-    const state = window.history.state as { myceliumFocusedReplyId?: unknown } | null;
-    return typeof state?.myceliumFocusedReplyId === 'string' ? state.myceliumFocusedReplyId : null;
-  });
-  const conversationReturnScrollTopRef = useRef(0);
-  const [profileContactId, setProfileContactId] = useState<string | null>(null);
-  const [chatContactId, setChatContactId] = useState<string | null>(null);
+  const initialNavigation = readAppNavigationState(window.history.state);
+  const [page, setPage] = useState<PageKey>(initialNavigation.page);
+  const [conversationPostId, setConversationPostId] = useState<string | null>(initialNavigation.conversationPostId);
+  const [conversationFocusPostId, setConversationFocusPostId] = useState<string | null>(initialNavigation.focusedReplyId);
+  const conversationReturnScrollTopRef = useRef(initialNavigation.conversationReturnScrollTop ?? 0);
+  const pendingScrollRestoreRef = useRef<number | null>(initialNavigation.scrollTop);
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  const [profileContactId, setProfileContactId] = useState<string | null>(initialNavigation.profileContactId);
+  const [chatContactId, setChatContactId] = useState<string | null>(initialNavigation.chatContactId);
   const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
@@ -222,25 +263,28 @@ function App() {
   };
 
   useEffect(() => {
-    const handleConversationPopState = (event: PopStateEvent) => {
-      const state = event.state as { myceliumConversationPostId?: unknown; myceliumFocusedReplyId?: unknown } | null;
-      const nextPostId = typeof state?.myceliumConversationPostId === 'string'
-        ? state.myceliumConversationPostId
-        : null;
-      const nextFocusedReplyId = typeof state?.myceliumFocusedReplyId === 'string'
-        ? state.myceliumFocusedReplyId
-        : null;
-      setConversationPostId(nextPostId);
-      setConversationFocusPostId(nextFocusedReplyId);
-      requestAnimationFrame(() => {
-        const pageContent = document.getElementById('page-content');
-        if (!pageContent) return;
-        if (!nextPostId) pageContent.scrollTop = conversationReturnScrollTopRef.current;
-        else if (!nextFocusedReplyId) pageContent.scrollTop = 0;
-      });
+    const navigation = readAppNavigationState(window.history.state);
+    window.history.replaceState(
+      withAppNavigationState(window.history.state, navigation),
+      '',
+      window.location.href
+    );
+
+    const handlePopState = (event: PopStateEvent) => {
+      const next = readAppNavigationState(event.state);
+      setPage(next.page);
+      setConversationPostId(next.conversationPostId);
+      setConversationFocusPostId(next.focusedReplyId);
+      setProfileContactId(next.profileContactId);
+      profileContactIdRef.current = next.profileContactId;
+      setChatContactId(next.chatContactId);
+      if (next.chatContactId) setSelectedContactId(next.chatContactId);
+      conversationReturnScrollTopRef.current = next.conversationReturnScrollTop ?? 0;
+      pendingScrollRestoreRef.current = next.scrollTop;
+      setNavigationRevision((revision) => revision + 1);
     };
-    window.addEventListener('popstate', handleConversationPopState);
-    return () => window.removeEventListener('popstate', handleConversationPopState);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   useEffect(() => {
@@ -1779,57 +1823,107 @@ function App() {
     }).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())
     : [];
 
+  function currentNavigationState(): AppNavigationState {
+    const storedState = readAppNavigationState(window.history.state);
+    return {
+      ...storedState,
+      page,
+      conversationPostId,
+      focusedReplyId: conversationFocusPostId,
+      profileContactId,
+      chatContactId,
+      conversationReturnScrollTop: conversationPostId
+        ? conversationReturnScrollTopRef.current
+        : storedState.conversationReturnScrollTop
+    };
+  }
+
+  function commitNavigation(target: AppNavigationState, mode: 'push' | 'replace' = 'push') {
+    const pageContainer = document.getElementById('page-content');
+    const current = currentNavigationState();
+    const currentScrollTop = pageContainer?.scrollTop ?? current.scrollTop;
+    const savedCurrent = { ...current, scrollTop: currentScrollTop };
+    window.history.replaceState(
+      withAppNavigationState(window.history.state, savedCurrent),
+      '',
+      window.location.href
+    );
+
+    if (mode === 'push') {
+      const sameDestination = target.page === current.page
+        && target.conversationPostId === current.conversationPostId
+        && target.focusedReplyId === current.focusedReplyId
+        && target.profileContactId === current.profileContactId
+        && target.chatContactId === current.chatContactId;
+      if (sameDestination) return;
+      window.history.pushState(
+        withAppNavigationState(window.history.state, target),
+        '',
+        window.location.href
+      );
+    } else {
+      window.history.replaceState(
+        withAppNavigationState(window.history.state, target),
+        '',
+        window.location.href
+      );
+    }
+
+    setPage(target.page);
+    setConversationPostId(target.conversationPostId);
+    setConversationFocusPostId(target.focusedReplyId);
+    setProfileContactId(target.profileContactId);
+    profileContactIdRef.current = target.profileContactId;
+    setChatContactId(target.chatContactId);
+    if (target.chatContactId) setSelectedContactId(target.chatContactId);
+    conversationReturnScrollTopRef.current = target.conversationReturnScrollTop ?? 0;
+    pendingScrollRestoreRef.current = target.scrollTop;
+    setNavigationRevision((revision) => revision + 1);
+  }
+
   function handlePageChange(nextPage: PageKey) {
     const pageContainer = document.getElementById('page-content');
-    if (pageContainer) {
-      setPageScrollPositions((prev) => ({ ...prev, [page]: pageContainer.scrollTop }));
-    }
-    clearConversationForNavigation();
-    setPage(nextPage);
-  }
-
-  function clearConversationForNavigation() {
-    if (!conversationPostId) return;
-    const currentState = window.history.state && typeof window.history.state === 'object'
-      ? window.history.state as Record<string, unknown>
-      : {};
-    window.history.replaceState({
-      ...currentState,
-      myceliumConversationPostId: null,
-      myceliumFocusedReplyId: null
-    }, '', window.location.href);
-    setConversationPostId(null);
-    setConversationFocusPostId(null);
-  }
-
-  function handleOpenConversation(postId: string, focusedReplyId?: string) {
-    if (!conversationPostId) {
-      conversationReturnScrollTopRef.current = document.getElementById('page-content')?.scrollTop ?? 0;
-    }
-    const currentState = window.history.state && typeof window.history.state === 'object'
-      ? window.history.state as Record<string, unknown>
-      : {};
-    window.history.pushState({
-      ...currentState,
-      myceliumConversationPostId: postId,
-      myceliumFocusedReplyId: focusedReplyId ?? null
-    }, '', window.location.href);
-    setConversationPostId(postId);
-    setConversationFocusPostId(focusedReplyId ?? null);
-    requestAnimationFrame(() => {
-      const pageContent = document.getElementById('page-content');
-      if (pageContent && !focusedReplyId) pageContent.scrollTop = 0;
+    const currentScrollTop = pageContainer?.scrollTop ?? 0;
+    setPageScrollPositions((previous) => ({ ...previous, [page]: currentScrollTop }));
+    commitNavigation({
+      page: nextPage,
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: null,
+      chatContactId: null,
+      scrollTop: pageScrollPositions[nextPage] ?? 0,
+      conversationReturnScrollTop: null
     });
   }
 
-  function handleBackFromConversation() {
-    const currentState = window.history.state as { myceliumConversationPostId?: unknown } | null;
-    if (typeof currentState?.myceliumConversationPostId === 'string') {
-      window.history.back();
-      return;
-    }
-    setConversationPostId(null);
-    setConversationFocusPostId(null);
+  function handleOpenConversation(postId: string, focusedReplyId?: string) {
+    const current = currentNavigationState();
+    const returnScrollTop = current.conversationPostId
+      ? conversationReturnScrollTopRef.current
+      : document.getElementById('page-content')?.scrollTop ?? 0;
+    commitNavigation({
+      ...current,
+      conversationPostId: postId,
+      focusedReplyId: focusedReplyId ?? null,
+      scrollTop: 0,
+      conversationReturnScrollTop: returnScrollTop
+    });
+  }
+
+  function handleLeaveConversation() {
+    if (!conversationPostId) return;
+    const current = currentNavigationState();
+    commitNavigation({
+      ...current,
+      conversationPostId: null,
+      focusedReplyId: null,
+      scrollTop: conversationReturnScrollTopRef.current,
+      conversationReturnScrollTop: null
+    });
+  }
+
+  function handleOpenParentConversation(parentPostId: string, currentPostId: string) {
+    handleOpenConversation(parentPostId, currentPostId);
   }
 
   const handleToggleHeader = () => {
@@ -1886,10 +1980,15 @@ function App() {
 
   useEffect(() => {
     const pageContainer = document.getElementById('page-content');
-    if (pageContainer) {
-      pageContainer.scrollTop = pageScrollPositions[page] || 0;
+    if (!pageContainer) return;
+    if (conversationPostId && conversationFocusPostId) {
+      pendingScrollRestoreRef.current = null;
+      return;
     }
-  }, [page, pageScrollPositions]);
+    const pendingScrollTop = pendingScrollRestoreRef.current;
+    pageContainer.scrollTop = pendingScrollTop ?? pageScrollPositions[page] ?? 0;
+    pendingScrollRestoreRef.current = null;
+  }, [identity, page, conversationPostId, conversationFocusPostId, navigationRevision, pageScrollPositions]);
 
   const resolveAuthorDisplayName = (authorId: string, fallbackContact?: Contact) => {
     const trimmedName = fallbackContact?.displayName?.trim();
@@ -2171,7 +2270,15 @@ function App() {
     setActivePeerId(null);
     setConnectionStatus('idle');
     setSignallingStatus('idle');
-    setPage('home');
+    commitNavigation({
+      page: 'home',
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: null,
+      chatContactId: null,
+      scrollTop: 0,
+      conversationReturnScrollTop: null
+    }, 'replace');
   }
 
   function handleStartCall() {
@@ -2188,10 +2295,18 @@ function App() {
   }
 
   async function handleSelectContact(peerId: string) {
-    clearConversationForNavigation();
     setSelectedContactId(peerId);
-    setChatContactId(peerId);
-    setPage('chat');
+    const current = currentNavigationState();
+    commitNavigation({
+      ...current,
+      page: 'chat',
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: null,
+      chatContactId: peerId,
+      scrollTop: pageScrollPositions.chat ?? 0,
+      conversationReturnScrollTop: null
+    });
     addLog(`Selected contact ${peerId}`);
     const socket = signallingSocketRef.current;
     const manager = ensurePeerManager(peerId);
@@ -2204,11 +2319,19 @@ function App() {
 
   async function handleOpenPeerProfile(peerId: string) {
     if (!peerId) return;
-    clearConversationForNavigation();
 
     if (peerId === identity?.id) {
-      setProfileContactId(null);
-      setPage('myProfile');
+      const current = currentNavigationState();
+      commitNavigation({
+        ...current,
+        page: 'myProfile',
+        conversationPostId: null,
+        focusedReplyId: null,
+        profileContactId: null,
+        chatContactId: null,
+        scrollTop: pageScrollPositions.myProfile ?? 0,
+        conversationReturnScrollTop: null
+      });
       setProfileNotice(null);
       return;
     }
@@ -2235,9 +2358,17 @@ function App() {
       setContacts((prev) => prev.map((item) => (item.fingerprint === peerId ? resolvedContact! : item)));
     }
 
-    setProfileContactId(peerId);
-    profileContactIdRef.current = peerId;
-    setPage('profile');
+    const current = currentNavigationState();
+    commitNavigation({
+      ...current,
+      page: 'profile',
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: peerId,
+      chatContactId: null,
+      scrollTop: pageScrollPositions.profile ?? 0,
+      conversationReturnScrollTop: null
+    });
     setProfileNotice(null);
 
     const socket = signallingSocketRef.current;
@@ -2728,10 +2859,6 @@ function App() {
           onOpenMyProfile={() => handlePageChange('myProfile')}
           onOpenSettings={() => handlePageChange('settings')}
           onOpenPeopleInbox={() => handlePageChange('people')}
-          onRefresh={() => {
-            void handleRefreshHomeFeed();
-            void handleFetchDiscovery();
-          }}
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -2744,9 +2871,9 @@ function App() {
               myPeerId={identity.id}
               myPublicKey={identity.publicKey}
               focusedPostId={conversationFocusPostId}
-              onBack={handleBackFromConversation}
+              onLeave={handleLeaveConversation}
               onOpenPost={handleOpenConversation}
-              onOpenParent={handleOpenConversation}
+              onOpenParent={handleOpenParentConversation}
               onAuthorClick={handleOpenPeerProfile}
               onLike={handleLikePost}
               onDislike={handleDislikePost}
@@ -2761,9 +2888,9 @@ function App() {
           ) : (
             <section className="page-view conversation-page">
               <header className="conversation-header">
-                <button className="btn secondary conversation-back" type="button" onClick={handleBackFromConversation} aria-label="Back to previous view">
+                <button className="btn secondary conversation-back" type="button" onClick={handleLeaveConversation} aria-label="Return to previous view">
                   <span aria-hidden="true">←</span>
-                  <span>Back</span>
+                  <span>Return</span>
                 </button>
                 <h2>Post</h2>
               </header>
@@ -2969,8 +3096,6 @@ function App() {
           <SettingsPage
             identityId={identity?.id ?? ''}
             publicKey={identity?.publicKey ?? ''}
-            contacts={contacts.length}
-            posts={postViews.length}
             logs={logs}
             onClearLogs={() => setLogs([])}
             signalEndpoint={signalEndpoint}
@@ -2979,46 +3104,6 @@ function App() {
             signallingStatus={signallingStatus}
             connectedPeers={connectedPeersCount}
             syncStatus={syncStatus}
-            objectTransportTest={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
-              connectedPeers: objectTransportRef.current?.connectedPeers() ?? [],
-              selectedPeerId: objectTestPeerId,
-              objectIds: objectTestIds,
-              suppressFindResponses: suppressPhase6FindResponses,
-              status: objectTestStatus,
-              objects: objectStoreObjects,
-              onPeerChange: setObjectTestPeerId,
-              onObjectIdsChange: setObjectTestIds,
-              onCreateSet: () => { void handleCreatePhase6Set(); },
-              onSelectFirstBranch: () => selectPhase6ObjectIds(0, 3),
-              onSelectSecondBranch: () => selectPhase6ObjectIds(2, 5),
-              onSelectAll: () => selectPhase6ObjectIds(0, 5),
-              onSendListed: () => { void handleSendPhase6Listed(); },
-              onRemoveListed: () => { void handleRemovePhase6Listed(); },
-              onFindListed: () => { void handleFindPhase6Listed(); },
-              onToggleSuppressFindResponses: () => setSuppressPhase6FindResponses((current) => !current),
-              onClearObjectStore: () => { void handleClearObjectStore(); },
-              onRefresh: () => { void refreshObjectStore(); }
-            } : undefined}
-            phase7Test={(import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ? {
-              author: phase7Author,
-              startTime: phase7StartTime,
-              endTime: phase7EndTime,
-              status: phase7QueryStatus,
-              requestId: phase7RequestId,
-              objectIds: objectTestIds,
-              objects: phase7Results,
-              selectedObjectId: phase7SelectedObjectId,
-              onAuthorChange: setPhase7Author,
-              onStartTimeChange: setPhase7StartTime,
-              onEndTimeChange: setPhase7EndTime,
-              onSelectedObjectIdChange: setPhase7SelectedObjectId,
-              onCreateSet: () => { void handleCreatePhase7Set(); },
-              onUseCurrentObjectIds: () => setObjectTestIds(objectTestIds),
-              onRunNarrow: () => { void handleRunPhase7Query('narrow'); },
-              onRunBroad: () => { void handleRunPhase7Query('broad'); },
-              onRunSingleObjectFind: () => { void handleFindPhase7SingleObject(); },
-              onRefresh: () => { void refreshObjectStore(); }
-            } : undefined}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());
