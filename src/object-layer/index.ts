@@ -4,6 +4,7 @@ export * from './envelope';
 export * from './identity';
 export * from './local-store';
 export * from './post-state';
+export * from './post-ancestry';
 export * from './feed-page';
 export * from './feed-request-adapter';
 export * from './feed-sync';

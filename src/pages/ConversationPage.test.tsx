@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ConversationPage } from './ConversationPage';
 import { HomePage } from './HomePage';
 import { createLocalPostView, type LocalPostView } from '../object-layer';
+import type { PostAncestryResult } from '../object-layer';
 import type { Contact } from '../types';
 
 const contact: Contact = {
@@ -93,6 +94,48 @@ describe('ConversationPage', () => {
     expect(html).toContain('aria-label="View parent post"');
   });
 
+  it('shows retrieved ancestors oldest-first before the selected post and its direct replies', () => {
+    const grandparent = makeReply('e'.repeat(64), 'b', 'grandparent', '2026-08-25T00:00:00.000Z');
+    const parent = makeReply(grandparent.object.object_id, 'c', 'parent', '2026-08-25T00:01:00.000Z');
+    const selected = makeReply(parent.object.object_id, 'd', 'selected post', '2026-08-25T00:02:00.000Z');
+    const reply = makeReply(selected.object.object_id, 'e', 'direct reply', '2026-08-25T00:03:00.000Z');
+    const ancestry: PostAncestryResult = {
+      ancestors: [grandparent, parent],
+      stopReason: 'no-parent'
+    };
+    const html = renderToStaticMarkup(
+      <ConversationPage
+        post={selected}
+        posts={[selected, reply]}
+        contacts={[contact]}
+        ancestry={{ loading: false, result: ancestry }}
+        onLeave={vi.fn()}
+        onOpenPost={vi.fn()}
+        onOpenParent={vi.fn()}
+        onAuthorClick={vi.fn()}
+        onLike={vi.fn()}
+        onDislike={vi.fn()}
+        onHide={vi.fn()}
+        onReply={vi.fn()}
+        getRecommendationSummary={recommendationSummary}
+      />
+    );
+
+    expect(html.indexOf('grandparent</p>')).toBeLessThan(html.indexOf('parent</p>'));
+    expect(html.indexOf('parent</p>')).toBeLessThan(html.indexOf('selected post</p>'));
+    expect(html.indexOf('selected post</p>')).toBeLessThan(html.indexOf('direct reply</p>'));
+    expect(html).toContain('aria-label="View parent post"');
+    expect(html).toContain('conversation-current');
+    expect(html).toContain('conversation-ancestor');
+    expect(html).toContain('conversation-reply-placeholder');
+    expect(html).toContain('Post your reply...');
+    expect(html).not.toContain('conversation-inline-composer');
+    expect(html.indexOf('conversation-current')).toBeLessThan(html.indexOf('conversation-reply-placeholder'));
+    expect(html.indexOf('conversation-reply-placeholder')).toBeLessThan(html.indexOf('conversation-reply"'));
+    expect(html).not.toContain('conversation-root');
+    expect(html).not.toContain('conversation-posts > .conversation-reply::before');
+  });
+
   it('keeps an unloaded parent explicitly unavailable without enabling retrieval', () => {
     const reply = makeReply('f'.repeat(64), 'b', 'reply to missing parent', '2026-08-25T00:01:00.000Z');
     const html = renderToStaticMarkup(
@@ -100,6 +143,7 @@ describe('ConversationPage', () => {
         post={reply}
         posts={[reply]}
         contacts={[contact]}
+        ancestry={{ loading: false, result: { ancestors: [], stopReason: 'missing' } }}
         onLeave={vi.fn()}
         onOpenPost={vi.fn()}
         onOpenParent={vi.fn()}
@@ -115,6 +159,8 @@ describe('ConversationPage', () => {
     expect(html).toContain('aria-label="Parent post unavailable"');
     expect(html).toContain('disabled=""');
     expect(html).toContain('Replying to a post that is not loaded on this device');
+    expect(html).toContain('conversation-unavailable-ancestor');
+    expect(html).toContain('Earlier post is unavailable on this device.');
   });
 
   it('keeps loaded replies as individual feed posts without expandable thread controls', () => {

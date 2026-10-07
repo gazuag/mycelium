@@ -31,7 +31,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
@@ -44,6 +44,13 @@ interface IdentityRecord {
   id: string;
   encryptionPublicKey: string;
   encryptionPrivateKey: string;
+}
+
+interface ConversationAncestryState {
+  postId: string;
+  loading: boolean;
+  result?: PostAncestryResult;
+  error?: true;
 }
 
 export type LogCategory = 'pingPong' | 'discovery' | 'postRequests' | 'objectStorage' | 'ice' | 'general';
@@ -146,6 +153,7 @@ function App() {
   const [page, setPage] = useState<PageKey>(initialNavigation.page);
   const [conversationPostId, setConversationPostId] = useState<string | null>(initialNavigation.conversationPostId);
   const [conversationFocusPostId, setConversationFocusPostId] = useState<string | null>(initialNavigation.focusedReplyId);
+  const [conversationAncestry, setConversationAncestry] = useState<ConversationAncestryState | null>(null);
   const conversationReturnScrollTopRef = useRef(initialNavigation.conversationReturnScrollTop ?? 0);
   const pendingScrollRestoreRef = useRef<number | null>(initialNavigation.scrollTop);
   const [navigationRevision, setNavigationRevision] = useState(0);
@@ -1790,6 +1798,63 @@ function App() {
     ? allCachedPosts.find((post) => post.object.object_id === conversationPostId)
     : undefined;
 
+  useEffect(() => {
+    if (!conversationPostId || !activeConversationPost || !identity) return;
+    let cancelled = false;
+    setConversationAncestry({ postId: conversationPostId, loading: true });
+
+    const resolveParentPost = async (parentId: string): Promise<LocalPostView | null> => {
+      const cachedView = allCachedPosts.find((candidate) => candidate.object.object_id === parentId);
+      if (cachedView) return cachedView;
+
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      let object = await store.get(parentId);
+      if (!object) {
+        const transport = objectTransportRef.current;
+        const peers = transport?.connectedPeers().slice(0, 4) ?? [];
+        let retrievalError: unknown;
+        for (const peerId of peers) {
+          if (!transport) break;
+          try {
+            object = await findObject(identity.id, peerId, parentId, transport, store, 2);
+          } catch (error) {
+            retrievalError = error;
+            addLog(`Parent FIND via ${peerId} failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          if (object) break;
+        }
+        if (!object && retrievalError) throw retrievalError;
+      }
+      if (!object || object.object_type !== 'mycelium.post') return null;
+
+      const metadataStore = localPostMetadataStoreRef.current;
+      const metadata = await metadataStore?.get(parentId);
+      const authorFingerprint = metadata?.authorFingerprint ?? await resolvePostAuthorFingerprint(object.author);
+      const parentView = createLocalPostView(object as PostObject, authorFingerprint, {
+        ...(metadata?.authorDisplayName ? { authorDisplayName: metadata.authorDisplayName } : {}),
+        ...(metadata?.source ? { source: metadata.source } : { source: 'peer' as const }),
+        ...(metadata?.notInterested === undefined ? {} : { notInterested: metadata.notInterested }),
+        ...(metadata?.hidden === undefined ? {} : { hidden: metadata.hidden })
+      });
+      if (metadataStore) await metadataStore.put(localPostMetadata(parentView));
+      setPostViews((previous) => upsertLocalPostView(previous, parentView));
+      return parentView;
+    };
+
+    void loadPostAncestry(activeConversationPost, allCachedPosts, resolveParentPost).then((result) => {
+      if (!cancelled) setConversationAncestry({ postId: conversationPostId, loading: false, result });
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      setConversationAncestry({ postId: conversationPostId, loading: false, error: true });
+      addLog(`Conversation ancestry retrieval failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationPostId, activeConversationPost?.object.object_id, identity?.id]);
+
   const visibleHomePosts = useMemo(() => {
     const followedAuthorKeys = new Set([
       ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
@@ -2871,6 +2936,9 @@ function App() {
               myPeerId={identity.id}
               myPublicKey={identity.publicKey}
               focusedPostId={conversationFocusPostId}
+              ancestry={conversationAncestry?.postId === conversationPostId
+                ? conversationAncestry
+                : { postId: conversationPostId, loading: true }}
               onLeave={handleLeaveConversation}
               onOpenPost={handleOpenConversation}
               onOpenParent={handleOpenParentConversation}
