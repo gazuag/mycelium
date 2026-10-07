@@ -15,7 +15,8 @@ import { createObjectIdentity } from './identity';
 import { createSignedObject } from './envelope';
 import { createDmObject, decryptDmObject, DM_REPLICATION_BUDGET, DM_TTL_MS, validateDmPayload } from './dm-object';
 import { IndexedDbObjectStore } from './local-store';
-import { buildObjectBatchPacket, buildObjectStorePacket, queryFeedObjectsForPeer, receiveObjectBatchPacket, receiveObjectPacket, replicateObject } from './transport';
+import { buildObjectBatchPacket, buildObjectStorePacket, receiveObjectBatchPacket, receiveObjectPacket, replicateObject } from './transport';
+import { queryFeedPage } from './feed-page';
 import { deleteIdentity, loadIdentity, saveIdentity, type LocalIdentityRecord } from '../storage/idb';
 import { fetchDiscovery, handleDiscoveryResult } from '../services/discovery';
 import type { ObjectPacket, ObjectTransport } from './types';
@@ -454,16 +455,16 @@ describe('mycelium.dm objects', () => {
     expect(result).toEqual(object);
   });
 
-  it('does not return DMs from the post and recommendation feed query', async () => {
+  it('does not return DMs from the keyset feed query', async () => {
     const { sender, object } = await sendDm();
     const store = new IndexedDbObjectStore();
     storedObjectIds.push(object.object_id);
     await store.put(object);
 
-    const results = await queryFeedObjectsForPeer(store, sender.publicKey);
+    const results = await queryFeedPage(store, sender.publicKey);
 
-    expect(results).not.toContainEqual(object);
-    expect(results).toEqual([]);
+    expect(results.objects).not.toContainEqual(object);
+    expect(results.objects).toEqual([]);
   });
 
   it('stores no plaintext in the IndexedDB DM object JSON', async () => {

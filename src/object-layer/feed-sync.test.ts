@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { syncFeedFromPeer } from './feed-sync';
+import { INITIAL_FEED_CURSOR, syncFeedFromPeer } from './feed-sync';
 import type { DistributedObject, FeedCursor } from './types';
 
 afterEach(() => {
@@ -7,7 +8,7 @@ afterEach(() => {
 });
 
 describe('syncFeedFromPeer', () => {
-  it('starts without a cursor and saves the newest cursor from the initial page', async () => {
+  it('starts from the initial sentinel and saves the first page cursor', async () => {
     const newest = objectAt(3);
     const saved: FeedCursor[] = [];
     const result = await syncFeedFromPeer({
@@ -15,7 +16,7 @@ describe('syncFeedFromPeer', () => {
       loadCursor: () => null,
       saveCursor: (_peerId, cursor) => { saved.push(cursor); },
       requestPage: async (_peerId, after) => {
-        expect(after).toBeNull();
+        expect(after).toEqual(INITIAL_FEED_CURSOR);
         return page([newest], cursorFor(newest), false);
       },
       storeObjects: async () => {}
@@ -44,7 +45,7 @@ describe('syncFeedFromPeer', () => {
       storeObjects: async () => {}
     });
 
-    expect(cursors).toEqual([null, cursorFor(first)]);
+    expect(cursors).toEqual([INITIAL_FEED_CURSOR, cursorFor(first)]);
     expect(saved).toEqual([cursorFor(first), cursorFor(second)]);
     expect(result).toEqual({ pages: 2, objects: 2, hasMore: false, error: false });
   });
@@ -141,7 +142,7 @@ describe('syncFeedFromPeer', () => {
 
     expect(firstRun).toEqual({ pages: 1, objects: 1, hasMore: true, error: false });
     expect(secondRun).toEqual({ pages: 1, objects: 1, hasMore: false, error: false });
-    expect(requested).toEqual([null, cursorFor(first)]);
+    expect(requested).toEqual([INITIAL_FEED_CURSOR, cursorFor(first)]);
     expect(savedCursor).toEqual(cursorFor(second));
   });
 
@@ -176,6 +177,7 @@ describe('syncFeedFromPeer', () => {
     const firstRun = syncFeedFromPeer(options);
     const overlappingRun = syncFeedFromPeer(options);
     expect(overlappingRun).toBe(firstRun);
+    await Promise.resolve();
     expect(requestPage).toHaveBeenCalledTimes(1);
     resolveRequest(page([object], cursorFor(object), false));
     await expect(Promise.all([firstRun, overlappingRun])).resolves.toEqual([
@@ -203,6 +205,11 @@ describe('syncFeedFromPeer', () => {
       expect(spy).not.toHaveBeenCalled();
       expect(JSON.stringify(spy.mock.calls)).not.toContain(secretText);
     }
+  });
+
+  it('does not write myceliumHomeSync localStorage cursor keys', () => {
+    const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+    expect(appSource).not.toContain('myceliumHomeSync');
   });
 });
 

@@ -196,7 +196,7 @@ describe('POST_REQUEST limit handling', () => {
     expect(requests).toEqual([{ limit: 200 }]);
   });
 
-  it('round-trips after and requestId while treating malformed values as absent', () => {
+  it('round-trips after and requestId while treating malformed values as absent', async () => {
     const requests: Array<{ since?: string | null; limit?: number; after?: FeedCursor | null; requestId?: string }> = [];
     const manager = createManager({
       onRequestPosts: (_peerId, since, limit, after, requestId) => requests.push({ since, limit, after, requestId })
@@ -205,8 +205,8 @@ describe('POST_REQUEST limit handling', () => {
     (manager as any).sendPacket = sendPacket;
     const after = { created_at: '2026-10-07T08:00:00.000Z', object_id: 'a'.repeat(64) };
 
-    manager.sendRequestPosts(null, 200, { after, requestId: 'request-1' });
-    expect(sendPacket).toHaveBeenCalledWith('POST_REQUEST', { since: null, limit: 200, after, requestId: 'request-1' });
+    await manager.sendRequestPosts(null, 200, { after, requestId: 'request-1' });
+    expect(sendPacket).toHaveBeenCalledWith('POST_REQUEST', { since: null, limit: 200, after, requestId: 'request-1' }, true);
     (manager as any).handleMyceliumPacket({
       type: 'POST_REQUEST',
       sender: 'peer-b',

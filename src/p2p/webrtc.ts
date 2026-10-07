@@ -426,10 +426,27 @@ export class PeerConnectionManager {
       || this.peerConnection.iceConnectionState === 'closed';
   }
 
-  private async sendPacket(type: Parameters<typeof buildPacket>[2], payload: Record<string, unknown>) {
-    if (!this.remoteId) return;
+  private async sendPacket(
+    type: Parameters<typeof buildPacket>[2],
+    payload: Record<string, unknown>,
+    requireOpenChannel = false
+  ) {
+    if (!this.remoteId) {
+      if (requireOpenChannel) throw new Error('Peer is unavailable');
+      return;
+    }
     const packet = await buildPacket(this.localId, this.remoteId, type, payload, this.packetSigner);
-    this.sendData(packet);
+    if (!requireOpenChannel) {
+      this.sendData(packet);
+      return;
+    }
+    const channel = this.dataChannel;
+    if (!channel || channel.readyState !== 'open') throw new Error('Peer is unavailable');
+    try {
+      channel.send(JSON.stringify(packet));
+    } catch {
+      throw new Error('Peer packet send failed');
+    }
   }
 
   public sendObjectPacket(packet: ObjectPacket) {
@@ -500,13 +517,13 @@ export class PeerConnectionManager {
     since: string | null = null,
     limit = 100,
     options: { after?: FeedCursor | null; requestId?: string } = {}
-  ) {
-    void this.sendPacket('POST_REQUEST', {
+  ): Promise<void> {
+    return this.sendPacket('POST_REQUEST', {
       since,
       limit,
       ...(options.after === undefined ? {} : { after: options.after }),
       ...(options.requestId === undefined ? {} : { requestId: options.requestId })
-    });
+    }, options.requestId !== undefined);
   }
 
   public sendObjectsBatch(objects: DistributedObject[], page?: FeedPageMetadata) {

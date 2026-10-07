@@ -7,7 +7,7 @@ import { createObjectIdentity } from './identity';
 import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
 import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
 import { RecommendationIndex, recommendationWeight, selectRecommendationCandidates } from './recommendations';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, queryFeedObjectsForPeer, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { buildPacket } from '../p2p/protocol';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
 import type { DistributedObject, FindResponsePacket, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
@@ -607,31 +607,6 @@ describe('distributed object foundation', () => {
     const nested = createLocalPostView({ object_id: 'nested', object_type: 'mycelium.post', author: 'third-key', created_at: '2026-09-17T00:02:00.000Z', payload: { content: 'nested', reply_to: 'reply' }, signature: '', replication_policy: {} } as PostObject, 'third-fingerprint');
 
     expect(selectFollowedPosts([nested, reply, root], new Set(['followed-key'])).map((post) => post.object.object_id)).toEqual(['nested', 'reply', 'root']);
-  });
-
-  it('includes only the sender authored recommendations in a feed batch query', async () => {
-    const senderKeys = await generateIdentityKeyPair();
-    const sender = await exportPublicKey(senderKeys.publicKey);
-    const senderPrivateKey = await exportPrivateKey(senderKeys.privateKey);
-    const senderIdentity = createObjectIdentity({ id: 'sender', publicKey: sender, privateKey: senderPrivateKey });
-    const otherKeys = await generateIdentityKeyPair();
-    const other = await exportPublicKey(otherKeys.publicKey);
-    const otherPrivateKey = await exportPrivateKey(otherKeys.privateKey);
-    const otherIdentity = createObjectIdentity({ id: 'other', publicKey: other, privateKey: otherPrivateKey });
-    const store = createMemoryStore();
-    const post = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'post' }, replication_policy: {} }, otherIdentity);
-    const unrelatedPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:01:00.000Z', payload: { content: 'unrelated' }, replication_policy: {} }, otherIdentity);
-    const ownPost = await createSignedObject({ object_type: 'mycelium.post', created_at: '2026-08-25T00:02:00.000Z', payload: { content: 'own post' }, replication_policy: {} }, senderIdentity);
-    const ownRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, senderIdentity);
-    const otherRecommendation = await createSignedRecommendationObject(post.object_id, 'recommend', 1, otherIdentity);
-    await Promise.all([post, unrelatedPost, ownPost, ownRecommendation, otherRecommendation].map((object) => store.put(object)));
-
-    const results = await queryFeedObjectsForPeer(store, sender, { limit: 20 });
-    expect(results).toContainEqual(post);
-    expect(results).toContainEqual(ownPost);
-    expect(results).toContainEqual(ownRecommendation);
-    expect(results).not.toContainEqual(unrelatedPost);
-    expect(results).not.toContainEqual(otherRecommendation);
   });
 
   it('stores a recommendation even when its referenced post is unknown', async () => {
@@ -1315,41 +1290,6 @@ describe('distributed object foundation', () => {
     expect(queryPacket.payload.created_after).toBe('2026-08-25T00:00:00.000Z');
     expect(queryPacket.payload.created_before).toBe('2026-08-25T00:10:00.000Z');
     expect(responseObjects.some((object) => object.object_id === outOfRange.object_id)).toBe(false);
-  });
-
-  it('queryFeedObjectsForPeer defaults to 500 results when no limit is supplied', async () => {
-    const keys = await generateIdentityKeyPair();
-    const author = await exportPublicKey(keys.publicKey);
-    const store = createMemoryStore();
-    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
-      object_type: 'mycelium.post',
-      author,
-      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
-      payload: { content: `post-${index}` },
-      replication_policy: {}
-    })));
-    await Promise.all(posts.map((post) => store.put(post)));
-
-    const results = await queryFeedObjectsForPeer(store, author);
-    expect(results).toHaveLength(500);
-    expect(results[0].created_at).toBe(posts[599].created_at);
-  });
-
-  it('queryFeedObjectsForPeer clamps a supplied limit above 500', async () => {
-    const keys = await generateIdentityKeyPair();
-    const author = await exportPublicKey(keys.publicKey);
-    const store = createMemoryStore();
-    const posts = await Promise.all(Array.from({ length: 600 }, (_, index) => createFixtureObject({
-      object_type: 'mycelium.post',
-      author,
-      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
-      payload: { content: `post-${index}` },
-      replication_policy: {}
-    })));
-    await Promise.all(posts.map((post) => store.put(post)));
-
-    const results = await queryFeedObjectsForPeer(store, author, { limit: 900 });
-    expect(results).toHaveLength(500);
   });
 
   it('answers a FIND with the maximum number of object IDs', async () => {

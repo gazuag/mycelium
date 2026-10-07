@@ -27,31 +27,6 @@ export async function buildObjectBatchPacket(
   return await buildPacket(sender, recipient, 'OBJECT_BATCH', { objects, ...(page ? { page } : {}) }, signer) as ObjectBatchPacket;
 }
 
-export async function queryFeedObjectsForPeer(
-  store: ObjectStore,
-  author: string,
-  options: { since?: string | null; limit?: number } = {}
-): Promise<DistributedObject[]> {
-  const limit = typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
-    ? Math.min(options.limit, MAX_FIND_QUERY_LIMIT)
-    : MAX_FIND_QUERY_LIMIT;
-  const query = {
-    since: options.since ?? undefined,
-    order: 'created_at_desc' as const
-  };
-  const recommendations = await filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.recommendation', author, limit });
-  const recommendedPostIds = new Set(recommendations.flatMap((recommendation) => {
-    const payload = recommendation.payload;
-    return typeof payload === 'object' && payload !== null && !Array.isArray(payload) && typeof payload.post_id === 'string'
-      ? [payload.post_id]
-      : [];
-  }));
-  const posts = (await filterObjectsByFindQuery(store, { ...query, object_type: 'mycelium.post' }))
-    .filter((post) => post.author === author || recommendedPostIds.has(post.object_id))
-    .slice(0, limit);
-  return [...posts, ...recommendations].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
-}
-
 export async function buildFindPacket(
   sender: string,
   recipient: string,

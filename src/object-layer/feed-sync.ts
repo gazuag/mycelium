@@ -9,7 +9,7 @@ export interface FeedSyncPage {
 
 export interface FeedSyncOptions {
   readonly peerId: string;
-  readonly loadCursor: (peerId: string) => FeedCursor | null;
+  readonly loadCursor: (peerId: string) => FeedCursor | null | Promise<FeedCursor | null>;
   readonly saveCursor: (peerId: string, cursor: FeedCursor) => void | Promise<void>;
   readonly requestPage: (
     peerId: string,
@@ -30,6 +30,10 @@ export interface FeedSyncResult {
 
 const DEFAULT_PAGE_LIMIT = 100;
 const DEFAULT_MAX_PAGES = 10;
+export const INITIAL_FEED_CURSOR: FeedCursor = {
+  created_at: '0001-01-01T00:00:00.000Z',
+  object_id: ''
+};
 const inFlightByPeer = new Map<string, Promise<FeedSyncResult>>();
 
 export function syncFeedFromPeer(options: FeedSyncOptions): Promise<FeedSyncResult> {
@@ -50,7 +54,7 @@ async function runFeedSync(options: FeedSyncOptions): Promise<FeedSyncResult> {
   const maxPages = normalizePositiveInteger(options.maxPages, DEFAULT_MAX_PAGES);
   let cursor: FeedCursor | null;
   try {
-    cursor = options.loadCursor(options.peerId);
+    cursor = await options.loadCursor(options.peerId);
   } catch {
     return { pages: 0, objects: 0, hasMore: false, error: true };
   }
@@ -61,7 +65,7 @@ async function runFeedSync(options: FeedSyncOptions): Promise<FeedSyncResult> {
   while (pages < maxPages) {
     let page: FeedSyncPage;
     try {
-      page = await options.requestPage(options.peerId, cursor, limit);
+      page = await options.requestPage(options.peerId, cursor ?? INITIAL_FEED_CURSOR, limit);
     } catch {
       return { pages, objects, hasMore, error: true };
     }

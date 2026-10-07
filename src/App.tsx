@@ -9,12 +9,13 @@ import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
 import { createDmService } from './object-layer/dm-service';
 import { createOutboxService } from './object-layer/outbox-service';
+import { createFeedRequestAdapter, type ProcessedFeedBatchHandler } from './object-layer/feed-request-adapter';
 import { dedupeContactsByFingerprint } from './contact-utils';
 import { DmUnreadProvider } from './hooks/useDmUnread';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
-import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor } from './storage/idb';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor, loadFeedCursor, saveFeedCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
@@ -29,7 +30,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
@@ -159,6 +160,10 @@ function App() {
   const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
   const recommendationIndexRef = useRef(new RecommendationIndex());
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
+  const feedBatchSubscribersRef = useRef(new Set<ProcessedFeedBatchHandler>());
+  const feedDisconnectSubscribersRef = useRef(new Set<(peerId: string) => void>());
+  const feedSyncPeerRef = useRef<((peerId: string) => Promise<void>) | null>(null);
+  const profileContactIdRef = useRef<string | null>(null);
   const dmEventsRef = useRef(createDmEvents());
   const inboxServiceRef = useRef<ReturnType<typeof createInboxService> | null>(null);
   const dmServiceRef = useRef<ReturnType<typeof createDmService> | null>(null);
@@ -257,6 +262,49 @@ function App() {
   }, [identity]);
 
   useEffect(() => {
+    if (!identity) {
+      feedSyncPeerRef.current = null;
+      return;
+    }
+
+    const adapter = createFeedRequestAdapter({
+      sendPacket: async (peerId, payload) => {
+        const manager = peerManagersRef.current[peerId];
+        if (!manager?.isDataChannelOpen()) throw new Error('Feed peer is unavailable');
+        await manager.sendRequestPosts(null, payload.limit, {
+          after: payload.after,
+          requestId: payload.requestId
+        });
+      },
+      subscribeBatches: (handler) => {
+        feedBatchSubscribersRef.current.add(handler);
+        return () => feedBatchSubscribersRef.current.delete(handler);
+      },
+      subscribeDisconnects: (handler) => {
+        feedDisconnectSubscribersRef.current.add(handler);
+        return () => feedDisconnectSubscribersRef.current.delete(handler);
+      }
+    });
+
+    feedSyncPeerRef.current = async (peerId) => {
+      const result = await syncFeedFromPeer({
+        peerId,
+        loadCursor: (requestedPeerId) => loadFeedCursor(identity.publicKey, requestedPeerId),
+        saveCursor: (requestedPeerId, cursor) => saveFeedCursor(identity.publicKey, requestedPeerId, cursor),
+        requestPage: adapter.requestPage,
+        // The matching batch is acknowledged only after the App batch handler has stored and processed it.
+        storeObjects: async () => {}
+      });
+      if (result.error) addLog(`Feed sync failed for ${peerId.slice(0, 12)}`);
+    };
+
+    return () => {
+      adapter.dispose();
+      feedSyncPeerRef.current = null;
+    };
+  }, [identity]);
+
+  useEffect(() => {
     if (!identity) return;
     const store = objectStoreRef.current;
     const objectTransport = objectTransportRef.current;
@@ -351,6 +399,16 @@ function App() {
     const timestampedEntry = `${new Date().toLocaleTimeString()}: ${entry}`;
     setLogs((prev) => appendBoundedLog(prev, { text: timestampedEntry, category: classifyLogEntry(entry) }));
   };
+
+  async function syncFeedPeer(peerId: string): Promise<void> {
+    const sync = feedSyncPeerRef.current;
+    if (!sync) return;
+    try {
+      await sync(peerId);
+    } catch {
+      addLog(`Feed sync failed for ${peerId.slice(0, 12)}`);
+    }
+  }
 
   const statusLabel = useMemo(() => {
     switch (connectionStatus) {
@@ -862,6 +920,9 @@ function App() {
       identity.id,
       (peer, state) => {
         if (!isCurrentManager(peer)) return;
+        if (state === 'disconnected') {
+          feedDisconnectSubscribersRef.current.forEach((subscriber) => subscriber(peer));
+        }
         setConnectionStatus(state);
         updateContactState(peer, { connected: state === 'connected', lastConnectionStatus: state });
         if (state !== 'connected') {
@@ -938,56 +999,51 @@ function App() {
           addLog(`Sent ${feedPage.objects.length} canonical feed objects to ${peer}`);
         }
       },
-      async (peer: string, objects: DistributedObject[]) => {
-        if (!isCurrentManager(peer)) return;
-        if (blockedPeersRef.current.has(peer)) {
-          addLog(`Blocked peer ${peer} batch ignored`);
-          return;
-        }
-
-        const store = objectStoreRef.current;
-        const transport = objectTransportRef.current;
-        if (!store || !transport) return;
-        const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
-        const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
-        let storedFlags: boolean[];
+      async (peer: string, objects: DistributedObject[], page?: FeedPageMetadata) => {
+        let processingError: unknown;
         try {
-          storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
-        } catch (error) {
-          for (const object of objects) {
-            if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
-              inboxServiceRef.current?.notifyObjectStored(object);
-            }
-          }
-          throw error;
-        }
-        const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
-        newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
-        const receivedViews: LocalPostView[] = [];
-        for (const object of newlyStoredObjects) {
-          recommendationIndexRef.current.add(object);
-          setRecommendationRevision((revision) => revision + 1);
-          const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
-          if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
-        }
+          if (!isCurrentManager(peer)) throw new Error('Feed batch peer is no longer active');
+          if (blockedPeersRef.current.has(peer)) throw new Error('Feed batch peer is blocked');
 
-        setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
-        // Only advance the cursor when something was actually received, and use the newest
-        // post timestamp (not wall-clock now) so an empty/partial batch never causes older,
-        // not-yet-synced posts to become permanently unreachable on future requests.
-        if (newlyStoredObjects.length > 0) {
-          const latestTimestamp = newlyStoredObjects.reduce(
-            (latest, object) => Math.max(latest, new Date(object.created_at).getTime()),
-            0
-          );
-          const cursorKey = `myceliumHomeSync:${peer}`;
-          const existingCursor = localStorage.getItem(cursorKey);
-          const existingCursorMs = existingCursor ? Date.parse(existingCursor) : 0;
-          if (latestTimestamp > existingCursorMs) {
-            localStorage.setItem(cursorKey, new Date(latestTimestamp).toISOString());
+          const store = objectStoreRef.current;
+          const transport = objectTransportRef.current;
+          if (!store || !transport) throw new Error('Feed batch storage is unavailable');
+          const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
+          const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
+          let storedFlags: boolean[];
+          try {
+            storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+          } catch (error) {
+            for (const object of objects) {
+              if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
+                inboxServiceRef.current?.notifyObjectStored(object);
+              }
+            }
+            throw error;
+          }
+          const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+          newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
+          const receivedViews: LocalPostView[] = [];
+          for (const object of newlyStoredObjects) {
+            recommendationIndexRef.current.add(object);
+            setRecommendationRevision((revision) => revision + 1);
+            const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+            if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
+          }
+
+          setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
+          addLog(`Received ${newlyStoredObjects.length} canonical posts from ${peer}`);
+        } catch (error) {
+          processingError = error instanceof Error ? error : new Error('Feed batch processing failed');
+          if (page) addLog(`Feed batch processing failed for ${peer.slice(0, 12)}`);
+          else throw error;
+        } finally {
+          if (page?.request_id) {
+            feedBatchSubscribersRef.current.forEach((subscriber) => {
+              subscriber(peer, page, objects, processingError);
+            });
           }
         }
-        addLog(`Received ${newlyStoredObjects.length} canonical posts from ${peer}`);
       },
       async (peer: string) => {
         if (!isCurrentManager(peer)) return;
@@ -1001,14 +1057,14 @@ function App() {
         if (manager) {
           await sendPeerMetadata(manager, peer);
           const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
-          if (contact?.followed) {
-            manager.sendRequestPosts(null, 200);
-            addLog(`Requested full home feed from ${peer} after data channel opened`);
+          if (contact?.followed || profileContactIdRef.current === peer) {
+            void syncFeedPeer(peer);
           }
         }
       },
       (peer: string) => {
         if (!isCurrentManager(peer)) return;
+        feedDisconnectSubscribersRef.current.forEach((subscriber) => subscriber(peer));
         for (const state of findAggregationRef.current.values()) {
           if (state.aggregation.hasChild(peer)) {
             addLog(`child ${peer} disconnected`);
@@ -1781,10 +1837,7 @@ function App() {
         const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
         if (!manager) continue;
 
-        if (manager.isDataChannelOpen()) {
-          manager.sendRequestPosts(null, 200);
-          addLog(`Requested full home feed from ${contact.fingerprint}`);
-        } else if (contact.online) {
+        if (!manager.isDataChannelOpen() && contact.online) {
           const channelState = manager.getDataChannelState();
           if (channelState === 'closed' || channelState === 'missing') {
             requestPeerOffer(contact.fingerprint, manager, socket);
@@ -1792,6 +1845,18 @@ function App() {
           }
         }
       }
+
+      const connectedFollowedPeers = followedPeers
+        .filter((contact) => peerManagersRef.current[contact.fingerprint]?.isDataChannelOpen())
+        .map((contact) => contact.fingerprint);
+      let nextPeerIndex = 0;
+      const workers = Array.from({ length: Math.min(3, connectedFollowedPeers.length) }, async () => {
+        while (nextPeerIndex < connectedFollowedPeers.length) {
+          const index = nextPeerIndex++;
+          await syncFeedPeer(connectedFollowedPeers[index]);
+        }
+      });
+      await Promise.all(workers);
 
       localStorage.setItem('myceliumLastHomeSync', new Date().toISOString());
     } finally {
@@ -2086,6 +2151,7 @@ function App() {
     }
 
     setProfileContactId(peerId);
+    profileContactIdRef.current = peerId;
     setPage('profile');
     setProfileNotice(null);
 
@@ -2103,7 +2169,7 @@ function App() {
         requestPeerOffer(peerId, manager, socket);
       }
       manager.requestProfile();
-      manager.sendRequestPosts(null, 200);
+      if (manager.isDataChannelOpen()) void syncFeedPeer(peerId);
       return;
     }
 
