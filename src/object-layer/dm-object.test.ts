@@ -414,6 +414,21 @@ describe('mycelium.dm objects', () => {
     expect(await validateObject(stored)).toBe(true);
   });
 
+  it('adds feed page metadata only when supplied to the OBJECT_BATCH builder', async () => {
+    const { sender, object } = await sendDm('batch page metadata');
+    const page = {
+      request_id: 'feed-request',
+      next_cursor: { created_at: object.created_at, object_id: object.object_id },
+      has_more: true
+    };
+
+    const feedPacket = await buildObjectBatchPacket(sender.id, 'peer-b', [object], undefined, page);
+    const ordinaryPacket = await buildObjectBatchPacket(sender.id, 'peer-b', [object]);
+
+    expect(feedPacket.payload).toEqual({ objects: [object], page });
+    expect(ordinaryPacket.payload).toEqual({ objects: [object] });
+  });
+
   it('preserves recipient through generic discovery result parsing', async () => {
     const { object, recipient } = await sendDm('discovery parser');
     const sentPackets: string[] = [];

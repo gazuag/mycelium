@@ -1,6 +1,6 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
 import { isObjectExpired, validateDistributedObject, validateObject } from './envelope';
-import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
+import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, FeedPageMetadata, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
 export const MAX_FIND_QUERY_LIMIT = 500;
@@ -21,9 +21,10 @@ export async function buildObjectBatchPacket(
   sender: string,
   recipient: string,
   objects: DistributedObject[],
-  signer?: PacketSigner
+  signer?: PacketSigner,
+  page?: FeedPageMetadata
 ): Promise<ObjectBatchPacket> {
-  return await buildPacket(sender, recipient, 'OBJECT_BATCH', { objects }, signer) as ObjectBatchPacket;
+  return await buildPacket(sender, recipient, 'OBJECT_BATCH', { objects, ...(page ? { page } : {}) }, signer) as ObjectBatchPacket;
 }
 
 export async function queryFeedObjectsForPeer(

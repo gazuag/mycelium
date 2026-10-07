@@ -70,6 +70,25 @@ describe('queryFeedPage', () => {
     expect(page.next_cursor).toEqual(cursor(objects[3]));
   });
 
+  it('serves disjoint consecutive keyset pages for sequential requests', async () => {
+    const store = createMemoryStore();
+    const objects = await makeChronologicalObjects(5);
+    await add(store, ...objects);
+
+    const first = await queryFeedPage(store, authorIdentity.publicKey, {
+      after: { created_at: at(-1), object_id: '' },
+      limit: 2
+    });
+    const second = await queryFeedPage(store, authorIdentity.publicKey, {
+      after: first.next_cursor,
+      limit: 2
+    });
+
+    expect(first.objects.map(({ object_id }) => object_id)).toEqual(objects.slice(0, 2).map(({ object_id }) => object_id));
+    expect(second.objects.map(({ object_id }) => object_id)).toEqual(objects.slice(2, 4).map(({ object_id }) => object_id));
+    expect(first.objects.some((object) => second.objects.some((next) => next.object_id === object.object_id))).toBe(false);
+  });
+
   it('continues at the last core key and pages all 450 mixed objects exactly once', async () => {
     const store = createMemoryStore();
     const objects = await Promise.all(Array.from({ length: 450 }, (_, index) =>

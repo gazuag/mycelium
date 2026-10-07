@@ -4,6 +4,8 @@ export * from './envelope';
 export * from './identity';
 export * from './local-store';
 export * from './post-state';
+export * from './feed-page';
+export * from './feed-sync';
 export * from './recommendations';
 export * from './transport';
 export * from './dm-send';

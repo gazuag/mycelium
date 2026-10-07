@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { DistributedObject, ObjectPacket } from '../object-layer/types';
+import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
 import { configureIceServers, PeerConnectionManager, POST_REQUEST_LIMIT_MAX } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
@@ -105,10 +105,10 @@ const fakeSocket = () => ({ send: vi.fn() } as unknown as WebSocket);
 
 function createManager(options: {
   localId?: string;
-  onRequestPosts?: (peerId: string, since?: string | null, limit?: number) => void;
+  onRequestPosts?: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
   onEvent?: (peerId: string, event: string) => void;
   onObject?: (peerId: string, object: DistributedObject) => void;
-  onObjectsBatch?: (peerId: string, objects: DistributedObject[]) => void;
+  onObjectsBatch?: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void;
 } = {}) {
   return new PeerConnectionManager(
     options.localId ?? 'peer-a',
@@ -187,6 +187,65 @@ describe('POST_REQUEST limit handling', () => {
     });
 
     expect(requests).toEqual([{ limit: 42 }]);
+  });
+
+  it('clamps POST_REQUEST limits to the feed page maximum of 200', () => {
+    const requests: Array<{ limit?: number }> = [];
+    const manager = createManager({ onRequestPosts: (_peerId, _since, limit) => requests.push({ limit }) });
+    (manager as any).handleMyceliumPacket({ type: 'POST_REQUEST', sender: 'peer-b', payload: { limit: 500 } });
+    expect(requests).toEqual([{ limit: 200 }]);
+  });
+
+  it('round-trips after and requestId while treating malformed values as absent', () => {
+    const requests: Array<{ since?: string | null; limit?: number; after?: FeedCursor | null; requestId?: string }> = [];
+    const manager = createManager({
+      onRequestPosts: (_peerId, since, limit, after, requestId) => requests.push({ since, limit, after, requestId })
+    });
+    const sendPacket = vi.fn();
+    (manager as any).sendPacket = sendPacket;
+    const after = { created_at: '2026-10-07T08:00:00.000Z', object_id: 'a'.repeat(64) };
+
+    manager.sendRequestPosts(null, 200, { after, requestId: 'request-1' });
+    expect(sendPacket).toHaveBeenCalledWith('POST_REQUEST', { since: null, limit: 200, after, requestId: 'request-1' });
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { since: 'ignored-cursor', limit: 200, after, requestId: 'request-1' }
+    });
+    (manager as any).handleMyceliumPacket({
+      type: 'POST_REQUEST',
+      sender: 'peer-b',
+      payload: { after: { created_at: 'bad', object_id: 9 }, requestId: 12 }
+    });
+
+    expect(requests).toEqual([
+      { since: 'ignored-cursor', limit: 200, after, requestId: 'request-1' },
+      { since: null, limit: 100, after: null, requestId: undefined }
+    ]);
+  });
+
+  it('forwards valid page metadata and continues handling legacy batches without it', () => {
+    const batches: Array<{ objects: DistributedObject[]; page?: FeedPageMetadata }> = [];
+    const manager = createManager({
+      onObjectsBatch: (_peerId, objects, page) => batches.push({ objects, page })
+    });
+    const object = { object_id: 'a'.repeat(64) } as DistributedObject;
+    const page: FeedPageMetadata = {
+      request_id: 'request-2',
+      next_cursor: { created_at: '2026-10-07T08:00:00.000Z', object_id: object.object_id },
+      has_more: true
+    };
+    const sendPacket = vi.fn();
+    (manager as any).sendPacket = sendPacket;
+
+    manager.sendObjectsBatch([object]);
+    manager.sendObjectsBatch([object], page);
+    (manager as any).handleMyceliumPacket({ type: 'OBJECT_BATCH', sender: 'peer-b', payload: { objects: [object] } });
+    (manager as any).handleMyceliumPacket({ type: 'OBJECT_BATCH', sender: 'peer-b', payload: { objects: [object], page } });
+
+    expect(sendPacket).toHaveBeenNthCalledWith(1, 'OBJECT_BATCH', { objects: [object] });
+    expect(sendPacket).toHaveBeenNthCalledWith(2, 'OBJECT_BATCH', { objects: [object], page });
+    expect(batches).toEqual([{ objects: [object], page: undefined }, { objects: [object], page }]);
   });
 });
 

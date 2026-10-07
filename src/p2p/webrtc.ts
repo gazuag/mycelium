@@ -1,18 +1,50 @@
 import type { PeerSignalMessage, SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata } from '../types';
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
-import type { DistributedObject, ObjectPacket } from '../object-layer/types';
+import { MAX_FEED_PAGE_SIZE } from '../object-layer/feed-page';
+import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
 let ICE_SERVERS: RTCIceServer[] = FALLBACK_ICE_SERVERS;
 
-export const POST_REQUEST_LIMIT_MAX = 500;
+export const POST_REQUEST_LIMIT_MAX = MAX_FEED_PAGE_SIZE;
 const DEFAULT_POST_REQUEST_LIMIT = 100;
 
 function normalizePostRequestLimit(value: unknown): number {
   const normalized = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(normalized) || normalized <= 0) return DEFAULT_POST_REQUEST_LIMIT;
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) return DEFAULT_POST_REQUEST_LIMIT;
   return Math.min(normalized, POST_REQUEST_LIMIT_MAX);
+}
+
+function parseFeedCursor(value: unknown): FeedCursor | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const cursor = value as Partial<FeedCursor>;
+  return typeof cursor.created_at === 'string'
+    && !Number.isNaN(Date.parse(cursor.created_at))
+    && typeof cursor.object_id === 'string'
+    && cursor.object_id.length > 0
+    ? { created_at: cursor.created_at, object_id: cursor.object_id }
+    : null;
+}
+
+function parseFeedPageMetadata(value: unknown): FeedPageMetadata | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const page = value as Partial<FeedPageMetadata>;
+  if ((page.request_id !== null && typeof page.request_id !== 'string')
+    || typeof page.has_more !== 'boolean') {
+    return undefined;
+  }
+  const nextCursor = page.next_cursor === null ? null : parseFeedCursor(page.next_cursor);
+  if (page.next_cursor !== null && nextCursor === null) return undefined;
+  return {
+    request_id: page.request_id ?? null,
+    next_cursor: nextCursor,
+    has_more: page.has_more
+  };
+}
+
+function parseRequestId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
 export function configureIceServers(iceServers: RTCIceServer[]) {
@@ -34,8 +66,8 @@ export class PeerConnectionManager {
   private onState: (peerId: string, state: ConnectionState) => void;
   private onObject: (peerId: string, object: DistributedObject) => void;
   private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
-  private onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void;
-  private onObjectsBatch: (peerId: string, objects: DistributedObject[]) => void;
+  private onRequestPosts: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
+  private onObjectsBatch: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void;
   private onSignal: (message: SignalMessage) => void;
   private onOpen: (peerId: string) => void;
   private onClose: (peerId: string) => void;
@@ -65,8 +97,8 @@ export class PeerConnectionManager {
     onSignal: (message: SignalMessage) => void,
     onObject: (peerId: string, object: DistributedObject) => void,
     onMetadata: (peerId: string, metadata: PeerMetadata) => void,
-    onRequestPosts: (peerId: string, since?: string | null, limit?: number) => void,
-    onObjectsBatch: (peerId: string, objects: DistributedObject[]) => void,
+    onRequestPosts: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void,
+    onObjectsBatch: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void,
     onOpen: (peerId: string) => void,
     onClose: (peerId: string) => void,
     onEvent: (peerId: string, event: string) => void,
@@ -294,7 +326,7 @@ export class PeerConnectionManager {
       case 'OBJECT_BATCH': {
         const objects = packet.payload?.objects;
         if (Array.isArray(objects)) {
-          this.onObjectsBatch(peerId, objects as DistributedObject[]);
+          this.onObjectsBatch(peerId, objects as DistributedObject[], parseFeedPageMetadata(packet.payload?.page));
         }
         return;
       }
@@ -339,7 +371,9 @@ export class PeerConnectionManager {
         this.onRequestPosts(
           peerId,
           typeof packet.payload?.since === 'string' ? packet.payload.since : null,
-          normalizePostRequestLimit(packet.payload?.limit)
+          normalizePostRequestLimit(packet.payload?.limit),
+          parseFeedCursor(packet.payload?.after),
+          parseRequestId(packet.payload?.requestId)
         );
         return;
       }
@@ -462,12 +496,21 @@ export class PeerConnectionManager {
     void this.sendPacket('PROFILE_REQUEST', {});
   }
 
-  public sendRequestPosts(since: string | null = null, limit = 100) {
-    void this.sendPacket('POST_REQUEST', { since, limit });
+  public sendRequestPosts(
+    since: string | null = null,
+    limit = 100,
+    options: { after?: FeedCursor | null; requestId?: string } = {}
+  ) {
+    void this.sendPacket('POST_REQUEST', {
+      since,
+      limit,
+      ...(options.after === undefined ? {} : { after: options.after }),
+      ...(options.requestId === undefined ? {} : { requestId: options.requestId })
+    });
   }
 
-  public sendObjectsBatch(objects: DistributedObject[]) {
-    void this.sendPacket('OBJECT_BATCH', { objects });
+  public sendObjectsBatch(objects: DistributedObject[], page?: FeedPageMetadata) {
+    void this.sendPacket('OBJECT_BATCH', { objects, ...(page ? { page } : {}) });
   }
 
   public async createOffer(remoteId: string, signallingSocket: WebSocket) {

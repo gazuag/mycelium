@@ -29,7 +29,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedObjectsForPeer, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
@@ -916,7 +916,7 @@ function App() {
         }
         await handlePeerMetadata(peer, metadata);
       },
-      async (peer: string, since: string | null = null, limit = 100) => {
+      async (peer: string, _since: string | null = null, limit = 100, after: FeedCursor | null = null, requestId?: string) => {
         if (!isCurrentManager(peer)) return;
         if (blockedPeersRef.current.has(peer)) {
           addLog(`Blocked peer ${peer} requested feed ignored`);
@@ -924,14 +924,18 @@ function App() {
         }
 
         const store = objectStoreRef.current;
-        const feedObjects = store && identityRef.current
-          ? await queryFeedObjectsForPeer(store, identityRef.current.publicKey, { since, limit: Math.max(1, limit) })
-          : [];
+        const feedPage = store && identityRef.current
+          ? await queryFeedPage(store, identityRef.current.publicKey, { after, limit: Math.max(1, limit) })
+          : { objects: [], next_cursor: after, has_more: false };
 
         const manager = peerManagersRef.current[peer];
         if (manager) {
-          manager.sendObjectsBatch(feedObjects);
-          addLog(`Sent ${feedObjects.length} canonical posts to ${peer}`);
+          manager.sendObjectsBatch(feedPage.objects, {
+            request_id: requestId ?? null,
+            next_cursor: feedPage.next_cursor,
+            has_more: feedPage.has_more
+          });
+          addLog(`Sent ${feedPage.objects.length} canonical feed objects to ${peer}`);
         }
       },
       async (peer: string, objects: DistributedObject[]) => {

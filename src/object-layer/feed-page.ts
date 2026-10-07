@@ -1,13 +1,10 @@
 import { isObjectExpired, validateDistributedObject } from './envelope';
-import type { DistributedObject, ObjectStore } from './types';
+import type { DistributedObject, FeedCursor, ObjectStore } from './types';
+
+export type { FeedCursor } from './types';
 
 const DEFAULT_FEED_PAGE_SIZE = 100;
-const MAX_FEED_PAGE_SIZE = 200;
-
-export type FeedCursor = {
-  created_at: string;
-  object_id: string;
-};
+export const MAX_FEED_PAGE_SIZE = 200;
 
 export interface FeedPage {
   readonly objects: DistributedObject[];

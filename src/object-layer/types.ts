@@ -79,7 +79,42 @@ export interface ObjectBatchPacket {
   readonly timestamp: string;
   readonly sender: string;
   readonly recipient: string | null;
-  readonly payload: { readonly objects: readonly DistributedObject[] };
+  readonly payload: {
+    readonly objects: readonly DistributedObject[];
+    readonly page?: ObjectBatchPage;
+  };
+  readonly signature: string;
+}
+
+export interface FeedCursor {
+  readonly created_at: string;
+  readonly object_id: string;
+}
+
+export interface FeedPageMetadata {
+  readonly request_id: string | null;
+  readonly next_cursor: FeedCursor | null;
+  readonly has_more: boolean;
+}
+
+export interface PostRequestPayload {
+  readonly since?: string | null;
+  readonly limit?: number;
+  readonly after?: FeedCursor | null;
+  readonly requestId?: string;
+}
+
+export type ObjectBatchPage = FeedPageMetadata;
+
+export interface PostRequestPacket {
+  readonly protocol: 'mycelium';
+  readonly version: 1;
+  readonly id: string;
+  readonly type: 'POST_REQUEST';
+  readonly timestamp: string;
+  readonly sender: string;
+  readonly recipient: string | null;
+  readonly payload: PostRequestPayload;
   readonly signature: string;
 }
 
