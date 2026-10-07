@@ -9,6 +9,8 @@ import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
 import { createDmService } from './object-layer/dm-service';
 import { createOutboxService } from './object-layer/outbox-service';
+import { dedupeContactsByFingerprint } from './contact-utils';
+import { DmUnreadProvider } from './hooks/useDmUnread';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
@@ -70,31 +72,6 @@ const DEFAULT_FEED_MIX: FeedMixSettings = {
   followedLikes: 40,
   discoveryRandom: 0
 };
-
-function dedupeContactsByFingerprint(items: Contact[]) {
-  const mergedByFingerprint = new Map<string, Contact>();
-
-  for (const contact of items) {
-    const existing = mergedByFingerprint.get(contact.fingerprint);
-    if (!existing) {
-      mergedByFingerprint.set(contact.fingerprint, contact);
-      continue;
-    }
-
-    mergedByFingerprint.set(contact.fingerprint, {
-      ...existing,
-      ...contact,
-      displayName: contact.displayName ?? existing.displayName,
-      profile: contact.profile ?? existing.profile,
-      addedAt: existing.addedAt < contact.addedAt ? existing.addedAt : contact.addedAt,
-      unreadMessages: Math.max(existing.unreadMessages ?? 0, contact.unreadMessages ?? 0),
-      online: contact.online ?? existing.online,
-      connected: contact.connected ?? existing.connected
-    });
-  }
-
-  return Array.from(mergedByFingerprint.values());
-}
 
 function isValidPeerFingerprint(value: string) {
   return /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(value.trim());
@@ -817,7 +794,6 @@ function App() {
             follower: metadata.following,
             online: true,
             connected: true,
-            unreadMessages: 0,
           };
 
       void saveContact(updatedContact);
@@ -847,7 +823,6 @@ function App() {
       follower: false,
       online: false,
       connected: false,
-      unreadMessages: 0,
     };
     await saveContact(contact);
     const nextContacts = dedupeContactsByFingerprint([...contactsRef.current, contact]);
@@ -1441,10 +1416,10 @@ function App() {
       follower: existing?.follower,
       online: existing?.online ?? false,
       connected: existing?.connected ?? false,
-      unreadMessages: existing?.unreadMessages ?? 0,
       lastConnectionStatus: existing?.lastConnectionStatus,
       lastSeen: existing?.lastSeen,
-      profile: existing?.profile
+      profile: existing?.profile,
+      lastReadAt: existing?.lastReadAt
     };
 
     await saveContact(contact);
@@ -1900,7 +1875,7 @@ function App() {
         addedAt: contact.addedAt,
         lastConnectionStatus: contact.lastConnectionStatus,
         lastSeen: contact.lastSeen,
-        unreadMessages: contact.unreadMessages ?? 0,
+        lastReadAt: contact.lastReadAt,
         profile: contact.profile
           ? {
               ...contact.profile,
@@ -1989,7 +1964,9 @@ function App() {
                 connected: Boolean(contact.connected),
                 lastConnectionStatus: typeof contact.lastConnectionStatus === 'string' ? contact.lastConnectionStatus : undefined,
                 lastSeen: typeof contact.lastSeen === 'string' ? contact.lastSeen : undefined,
-                unreadMessages: Number(contact.unreadMessages ?? 0),
+                lastReadAt: typeof contact.lastReadAt === 'string' && Number.isFinite(Date.parse(contact.lastReadAt))
+                  ? contact.lastReadAt
+                  : undefined,
               })).filter((contact: Contact) => Boolean(contact.fingerprint && contact.publicKey))
             : [];
 
@@ -2063,8 +2040,6 @@ function App() {
     setChatContactId(peerId);
     setPage('chat');
     addLog(`Selected contact ${peerId}`);
-    updateContactState(peerId, { unreadMessages: 0 });
-
     const socket = signallingSocketRef.current;
     const manager = ensurePeerManager(peerId);
     const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
@@ -2094,7 +2069,6 @@ function App() {
         followed: false,
         online: false,
         connected: false,
-        unreadMessages: 0,
       };
       await saveContact(resolvedContact);
       setContacts((prev) => dedupeContactsByFingerprint([...prev, resolvedContact!]));
@@ -2551,8 +2525,10 @@ function App() {
   const resolveDmSenderEncryptionKey = useCallback((publicKey: string) => {
     const contact = contactsRef.current.find((candidate) => candidate.publicKey === publicKey);
     return contact ? getContactEncryptionKey(contact) : null;
-  }, [contacts]);
-
+  }, []);
+  const isDmContactKnown = useCallback((publicKey: string) => (
+    contactsRef.current.some((contact) => contact.publicKey === publicKey)
+  ), []);
   if (!identity) {
     return (
       <LandingPage
@@ -2563,6 +2539,22 @@ function App() {
   }
 
   return (
+    <DmUnreadProvider
+      store={objectStoreRef.current}
+      myPublicKey={identity.publicKey}
+      contacts={contacts}
+      events={dmEventsRef.current}
+      saveContact={saveContact}
+      updateContact={(updatedContact) => {
+        const nextContacts = contactsRef.current.map((contact) => (
+          contact.publicKey === updatedContact.publicKey ? updatedContact : contact
+        ));
+        contactsRef.current = nextContacts;
+        setContacts((previous) => previous.map((contact) => (
+          contact.publicKey === updatedContact.publicKey ? updatedContact : contact
+        )));
+      }}
+    >
     <div className="app-shell">
       <AppHeader
         collapsed={collapsedHeader}
@@ -2573,7 +2565,6 @@ function App() {
         connectedPeerIds={connectedPeerIds}
         syncStatus={syncStatus}
         myFingerprint={identity?.id}
-        unreadCount={contacts.filter((contact) => (contact.unreadMessages || 0) > 0).length}
         onOpenMyProfile={() => setPage('myProfile')}
         onOpenSettings={() => setPage('settings')}
         onOpenPeopleInbox={() => setPage('people')}
@@ -2768,6 +2759,7 @@ function App() {
             resolveSenderEncryptionKey={resolveDmSenderEncryptionKey}
             dmService={dmServiceRef.current}
             events={dmEventsRef.current}
+            isContactKnown={isDmContactKnown}
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
           />
         )}
@@ -2840,6 +2832,7 @@ function App() {
 
       <TabBar active={page === 'home' || page === 'people' || page === 'discover' ? page : 'home'} onChange={handlePageChange} />
     </div>
+    </DmUnreadProvider>
   );
 }
 

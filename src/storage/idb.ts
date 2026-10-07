@@ -79,7 +79,16 @@ export async function openDatabase() {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
+    request.onblocked = () => {
+      console.warn('IndexedDB upgrade is blocked by another open connection.');
+    };
+    request.onsuccess = () => {
+      const database = request.result;
+      database.onversionchange = () => {
+        database.close();
+      };
+      resolve(database);
+    };
     request.onerror = () => reject(request.error);
   });
 }

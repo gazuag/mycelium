@@ -3,6 +3,7 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { BlockButton } from './BlockButton';
+import { useDmUnread } from '../hooks/useDmUnread';
 
 interface PeerCardProps {
   contact: Contact;
@@ -14,6 +15,8 @@ interface PeerCardProps {
 }
 
 export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlock }: PeerCardProps) {
+  const { byContact } = useDmUnread();
+  const unreadCount = byContact[contact.publicKey] ?? 0;
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
   return (
@@ -28,7 +31,7 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
         </button>
         <div className="peer-badges">
           <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
-          {contact.unreadMessages ? <span className="status-pill unread">{contact.unreadMessages} new</span> : null}
+          {unreadCount > 0 ? <span className="status-pill unread">{unreadCount} new</span> : null}
         </div>
       </div>
       <div className="peer-card-footer">

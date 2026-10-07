@@ -19,6 +19,7 @@ export interface DmChatPageProps {
   resolveSenderEncryptionKey: SenderEncryptionKeyResolver;
   dmService: DmConversationService | null;
   events: DmEvents;
+  isContactKnown?: (publicKey: string) => boolean;
   connectionText: string;
 }
 
@@ -45,6 +46,7 @@ export function DmChatPage({
   resolveSenderEncryptionKey,
   dmService,
   events,
+  isContactKnown,
   connectionText
 }: DmChatPageProps) {
   const { messages, loading, send, sending, canSend, noKey } = useDmConversation({
@@ -54,7 +56,8 @@ export function DmChatPage({
     outbox,
     resolveSenderEncryptionKey,
     dmService,
-    events
+    events,
+    isContactKnown
   });
   const [draft, setDraft] = useState('');
   const [offlineNote, setOfflineNote] = useState('');

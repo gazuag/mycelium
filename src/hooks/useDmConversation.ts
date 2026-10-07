@@ -6,6 +6,7 @@ import type { DmObjectIdentity } from '../object-layer/dm-object';
 import type { SenderEncryptionKeyResolver } from '../object-layer/dm-inbox';
 import type { SendMessageResult } from '../object-layer/dm-service';
 import type { DistributedObject, ObjectStore } from '../object-layer/types';
+import { useDmUnread } from './useDmUnread';
 
 export interface DmConversationOutbox {
   get(objectId: string): Promise<{ delivered_direct: boolean; replicated_to: string[] } | null>;
@@ -23,6 +24,7 @@ export interface UseDmConversationOptions {
   resolveSenderEncryptionKey: SenderEncryptionKeyResolver;
   dmService: DmConversationService | null;
   events: DmEvents;
+  isContactKnown?: (publicKey: string) => boolean;
   refreshIntervalMs?: number;
 }
 
@@ -40,6 +42,7 @@ export function useDmConversation({
   resolveSenderEncryptionKey,
   dmService,
   events,
+  isContactKnown,
   refreshIntervalMs = 5000
 }: UseDmConversationOptions): {
   messages: ConversationMessage[];
@@ -50,6 +53,13 @@ export function useDmConversation({
   noKey: boolean;
 } {
   const identity = getIdentity();
+  const { markRead } = useDmUnread();
+  const markReadRef = useRef(markRead);
+  const resolveSenderEncryptionKeyRef = useRef(resolveSenderEncryptionKey);
+  const isContactKnownRef = useRef(isContactKnown);
+  markReadRef.current = markRead;
+  resolveSenderEncryptionKeyRef.current = resolveSenderEncryptionKey;
+  isContactKnownRef.current = isContactKnown;
   const conversationKey = `${identity?.publicKey ?? ''}\u0000${counterparty ?? ''}`;
   const currentKeyRef = useRef(conversationKey);
   currentKeyRef.current = conversationKey;
@@ -67,6 +77,11 @@ export function useDmConversation({
   });
   const [sending, setSending] = useState(false);
   const generationRef = useRef(0);
+  const noKeyConversationRef = useRef(conversationKey);
+
+  useEffect(() => {
+    if (counterparty) void markReadRef.current(counterparty);
+  }, [counterparty, identity?.publicKey]);
 
   useEffect(() => {
     const generation = ++generationRef.current;
@@ -76,7 +91,10 @@ export function useDmConversation({
     let eventTimer: ReturnType<typeof setTimeout> | null = null;
     setMessageState({ key, messages: [] });
     setLoadingState({ key, loading: Boolean(identityForConversation && counterparty) });
-    setNoKeyState({ key, noKey: true });
+    if (noKeyConversationRef.current !== key) {
+      noKeyConversationRef.current = key;
+      setNoKeyState({ key, noKey: true });
+    }
     setSending(false);
 
     if (!identityForConversation || !counterparty) {
@@ -94,15 +112,19 @@ export function useDmConversation({
       if (initial) setLoadingState({ key, loading: true });
       try {
         const trustedEncryptionKey = await getContactEncryptionKey({
-          encryptionPublicKey: (await resolveSenderEncryptionKey(counterparty)) ?? undefined
+          encryptionPublicKey: (await resolveSenderEncryptionKeyRef.current(counterparty)) ?? undefined
         });
         if (!isCurrent()) return;
-        setNoKeyState({ key, noKey: trustedEncryptionKey === null });
+        if (trustedEncryptionKey !== null) {
+          setNoKeyState({ key, noKey: false });
+        } else if (isContactKnownRef.current?.(counterparty) ?? true) {
+          setNoKeyState({ key, noKey: true });
+        }
         const messages = await loadConversation({
           store,
           identity: identityForConversation,
           counterparty,
-          resolveSenderEncryptionKey,
+          resolveSenderEncryptionKey: (publicKey) => resolveSenderEncryptionKeyRef.current(publicKey),
           getOutboxEntry: (objectId) => outbox.get(objectId)
         });
         if (isCurrent()) setMessageState({ key, messages });
@@ -116,6 +138,9 @@ export function useDmConversation({
     void load(true);
     const unsubscribe = events.onDmArrived((object: DistributedObject) => {
       if (object.author !== counterparty && object.recipient !== counterparty) return;
+      if (object.author === counterparty && object.recipient === identityForConversation.publicKey) {
+        void markReadRef.current(counterparty);
+      }
       if (eventTimer !== null) clearTimeout(eventTimer);
       eventTimer = setTimeout(() => {
         eventTimer = null;
@@ -140,11 +165,10 @@ export function useDmConversation({
     identity?.encryptionPublicKey,
     store,
     outbox,
-    resolveSenderEncryptionKey,
     dmService,
     events,
     refreshIntervalMs,
-    getIdentity
+    getIdentity,
   ]);
 
   const currentMessages = messageState.key === conversationKey ? messageState.messages : [];

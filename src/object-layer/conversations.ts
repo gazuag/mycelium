@@ -73,6 +73,82 @@ export async function listConversations({
     ));
 }
 
+export async function countUnread({
+    store,
+    myPublicKey,
+    counterparty,
+    since
+}: {
+    store: ObjectStore;
+    myPublicKey: string;
+    counterparty: string;
+    since: string | null;
+}): Promise<number> {
+    const objects = await store.query({
+      object_type: 'mycelium.dm',
+      author: counterparty,
+      recipient: myPublicKey
+    });
+    const sinceTime = since === null ? null : Date.parse(since);
+    return objects.filter((object) => (
+      object.object_type === 'mycelium.dm'
+      && object.author === counterparty
+      && object.recipient === myPublicKey
+      && !isObjectExpired(object)
+      && (sinceTime === null || Date.parse(object.created_at) > sinceTime)
+    )).length;
+}
+
+export async function countUnreadByCounterparty({
+    store,
+    myPublicKey,
+    sinceByCounterparty
+}: {
+    store: ObjectStore;
+    myPublicKey: string;
+    sinceByCounterparty: ReadonlyMap<string, string | null>;
+}): Promise<Map<string, number>> {
+    const counts = new Map([...sinceByCounterparty.keys()].map((counterparty) => [counterparty, 0]));
+    if (counts.size === 0) return counts;
+
+    const objects = await store.query({ object_type: 'mycelium.dm', recipient: myPublicKey });
+    for (const object of objects) {
+      if (!sinceByCounterparty.has(object.author)
+        || object.object_type !== 'mycelium.dm'
+        || object.author === myPublicKey
+        || object.recipient !== myPublicKey
+        || isObjectExpired(object)) continue;
+      const since = sinceByCounterparty.get(object.author) ?? null;
+      const sinceTime = since === null ? null : Date.parse(since);
+      if (sinceTime === null || Date.parse(object.created_at) > sinceTime) {
+        counts.set(object.author, (counts.get(object.author) ?? 0) + 1);
+      }
+    }
+    return counts;
+}
+
+export async function newestIncomingDmAt({
+    store,
+    myPublicKey,
+    counterparty
+}: {
+    store: ObjectStore;
+    myPublicKey: string;
+    counterparty: string;
+}): Promise<string | null> {
+    const objects = await store.query({
+      object_type: 'mycelium.dm',
+      author: counterparty,
+      recipient: myPublicKey
+    });
+    return objects
+      .filter((object) => object.object_type === 'mycelium.dm'
+        && object.author === counterparty
+        && object.recipient === myPublicKey
+        && !isObjectExpired(object))
+      .sort(compareNewestFirst)[0]?.created_at ?? null;
+}
+
 export async function loadConversation({
   store,
   identity,

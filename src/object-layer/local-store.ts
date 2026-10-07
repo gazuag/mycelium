@@ -30,17 +30,16 @@ export interface OutboxStore {
 }
 
 export class IndexedDbObjectStore implements ObjectStore {
-  private readonly databasePromise: Promise<IDBDatabase>;
-
-  constructor() {
-    this.databasePromise = openObjectDatabase();
+  private readonly getDatabase = createObjectDatabaseAccessor();
+  private get databasePromise(): Promise<IDBDatabase> {
+    return this.getDatabase();
   }
 
   async put(object: DistributedObject): Promise<boolean> {
     if (!(await validateDistributedObject(object))) {
       throw new Error('Invalid distributed object');
     }
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(OBJECT_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(OBJECT_STORE_NAME);
@@ -58,7 +57,7 @@ export class IndexedDbObjectStore implements ObjectStore {
   }
 
   async get(objectId: string): Promise<DistributedObject | null> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     const object = await runRequest<DistributedObject | undefined>(database, 'readonly', (store) => store.get(objectId));
     if (object && isObjectExpired(object)) {
       await this.delete(objectId);
@@ -68,12 +67,12 @@ export class IndexedDbObjectStore implements ObjectStore {
   }
 
   async delete(objectId: string): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     await runTransaction(database, 'readwrite', (store) => store.delete(objectId));
   }
 
   async query(criteria: ObjectCriteria = {}): Promise<DistributedObject[]> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     const objects = await runRequest<DistributedObject[]>(database, 'readonly', (store) => {
       if (criteria.recipient === undefined) return store.getAll();
       const range = IDBKeyRange.bound([criteria.recipient, ''], [criteria.recipient, '\uffff']);
@@ -104,43 +103,35 @@ export class IndexedDbObjectStore implements ObjectStore {
 }
 
 export class IndexedDbLocalPostMetadataStore implements LocalPostMetadataStore {
-  private readonly databasePromise: Promise<IDBDatabase>;
-
-  constructor() {
-    this.databasePromise = openObjectDatabase();
-  }
+  private readonly getDatabase = createObjectDatabaseAccessor();
 
   async put(metadata: LocalPostMetadata): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     await runTransaction(database, 'readwrite', (store) => store.put(metadata), LOCAL_POST_METADATA_STORE_NAME);
   }
 
   async get(objectId: string): Promise<LocalPostMetadata | null> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     const metadata = await runRequest<LocalPostMetadata | undefined>(database, 'readonly', (store) => store.get(objectId), LOCAL_POST_METADATA_STORE_NAME);
     return metadata ?? null;
   }
 
   async delete(objectId: string): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     await runTransaction(database, 'readwrite', (store) => store.delete(objectId), LOCAL_POST_METADATA_STORE_NAME);
   }
 
   async query(): Promise<LocalPostMetadata[]> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     return runRequest<LocalPostMetadata[]>(database, 'readonly', (store) => store.getAll(), LOCAL_POST_METADATA_STORE_NAME);
   }
 }
 
 export class IndexedDbRecommendationSequenceStore implements RecommendationSequenceStore {
-  private readonly databasePromise: Promise<IDBDatabase>;
-
-  constructor() {
-    this.databasePromise = openObjectDatabase();
-  }
+  private readonly getDatabase = createObjectDatabaseAccessor();
 
   async next(author: string): Promise<number> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(RECOMMENDATION_SEQUENCE_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(RECOMMENDATION_SEQUENCE_STORE_NAME);
@@ -158,14 +149,10 @@ export class IndexedDbRecommendationSequenceStore implements RecommendationSeque
 }
 
 export class IndexedDbOutboxStore implements OutboxStore {
-  private readonly databasePromise: Promise<IDBDatabase>;
-
-  constructor() {
-    this.databasePromise = openObjectDatabase();
-  }
+  private readonly getDatabase = createObjectDatabaseAccessor();
 
   async add(entry: OutboxEntry): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(OUTBOX_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(OUTBOX_STORE_NAME);
@@ -181,13 +168,13 @@ export class IndexedDbOutboxStore implements OutboxStore {
   }
 
   async get(objectId: string): Promise<OutboxEntry | null> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     const entry = await runRequest<OutboxEntry | undefined>(database, 'readonly', (store) => store.get(objectId), OUTBOX_STORE_NAME);
     return entry ?? null;
   }
 
   async listPending(limit: number): Promise<OutboxEntry[]> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     const entries = await runRequest<OutboxEntry[]>(database, 'readonly', (store) => store.getAll(), OUTBOX_STORE_NAME);
     return entries
       .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
@@ -195,17 +182,17 @@ export class IndexedDbOutboxStore implements OutboxStore {
   }
 
   async update(entry: OutboxEntry): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     await runTransaction(database, 'readwrite', (store) => store.put(entry), OUTBOX_STORE_NAME);
   }
 
   async remove(objectId: string): Promise<void> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     await runTransaction(database, 'readwrite', (store) => store.delete(objectId), OUTBOX_STORE_NAME);
   }
 
   async pruneExpired(now: Date): Promise<number> {
-    const database = await this.databasePromise;
+    const database = await this.getDatabase();
     return new Promise((resolve, reject) => {
       const transaction = database.transaction(OUTBOX_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(OUTBOX_STORE_NAME);
@@ -227,8 +214,20 @@ export class IndexedDbOutboxStore implements OutboxStore {
   }
 }
 
-function openObjectDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+function createObjectDatabaseAccessor(): () => Promise<IDBDatabase> {
+  let databasePromise: Promise<IDBDatabase> | null = null;
+  return () => {
+    if (!databasePromise) {
+      databasePromise = openObjectDatabase(() => {
+        databasePromise = null;
+      });
+    }
+    return databasePromise;
+  };
+}
+
+function openObjectDatabase(onConnectionClosed: () => void): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(OBJECT_STORE_NAME)) {
@@ -248,8 +247,21 @@ function openObjectDatabase(): Promise<IDBDatabase> {
         request.result.createObjectStore(OUTBOX_STORE_NAME, { keyPath: 'object_id' });
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onblocked = () => {
+      console.warn('IndexedDB upgrade is blocked by another open connection.');
+    };
+    request.onsuccess = () => {
+      const database = request.result;
+      database.onversionchange = () => {
+        database.close();
+        onConnectionClosed();
+      };
+      resolve(database);
+    };
+    request.onerror = () => {
+      onConnectionClosed();
+      reject(request.error);
+    };
   });
 }
 

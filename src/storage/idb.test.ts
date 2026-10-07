@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
-import { beforeAll, describe, expect, it } from 'vitest';
-import { clearAllLocalData, loadInboxCursor, openDatabase, saveInboxCursor } from './idb';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { clearAllLocalData, loadContacts, loadInboxCursor, openDatabase, saveContact, saveInboxCursor } from './idb';
 
 const DATABASE_NAME = 'mycelium_p2p';
 const PRESERVED_STORES = [
@@ -146,6 +146,25 @@ describe('inbox cursor IndexedDB persistence', () => {
     await expect(loadInboxCursor('identity-b')).resolves.toBe('2026-10-04T11:00:00.000Z');
   });
 
+  it('persists lastReadAt through saveContact and loadContacts without a version bump', async () => {
+    const db = await openDatabase();
+    expect(db.version).toBe(7);
+    db.close();
+
+    await saveContact({
+      publicKey: 'read-state-key',
+      fingerprint: 'read-state-peer',
+      addedAt: '2026-10-01T00:00:00.000Z',
+      followed: false,
+      lastReadAt: '2026-10-04T12:00:00.000Z'
+    });
+
+    await expect(loadContacts()).resolves.toContainEqual(expect.objectContaining({
+      publicKey: 'read-state-key',
+      lastReadAt: '2026-10-04T12:00:00.000Z'
+    }));
+  });
+
   it('rejects a non-ISO or unparseable cursor', async () => {
     await expect(saveInboxCursor('invalid-cursor-identity', 'not-a-date')).rejects.toThrow('ISO timestamp');
     await expect(saveInboxCursor('invalid-calendar-identity', '2026-02-30T10:00:00.000Z')).rejects.toThrow('ISO timestamp');
@@ -179,5 +198,45 @@ describe('inbox cursor IndexedDB persistence', () => {
     await expect(readRecord(clearedDb, 'profiles', 'author')).resolves.toBeUndefined();
     await expect(readRecord(clearedDb, 'discovery_interactions', 'interaction')).resolves.toBeUndefined();
     clearedDb.close();
+  });
+
+  it('closes on versionchange and opens a fresh connection on the next call', async () => {
+    await deleteDatabase();
+    const first = await openDatabase();
+    const close = vi.spyOn(first, 'close');
+
+    first.onversionchange?.(new IDBVersionChangeEvent('versionchange', {
+      oldVersion: 7,
+      newVersion: 8
+    }));
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(() => first.transaction('contacts', 'readonly')).toThrow();
+    const reopened = await openDatabase();
+    expect(reopened.version).toBe(7);
+    reopened.close();
+  });
+
+  it('completes an upgrade after a stale older-version connection closes', async () => {
+    await deleteDatabase();
+    await seedDatabase(6);
+    const staleConnection = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(DATABASE_NAME, 6);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const upgrade = openDatabase();
+
+    await vi.waitFor(() => expect(warning).toHaveBeenCalledWith(
+      'IndexedDB upgrade is blocked by another open connection.'
+    ));
+    staleConnection.close();
+    const upgraded = await upgrade;
+
+    expect(upgraded.version).toBe(7);
+    expect(upgraded.objectStoreNames.contains('inbox_cursors')).toBe(true);
+    upgraded.close();
+    warning.mockRestore();
   });
 });

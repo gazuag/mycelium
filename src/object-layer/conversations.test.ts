@@ -14,6 +14,8 @@ import {
 import * as dmInbox from './dm-inbox';
 import { createDmObject, type DmObjectIdentity } from './dm-object';
 import {
+  countUnread,
+  countUnreadByCounterparty,
   listConversations,
   loadConversation,
   previewConversation
@@ -175,6 +177,66 @@ afterEach(() => {
 });
 
 describe('conversation read model', () => {
+  it('counts only unexpired incoming DMs from the selected counterparty newer than the read cursor', async () => {
+    const me = identityForKeys('me-key');
+    const objects = [
+      stubDm('new-in', 'alice-key', 'me-key', '2026-10-02T00:00:00.000Z'),
+      stubDm('at-cursor', 'alice-key', 'me-key', '2026-10-01T00:00:00.000Z'),
+      stubDm('old-in', 'alice-key', 'me-key', '2026-09-30T00:00:00.000Z'),
+      stubDm('out', 'me-key', 'alice-key', '2026-10-03T00:00:00.000Z'),
+      stubDm('other', 'bob-key', 'me-key', '2026-10-03T00:00:00.000Z'),
+      { ...stubDm('expired', 'alice-key', 'me-key', '2026-10-03T00:00:00.000Z'), expires_at: '2026-10-01T00:00:00.000Z' },
+      stubDm('post', 'alice-key', 'me-key', '2026-10-03T00:00:00.000Z', 'mycelium.post')
+    ];
+    const store = createMemoryStore(objects);
+    const openSpy = vi.spyOn(dmInbox, 'openDm');
+    const consoleSpies = [vi.spyOn(console, 'debug'), vi.spyOn(console, 'info'), vi.spyOn(console, 'log'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')];
+
+    await expect(countUnread({
+      store,
+      myPublicKey: me.publicKey,
+      counterparty: 'alice-key',
+      since: '2026-10-01T00:00:00.000Z'
+    })).resolves.toBe(1);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(consoleSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+  });
+
+  it('counts all unexpired incoming DMs when since is null', async () => {
+    const store = createMemoryStore([
+      stubDm('in-a', 'alice-key', 'me-key', '2026-10-01T00:00:00.000Z'),
+      stubDm('in-b', 'alice-key', 'me-key', '2026-10-02T00:00:00.000Z')
+    ]);
+    await expect(countUnread({
+      store,
+      myPublicKey: 'me-key',
+      counterparty: 'alice-key',
+      since: null
+    })).resolves.toBe(2);
+  });
+
+  it('counts unread DMs for multiple counterparties from one received-object query', async () => {
+    const objects = [
+      stubDm('alice-unread', 'alice-key', 'me-key', '2026-10-02T00:00:00.000Z'),
+      stubDm('bob-read', 'bob-key', 'me-key', '2026-10-01T00:00:00.000Z')
+    ];
+    const store = createMemoryStore(objects);
+    const query = vi.spyOn(store, 'query');
+
+    const counts = await countUnreadByCounterparty({
+      store,
+      myPublicKey: 'me-key',
+      sinceByCounterparty: new Map([
+        ['alice-key', '2026-10-01T00:00:00.000Z'],
+        ['bob-key', '2026-10-01T00:00:00.000Z']
+      ])
+    });
+
+    expect(counts).toEqual(new Map([['alice-key', 1], ['bob-key', 0]]));
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledWith({ object_type: 'mycelium.dm', recipient: 'me-key' });
+  });
+
   it('groups by counterparty, includes inbound/outbound messages, sorts newest first, and lists without decryption', async () => {
     const me = identityForKeys('me-key');
     const objects = [

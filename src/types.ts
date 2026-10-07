@@ -14,7 +14,7 @@ export interface Contact {
   connected?: boolean;
   lastConnectionStatus?: string;
   lastSeen?: string;
-  unreadMessages?: number;
+  lastReadAt?: string;
   encryptionPublicKey?: string;
   encryptionKeyChanged?: boolean;
 }

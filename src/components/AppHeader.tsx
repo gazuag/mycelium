@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ConnectionState } from '../types';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { BrandLogo } from './BrandLogo';
+import { useDmUnread } from '../hooks/useDmUnread';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -12,7 +13,6 @@ interface AppHeaderProps {
   connectedPeerIds: string[];
   syncStatus: string;
   myFingerprint?: string;
-  unreadCount?: number;
   onOpenMyProfile: () => void;
   onOpenSettings: () => void;
   onOpenPeopleInbox: () => void;
@@ -28,12 +28,12 @@ export function AppHeader({
   connectedPeerIds,
   syncStatus,
   myFingerprint,
-  unreadCount = 0,
   onOpenMyProfile,
   onOpenSettings,
   onOpenPeopleInbox,
   onRefresh
 }: AppHeaderProps & { onRefresh?: () => void }) {
+  const { total: unreadCount } = useDmUnread();
   const [peersExpanded, setPeersExpanded] = useState(false);
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';

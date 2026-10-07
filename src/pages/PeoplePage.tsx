@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Contact } from '../types';
 import { PeerCard } from '../components/PeerCard';
 import { CollapsibleSection } from '../components/CollapsibleSection';
+import { useDmUnread } from '../hooks/useDmUnread';
 
 interface PeoplePageProps {
   contacts: Contact[];
@@ -16,12 +17,14 @@ interface PeoplePageProps {
 
 export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onToggleFollow, onBlockPeer, onAddPeerAddress, suggestedPeerIds = [] }: PeoplePageProps) {
   const [newPeerAddress, setNewPeerAddress] = useState('');
+  const { byContact } = useDmUnread();
 
-  const unreadInbox = contacts.filter((c) => (c.unreadMessages || 0) > 0);
-  const friends = contacts.filter((c) => c.followed && c.follower && (c.unreadMessages || 0) === 0);
-  const following = contacts.filter((c) => c.followed && !c.follower && (c.unreadMessages || 0) === 0);
-  const followers = contacts.filter((c) => !c.followed && c.follower && (c.unreadMessages || 0) === 0);
-  const everyoneElse = contacts.filter((c) => !c.followed && !c.follower && (c.unreadMessages || 0) === 0);
+  const unreadCountFor = (contact: Contact) => byContact[contact.publicKey] ?? 0;
+  const unreadInbox = contacts.filter((contact) => unreadCountFor(contact) > 0);
+  const friends = contacts.filter((contact) => contact.followed && contact.follower && unreadCountFor(contact) === 0);
+  const following = contacts.filter((contact) => contact.followed && !contact.follower && unreadCountFor(contact) === 0);
+  const followers = contacts.filter((contact) => !contact.followed && contact.follower && unreadCountFor(contact) === 0);
+  const everyoneElse = contacts.filter((contact) => !contact.followed && !contact.follower && unreadCountFor(contact) === 0);
   const peerPoolSuggestions = suggestedPeerIds
     .filter((peerId) => !contacts.some((contact) => contact.fingerprint === peerId || contact.publicKey === peerId))
     .map((peerId) => ({

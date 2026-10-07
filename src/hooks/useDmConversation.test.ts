@@ -21,12 +21,17 @@ interface HookRunnerRuntime {
 
 const hookRuntime = vi.hoisted(() => ({ current: null as HookRunnerRuntime | null }));
 
-vi.mock('react', () => ({
-  useState: <T>(initial: T | (() => T)) => hookRuntime.current!.useState(initial),
-  useRef: <T>(initial: T) => hookRuntime.current!.useRef(initial),
-  useEffect: (callback: () => void | (() => void), deps?: readonly unknown[]) =>
-    hookRuntime.current!.useEffect(callback, deps)
-}));
+vi.mock('react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react')>();
+  return {
+    ...actual,
+    useState: <T>(initial: T | (() => T)) => hookRuntime.current!.useState(initial),
+    useRef: <T>(initial: T) => hookRuntime.current!.useRef(initial),
+    useEffect: (callback: () => void | (() => void), deps?: readonly unknown[]) =>
+      hookRuntime.current!.useEffect(callback, deps),
+    useContext: () => ({ total: 0, byContact: {}, markRead: async () => {} })
+  };
+});
 
 import { useDmConversation } from './useDmConversation';
 
