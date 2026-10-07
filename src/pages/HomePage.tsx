@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Contact } from '../types';
-import { postReplyTo, type LocalPostView, type RecommendationSummary } from '../object-layer';
+import type { LocalPostView, RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
@@ -14,6 +14,7 @@ interface HomePageProps {
   onRefreshPosts: () => Promise<void> | void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
+  onOpenPost?: (postId: string) => void;
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
@@ -28,53 +29,6 @@ export interface HomeFeedPost extends LocalPostView {
   recommendationSummary?: RecommendationSummary;
 }
 
-interface ThreadPost {
-  post: HomeFeedPost;
-  depth: number;
-  parentId?: string;
-}
-
-const HOME_EXPANDED_REPLIES_KEY = 'myceliumHomeExpandedReplies';
-
-function loadExpandedReplyIds(): Set<string> {
-  try {
-    const stored = JSON.parse(localStorage.getItem(HOME_EXPANDED_REPLIES_KEY) || '[]');
-    return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function threadPosts(posts: HomeFeedPost[]): ThreadPost[] {
-  const byId = new Map(posts.map((post) => [post.object.object_id, post]));
-  const children = new Map<string, HomeFeedPost[]>();
-  const roots: HomeFeedPost[] = [];
-
-  for (const post of posts) {
-    const parentId = postReplyTo(post);
-    if (!parentId || !byId.has(parentId)) {
-      roots.push(post);
-      continue;
-    }
-    children.set(parentId, [...(children.get(parentId) ?? []), post]);
-  }
-
-  const newestFirst = (left: HomeFeedPost, right: HomeFeedPost) => new Date(right.object.created_at).getTime() - new Date(left.object.created_at).getTime();
-  const flattened: ThreadPost[] = [];
-  const visited = new Set<string>();
-  const append = (post: HomeFeedPost, depth: number) => {
-    const objectId = post.object.object_id;
-    if (visited.has(objectId)) return;
-    visited.add(objectId);
-    flattened.push({ post, depth, parentId: postReplyTo(post) });
-    for (const child of (children.get(objectId) ?? []).sort(newestFirst)) append(child, depth + 1);
-  };
-
-  for (const root of roots.sort(newestFirst)) append(root, 0);
-  for (const post of posts.sort(newestFirst)) append(post, 0);
-  return flattened;
-}
-
 export function HomePage({
   posts,
   contacts,
@@ -84,6 +38,7 @@ export function HomePage({
   onRefreshPosts,
   canCreatePost,
   onAuthorClick,
+  onOpenPost,
   onLike,
   onDislike,
   onReply,
@@ -98,38 +53,11 @@ export function HomePage({
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
-  const [expandedReplyIds, setExpandedReplyIds] = useState<Set<string>>(loadExpandedReplyIds);
   const [popularPeersDismissed, setPopularPeersDismissed] = useState(false);
 
-  useEffect(() => {
-    localStorage.setItem(HOME_EXPANDED_REPLIES_KEY, JSON.stringify(Array.from(expandedReplyIds)));
-  }, [expandedReplyIds]);
-
-  const allThreadPosts = threadPosts(posts);
-  const threadById = new Map(allThreadPosts.map((threadPost) => [threadPost.post.object.object_id, threadPost]));
-  const directReplyCounts = new Map<string, number>();
-  for (const threadPost of allThreadPosts) {
-    if (threadPost.parentId) {
-      directReplyCounts.set(threadPost.parentId, (directReplyCounts.get(threadPost.parentId) ?? 0) + 1);
-    }
-  }
-  const isThreadVisible = (threadPost: ThreadPost) => {
-    let parentId = threadPost.parentId;
-    while (parentId) {
-      if (!expandedReplyIds.has(parentId)) return false;
-      parentId = threadById.get(parentId)?.parentId;
-    }
-    return true;
-  };
-  const visibleThreadPosts = allThreadPosts.filter(isThreadVisible).slice(0, visibleCount);
-  const visibleGroups: ThreadPost[][] = [];
-  for (const threadPost of visibleThreadPosts) {
-    if (threadPost.depth === 0 || visibleGroups.length === 0) {
-      visibleGroups.push([threadPost]);
-    } else {
-      visibleGroups[visibleGroups.length - 1].push(threadPost);
-    }
-  }
+  const visiblePosts = [...posts]
+    .sort((left, right) => new Date(right.object.created_at).getTime() - new Date(left.object.created_at).getTime())
+    .slice(0, visibleCount);
 
   return (
     <section className="page-view">
@@ -210,15 +138,13 @@ export function HomePage({
         ) : null}
       </div>
 
-      {visibleThreadPosts.length === 0 ? (
+      {visiblePosts.length === 0 ? (
         <div className="empty-state card">
           <p>No posts yet. Follow peers to build your feed.</p>
         </div>
       ) : (
         <div className="feed-list">
-          {visibleGroups.map((group) => (
-            <div className="post-thread-group" key={group[0].post.object.object_id}>
-            {group.map(({ post, depth }) => {
+          {visiblePosts.map((post) => {
             const authorFingerprint = post.authorFingerprint;
             const matchingContact = contacts.find((contact) =>
               contact.fingerprint === authorFingerprint || contact.publicKey === post.object.author
@@ -246,12 +172,13 @@ export function HomePage({
             const replyText = replyDrafts[objectId] ?? '';
 
             return (
-              <div className={`post-thread${depth > 0 ? ' post-thread-reply' : ''}`} style={{ '--thread-depth': depth } as React.CSSProperties} key={objectId}>
-                <PostCard
+              <PostCard
+                key={objectId}
                 post={post}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 onAuthorClick={onAuthorClick}
+                onOpenPost={onOpenPost ? () => onOpenPost(objectId) : undefined}
                 onLike={() => onLike(objectId)}
                 onDislike={() => { onDislike(objectId); onHide(objectId); }}
                 onHide={onHide}
@@ -285,12 +212,6 @@ export function HomePage({
                         onClick={() => {
                           const text = (replyDrafts[objectId] ?? '').trim();
                           if (!text) return;
-                          setExpandedReplyIds((previous) => {
-                            if (previous.has(objectId)) return previous;
-                            const next = new Set(previous);
-                            next.add(objectId);
-                            return next;
-                          });
                           onReply(objectId, text, replyPublishToDiscovery);
                           setReplyDrafts((drafts) => ({ ...drafts, [objectId]: '' }));
                           setReplyingToPostId(null);
@@ -312,27 +233,9 @@ export function HomePage({
                     </div>
                   </>
                 ) : null}
-                />
-                {(directReplyCounts.get(objectId) ?? 0) > 0 ? (
-                  <button
-                    className="thread-replies-toggle"
-                    type="button"
-                    aria-expanded={expandedReplyIds.has(objectId)}
-                    onClick={() => setExpandedReplyIds((previous) => {
-                      const next = new Set(previous);
-                      if (next.has(objectId)) next.delete(objectId);
-                      else next.add(objectId);
-                      return next;
-                    })}
-                  >
-                    {directReplyCounts.get(objectId)} {directReplyCounts.get(objectId) === 1 ? 'reply' : 'replies'}
-                  </button>
-                ) : null}
-              </div>
+              />
             );
-            })}
-            </div>
-          ))}
+          })}
         </div>
       )}
 

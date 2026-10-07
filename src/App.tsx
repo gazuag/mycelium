@@ -20,6 +20,7 @@ import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
+import { ConversationPage } from './pages/ConversationPage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { PeoplePage } from './pages/PeoplePage';
 import { ProfilePage } from './pages/ProfilePage';
@@ -30,7 +31,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
@@ -98,6 +99,15 @@ function App() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [page, setPage] = useState<PageKey>('home');
+  const [conversationPostId, setConversationPostId] = useState<string | null>(() => {
+    const state = window.history.state as { myceliumConversationPostId?: unknown } | null;
+    return typeof state?.myceliumConversationPostId === 'string' ? state.myceliumConversationPostId : null;
+  });
+  const [conversationFocusPostId, setConversationFocusPostId] = useState<string | null>(() => {
+    const state = window.history.state as { myceliumFocusedReplyId?: unknown } | null;
+    return typeof state?.myceliumFocusedReplyId === 'string' ? state.myceliumFocusedReplyId : null;
+  });
+  const conversationReturnScrollTopRef = useRef(0);
   const [profileContactId, setProfileContactId] = useState<string | null>(null);
   const [chatContactId, setChatContactId] = useState<string | null>(null);
   const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
@@ -210,6 +220,28 @@ function App() {
     }
     return turnIceInitializationRef.current;
   };
+
+  useEffect(() => {
+    const handleConversationPopState = (event: PopStateEvent) => {
+      const state = event.state as { myceliumConversationPostId?: unknown; myceliumFocusedReplyId?: unknown } | null;
+      const nextPostId = typeof state?.myceliumConversationPostId === 'string'
+        ? state.myceliumConversationPostId
+        : null;
+      const nextFocusedReplyId = typeof state?.myceliumFocusedReplyId === 'string'
+        ? state.myceliumFocusedReplyId
+        : null;
+      setConversationPostId(nextPostId);
+      setConversationFocusPostId(nextFocusedReplyId);
+      requestAnimationFrame(() => {
+        const pageContent = document.getElementById('page-content');
+        if (!pageContent) return;
+        if (!nextPostId) pageContent.scrollTop = conversationReturnScrollTopRef.current;
+        else if (!nextFocusedReplyId) pageContent.scrollTop = 0;
+      });
+    };
+    window.addEventListener('popstate', handleConversationPopState);
+    return () => window.removeEventListener('popstate', handleConversationPopState);
+  }, []);
 
   useEffect(() => {
     selectedContactIdRef.current = selectedContactId;
@@ -1708,6 +1740,12 @@ function App() {
     return [...visibleDiscoveryPosts].sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
   }, [visibleDiscoveryPosts]);
 
+  const allCachedPosts = mergeLocalPostViews(postViews, discoveryPosts);
+  const visibleConversationPosts = allCachedPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
+  const activeConversationPost = conversationPostId
+    ? allCachedPosts.find((post) => post.object.object_id === conversationPostId)
+    : undefined;
+
   const visibleHomePosts = useMemo(() => {
     const followedAuthorKeys = new Set([
       ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
@@ -1746,7 +1784,52 @@ function App() {
     if (pageContainer) {
       setPageScrollPositions((prev) => ({ ...prev, [page]: pageContainer.scrollTop }));
     }
+    clearConversationForNavigation();
     setPage(nextPage);
+  }
+
+  function clearConversationForNavigation() {
+    if (!conversationPostId) return;
+    const currentState = window.history.state && typeof window.history.state === 'object'
+      ? window.history.state as Record<string, unknown>
+      : {};
+    window.history.replaceState({
+      ...currentState,
+      myceliumConversationPostId: null,
+      myceliumFocusedReplyId: null
+    }, '', window.location.href);
+    setConversationPostId(null);
+    setConversationFocusPostId(null);
+  }
+
+  function handleOpenConversation(postId: string, focusedReplyId?: string) {
+    if (!conversationPostId) {
+      conversationReturnScrollTopRef.current = document.getElementById('page-content')?.scrollTop ?? 0;
+    }
+    const currentState = window.history.state && typeof window.history.state === 'object'
+      ? window.history.state as Record<string, unknown>
+      : {};
+    window.history.pushState({
+      ...currentState,
+      myceliumConversationPostId: postId,
+      myceliumFocusedReplyId: focusedReplyId ?? null
+    }, '', window.location.href);
+    setConversationPostId(postId);
+    setConversationFocusPostId(focusedReplyId ?? null);
+    requestAnimationFrame(() => {
+      const pageContent = document.getElementById('page-content');
+      if (pageContent && !focusedReplyId) pageContent.scrollTop = 0;
+    });
+  }
+
+  function handleBackFromConversation() {
+    const currentState = window.history.state as { myceliumConversationPostId?: unknown } | null;
+    if (typeof currentState?.myceliumConversationPostId === 'string') {
+      window.history.back();
+      return;
+    }
+    setConversationPostId(null);
+    setConversationFocusPostId(null);
   }
 
   const handleToggleHeader = () => {
@@ -2105,6 +2188,7 @@ function App() {
   }
 
   async function handleSelectContact(peerId: string) {
+    clearConversationForNavigation();
     setSelectedContactId(peerId);
     setChatContactId(peerId);
     setPage('chat');
@@ -2120,6 +2204,7 @@ function App() {
 
   async function handleOpenPeerProfile(peerId: string) {
     if (!peerId) return;
+    clearConversationForNavigation();
 
     if (peerId === identity?.id) {
       setProfileContactId(null);
@@ -2640,9 +2725,9 @@ function App() {
           connectedPeerIds={connectedPeerIds}
           syncStatus={syncStatus}
           myFingerprint={identity?.id}
-          onOpenMyProfile={() => setPage('myProfile')}
-          onOpenSettings={() => setPage('settings')}
-          onOpenPeopleInbox={() => setPage('people')}
+          onOpenMyProfile={() => handlePageChange('myProfile')}
+          onOpenSettings={() => handlePageChange('settings')}
+          onOpenPeopleInbox={() => handlePageChange('people')}
           onRefresh={() => {
             void handleRefreshHomeFeed();
             void handleFetchDiscovery();
@@ -2650,6 +2735,43 @@ function App() {
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
+        {conversationPostId ? (
+          activeConversationPost ? (
+            <ConversationPage
+              post={activeConversationPost}
+              posts={visibleConversationPosts}
+              contacts={contacts}
+              myPeerId={identity.id}
+              myPublicKey={identity.publicKey}
+              focusedPostId={conversationFocusPostId}
+              onBack={handleBackFromConversation}
+              onOpenPost={handleOpenConversation}
+              onOpenParent={handleOpenConversation}
+              onAuthorClick={handleOpenPeerProfile}
+              onLike={handleLikePost}
+              onDislike={handleDislikePost}
+              onHide={page === 'discover' ? handleHideDiscoveryPost : handleHidePost}
+              onReply={(postId, content, publishToDiscovery) => {
+                if (content && content.trim()) {
+                  void handleCreatePost(Boolean(publishToDiscovery), postId, content);
+                }
+              }}
+              getRecommendationSummary={getRecommendationSummary}
+            />
+          ) : (
+            <section className="page-view conversation-page">
+              <header className="conversation-header">
+                <button className="btn secondary conversation-back" type="button" onClick={handleBackFromConversation} aria-label="Back to previous view">
+                  <span aria-hidden="true">←</span>
+                  <span>Back</span>
+                </button>
+                <h2>Post</h2>
+              </header>
+              <p className="note">This post is no longer available in the posts loaded on this device.</p>
+            </section>
+          )
+        ) : (
+          <>
         {page === 'home' && (
           <HomePage
             posts={visibleHomePosts}
@@ -2662,6 +2784,7 @@ function App() {
             onRefreshPosts={handleRefreshHomeFeed}
             canCreatePost={Boolean(identity)}
             onAuthorClick={handleOpenPeerProfile}
+            onOpenPost={handleOpenConversation}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onReply={(postId, content, publishToDiscovery) => {
@@ -2695,6 +2818,7 @@ function App() {
             myPublicKey={identity.publicKey}
             onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={handleOpenPeerProfile}
+            onOpenPost={handleOpenConversation}
             onFollow={handleToggleFollow}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -2715,6 +2839,7 @@ function App() {
             onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}
             onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}
             onAuthorClick={handleOpenPeerProfile}
+            onOpenPost={handleOpenConversation}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
@@ -2731,6 +2856,7 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            onOpenPost={handleOpenConversation}
             getRecommendationSummary={getRecommendationSummary}
             isOwnProfile
             profileSettingsOpen={profileSettingsOpen}
@@ -2902,6 +3028,8 @@ function App() {
               localStorage.removeItem('myceliumHeaderCollapsed');
             }}
           />
+        )}
+          </>
         )}
         </main>
       </div>

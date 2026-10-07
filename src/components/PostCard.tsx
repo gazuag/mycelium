@@ -13,6 +13,7 @@ interface PostCardProps {
   onDislike: () => void;
   onHide?: (objectId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
+  onOpenPost?: () => void;
   isLiked?: boolean;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
@@ -30,6 +31,7 @@ export function PostCard({
   onDislike,
   onHide,
   onReply,
+  onOpenPost,
   isLiked: isLikedOverride,
   footerActions,
   recommendationLabel,
@@ -40,12 +42,22 @@ export function PostCard({
   const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
   const keyLabel = fingerprintLike ? authorId : undefined;
   const isLiked = isLikedOverride ?? false;
+  const content = postContent(post);
 
   return (
-    <article className={`post-card${recommendationLabel ? ' recommended' : ''}`}>
+    <article
+      className={`post-card${recommendationLabel ? ' recommended' : ''}${onOpenPost ? ' has-post-navigation' : ''}`}
+      onClick={onOpenPost ? (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest('button, a, input, textarea, select, [role="button"]')) return;
+        onOpenPost();
+      } : undefined}
+    >
       <div className="post-card-header">
         <div className="post-author-line">
-          <IdentityAvatar seed={authorId} size={36} alt={authorName} />
+          <button className="ghost-link post-avatar-button" onClick={() => onAuthorClick(authorId)} type="button" aria-label={`View ${authorName}'s profile`}>
+            <IdentityAvatar seed={authorId} size={36} alt="" />
+          </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
             <strong>{authorName}</strong>
             {keyLabel ? <span className="note">{keyLabel}</span> : null}
@@ -54,15 +66,37 @@ export function PostCard({
         <span className="note">{new Date(post.object.created_at).toLocaleString()}</span>
       </div>
 
-      {recommendationLabel ? (
-        <div className="recommendation-badge">{recommendationLabel}</div>
-      ) : null}
+      <div
+        className={`post-open-target${onOpenPost ? ' is-navigable' : ''}`}
+        {...(onOpenPost ? {
+          role: 'button',
+          tabIndex: 0,
+          'aria-label': `Open conversation for post by ${authorName}: ${content}`,
+          onClick: (event: React.MouseEvent<HTMLDivElement>) => {
+            const target = event.target;
+            if (target instanceof Element && target !== event.currentTarget && target.closest('button, a, input, textarea, select, [role="button"]')) return;
+            onOpenPost();
+          },
+          onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              const target = event.target;
+              if (target instanceof Element && target !== event.currentTarget && target.closest('button, a, input, textarea, select, [role="button"]')) return;
+              event.preventDefault();
+              onOpenPost();
+            }
+          }
+        } : {})}
+      >
+        {recommendationLabel ? (
+          <div className="recommendation-badge">{recommendationLabel}</div>
+        ) : null}
 
-      <p className="post-content">{postContent(post)}</p>
+        <p className="post-content">{content}</p>
 
-      {postTags(post).length > 0 ? (
-        <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
-      ) : null}
+        {postTags(post).length > 0 ? (
+          <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
+        ) : null}
+      </div>
 
       <div className="post-card-actions">
         <div className="post-actions">

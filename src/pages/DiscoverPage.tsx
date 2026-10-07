@@ -12,6 +12,7 @@ interface DiscoverPageProps {
   myPublicKey?: string;
   onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
+  onOpenPost?: (postId: string) => void;
   onFollow: (publicKey: string) => void;
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
@@ -20,7 +21,7 @@ interface DiscoverPageProps {
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onFollow, onLike, onDislike, onHide, onBlock, getRecommendationSummary }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onOpenPost, onFollow, onLike, onDislike, onHide, onBlock, getRecommendationSummary }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
@@ -54,6 +55,7 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
                 authorName={authorName}
                 authorId={authorFingerprint}
                 onAuthorClick={() => onAuthorClick(authorFingerprint)}
+                onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                 onLike={() => onLike(post.object.object_id)}
                 onDislike={() => onDislike(post.object.object_id)}
                 onReply={() => {} }

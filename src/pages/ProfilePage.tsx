@@ -17,6 +17,7 @@ interface ProfilePageProps {
   onBlock?: () => void;
   onMessage?: () => void;
   onAuthorClick: (peerId: string) => void;
+  onOpenPost?: (postId: string) => void;
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
   onHide?: (objectId: string) => void;
@@ -37,6 +38,7 @@ export function ProfilePage({
   onBlock,
   onMessage,
   onAuthorClick,
+  onOpenPost,
   onLike,
   onDislike,
   onHide,
@@ -122,6 +124,7 @@ export function ProfilePage({
                 )}
                 authorId={post.authorFingerprint}
                 onAuthorClick={() => onAuthorClick(post.authorFingerprint)}
+                onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                 onLike={() => onLike(post.object.object_id)}
                 onDislike={() => onDislike(post.object.object_id)}
                 onHide={onHide}
