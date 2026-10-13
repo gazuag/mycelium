@@ -12,6 +12,7 @@ interface ProfilePageProps {
   contact: Contact;
   posts: LocalPostView[];
   likedPosts: LocalPostView[];
+  replyCounts?: ReadonlyMap<string, number>;
   myPeerId?: string;
   onFollowToggle?: () => void;
   onBlock?: () => void;
@@ -33,6 +34,7 @@ export function ProfilePage({
   contact,
   posts,
   likedPosts,
+  replyCounts,
   myPeerId,
   onFollowToggle,
   onBlock,
@@ -118,6 +120,7 @@ export function ProfilePage({
               <PostCard
                 key={post.object.object_id}
                 post={post}
+                replyCount={replyCounts?.get(post.object.object_id) ?? 0}
                 authorName={displayNameOrFallback(
                   post.authorDisplayName || (post.authorFingerprint === contact.fingerprint ? contact.displayName : undefined),
                   post.authorFingerprint

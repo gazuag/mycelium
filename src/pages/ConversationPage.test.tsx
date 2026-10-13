@@ -51,6 +51,7 @@ describe('ConversationPage', () => {
       <ConversationPage
         post={root}
         posts={[root, reply2, nestedReply, reply1]}
+        replyCounts={new Map([[root.object.object_id, 2], [reply1.object.object_id, 1]])}
         contacts={[contact]}
         onLeave={vi.fn()}
         onOpenPost={vi.fn()}
@@ -67,6 +68,7 @@ describe('ConversationPage', () => {
     expect(html.indexOf('root post')).toBeLessThan(html.indexOf('direct reply 1'));
     expect(html.indexOf('direct reply 1')).toBeLessThan(html.indexOf('direct reply 2'));
     expect(html).not.toContain('nested reply');
+    expect(html).toContain('aria-label="2 locally known direct replies"');
     expect(html).toContain('aria-label="Return to previous view"');
   });
 
@@ -89,7 +91,7 @@ describe('ConversationPage', () => {
       />
     );
 
-    expect(html).toContain('Replying to Author');
+    expect(html).not.toContain('conversation-parent-link');
     expect(html).toContain('reply to root');
     expect(html).toContain('aria-label="View parent post"');
   });
@@ -158,7 +160,7 @@ describe('ConversationPage', () => {
 
     expect(html).toContain('aria-label="Parent post unavailable"');
     expect(html).toContain('disabled=""');
-    expect(html).toContain('Replying to a post that is not loaded on this device');
+    expect(html).not.toContain('Replying to a post that is not loaded on this device');
     expect(html).toContain('conversation-unavailable-ancestor');
     expect(html).toContain('Earlier post is unavailable on this device.');
   });
@@ -173,7 +175,6 @@ describe('ConversationPage', () => {
         postText=""
         onPostTextChange={vi.fn()}
         onSubmitPost={vi.fn()}
-        onRefreshPosts={vi.fn()}
         canCreatePost
         onAuthorClick={vi.fn()}
         onLike={vi.fn()}

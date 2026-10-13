@@ -1,17 +1,19 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Contact } from '../types';
-import type { LocalPostView, RecommendationSummary } from '../object-layer';
+import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
+import type { HomeFeedPost } from '../utils/homeFeed';
 
 interface HomePageProps {
   posts: HomeFeedPost[];
+  onDiagnosticLog?: (entry: string) => void;
+  replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
   postText: string;
   onPostTextChange: (value: string) => void;
   onSubmitPost: (publish: boolean) => void;
-  onRefreshPosts: () => Promise<void> | void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   onOpenPost?: (postId: string) => void;
@@ -21,21 +23,16 @@ interface HomePageProps {
   onHide: (objectId: string) => void;
   popularPeers?: PopularPeer[];
   onFollowPeer?: (peerId: string) => void;
-  isRefreshing?: boolean;
-}
-
-export interface HomeFeedPost extends LocalPostView {
-  homeFeedSource?: 'followed' | 'recommendation';
-  recommendationSummary?: RecommendationSummary;
 }
 
 export function HomePage({
   posts,
+  onDiagnosticLog,
+  replyCounts,
   contacts,
   postText,
   onPostTextChange,
   onSubmitPost,
-  onRefreshPosts,
   canCreatePost,
   onAuthorClick,
   onOpenPost,
@@ -44,8 +41,7 @@ export function HomePage({
   onReply,
   onHide,
   popularPeers = [],
-  onFollowPeer,
-  isRefreshing = false
+  onFollowPeer
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
   const [publishToDiscovery, setPublishToDiscovery] = useState(true);
@@ -55,13 +51,25 @@ export function HomePage({
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
   const [popularPeersDismissed, setPopularPeersDismissed] = useState(false);
 
-  const visiblePosts = [...posts]
-    .sort((left, right) => new Date(right.object.created_at).getTime() - new Date(left.object.created_at).getTime())
-    .slice(0, visibleCount);
+  const visiblePosts = useMemo(
+    () => [...posts]
+      .sort((left, right) =>
+        (right.injectedAt ?? Date.parse(right.object.created_at))
+        - (left.injectedAt ?? Date.parse(left.object.created_at))
+      )
+      .slice(0, visibleCount),
+    [posts, visibleCount]
+  );
+  useEffect(() => {
+    const firstPost = visiblePosts[0];
+    if (!firstPost) return;
+    onDiagnosticLog?.(`HomePage render: posts=${posts.length} first-injectedAt=${firstPost.injectedAt} first-created=${firstPost.object.created_at.slice(0, 19)}`);
+  }, [visiblePosts, posts.length, onDiagnosticLog]);
+  const followedPeerCount = contacts.filter((contact) => contact.followed).length;
 
   return (
     <section className="page-view">
-      {!popularPeersDismissed ? (
+      {followedPeerCount === 0 && !popularPeersDismissed ? (
         <div className="popular-posters-banner">
           <div className="popular-posters-heading">
             <strong>Popular posters right now.</strong>
@@ -93,12 +101,6 @@ export function HomePage({
       ) : null}
       <div className="page-header">
         <h2>Home</h2>
-        <p className="note">New posts from people you follow.</p>
-        <div className="page-header-actions">
-          <button className="btn secondary" type="button" onClick={() => void onRefreshPosts()} disabled={isRefreshing}>
-            {isRefreshing ? 'Refreshing…' : 'Refresh posts'}
-          </button>
-        </div>
       </div>
 
       <div className="card home-composer">
@@ -154,17 +156,22 @@ export function HomePage({
               : displayNameOrFallback(post.authorDisplayName, authorFingerprint);
             const recommendationSummary = post.recommendationSummary;
             const recommenders = recommendationSummary?.followed_recommenders ?? [];
-            const firstRecommender = recommenders[0];
-            const firstRecommenderName = firstRecommender
-              ? displayNameOrFallback(
-                  contacts.find((contact) => contact.fingerprint === firstRecommender || contact.publicKey === firstRecommender)?.displayName,
-                  firstRecommender
-                )
-              : undefined;
-            const recommendationLabel = post.homeFeedSource === 'recommendation' && firstRecommenderName
-              ? recommenders.length === 1
-                ? `${firstRecommenderName} recommends this`
-                : `${firstRecommenderName} and ${recommenders.length - 1} others recommend this`
+            const recommenderNames = recommenders.slice(0, 2).map((recommender) =>
+              displayNameOrFallback(
+                contacts.find((contact) => contact.fingerprint === recommender || contact.publicKey === recommender)?.displayName,
+                recommender
+              )
+            );
+            const remainingRecommenders = recommenders.length - recommenderNames.length;
+            const recommenderAttribution = recommenderNames.length === 2
+              ? remainingRecommenders > 0
+                ? `${recommenderNames[0]}, ${recommenderNames[1]} and ${remainingRecommenders} more`
+                : `${recommenderNames[0]} and ${recommenderNames[1]}`
+              : `${recommenderNames[0]}${remainingRecommenders > 0 ? ` and ${remainingRecommenders} more` : ''}`;
+            const recommendationLabel = post.homeFeedSource === 'recommendation'
+              ? recommenderNames.length === 0
+                ? 'Recommended by people you follow'
+                : `${recommenderAttribution} ${recommenders.length === 1 ? 'recommends' : 'recommend'} this`
               : undefined;
 
             const objectId = post.object.object_id;
@@ -175,6 +182,7 @@ export function HomePage({
               <PostCard
                 key={objectId}
                 post={post}
+                replyCount={replyCounts?.get(objectId) ?? 0}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 onAuthorClick={onAuthorClick}
@@ -190,6 +198,8 @@ export function HomePage({
                 }}
                 isLiked={recommendationSummary?.recommended_by_me ?? false}
                 recommendationLabel={recommendationLabel}
+                discoveryLabel={post.homeFeedSource === 'discovery' ? 'You might like this' : undefined}
+                feedSource={post.homeFeedSource}
                 replyComposer={isReplying ? (
                   <>
                     <textarea

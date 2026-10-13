@@ -14,9 +14,12 @@ interface PostCardProps {
   onHide?: (objectId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
   onOpenPost?: () => void;
+  replyCount?: number;
   isLiked?: boolean;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
+  discoveryLabel?: string;
+  feedSource?: 'followed' | 'recommendation' | 'discovery';
   replyComposer?: React.ReactNode;
   showDislikeButton?: boolean;
   isOwnPost?: boolean;
@@ -32,9 +35,12 @@ export function PostCard({
   onHide,
   onReply,
   onOpenPost,
+  replyCount = 0,
   isLiked: isLikedOverride,
   footerActions,
   recommendationLabel,
+  discoveryLabel,
+  feedSource,
   replyComposer,
   showDislikeButton = true,
   isOwnPost = false
@@ -46,7 +52,7 @@ export function PostCard({
 
   return (
     <article
-      className={`post-card${recommendationLabel ? ' recommended' : ''}${onOpenPost ? ' has-post-navigation' : ''}`}
+      className={`post-card${feedSource === 'recommendation' || recommendationLabel ? ' recommended' : ''}${feedSource === 'discovery' ? ' discovery-injected' : ''}${onOpenPost ? ' has-post-navigation' : ''}`}
       onClick={onOpenPost ? (event) => {
         const target = event.target;
         if (target instanceof Element && target.closest('button, a, input, textarea, select, [role="button"]')) return;
@@ -90,8 +96,10 @@ export function PostCard({
           }
         } : {})}
       >
-        {recommendationLabel ? (
-          <div className="recommendation-badge">{recommendationLabel}</div>
+        {recommendationLabel || discoveryLabel ? (
+          <div className={`feed-attribution${feedSource === 'recommendation' ? ' recommendation-badge' : ''}${feedSource === 'discovery' ? ' discovery-badge' : ''}`}>
+            {recommendationLabel ?? discoveryLabel}
+          </div>
         ) : null}
 
         <p className="post-content">{content}</p>
@@ -99,15 +107,42 @@ export function PostCard({
         {postTags(post).length > 0 ? (
           <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
         ) : null}
+        {import.meta.env.DEV ? (
+          <small className="feed-debug-line">
+            [DEBUG: injectedAt={post.injectedAt === undefined ? 'undefined' : new Date(post.injectedAt).toISOString().slice(0, 19)},
+            {' '}created={post.object.created_at.slice(0, 19)}, source={feedSource ?? 'unknown'}]
+          </small>
+        ) : null}
       </div>
 
       <div className="post-card-actions">
         <div className="post-actions">
+          <button className="chip" onClick={() => onReply()} type="button">Reply</button>
+          {replyCount > 0 ? (
+            onOpenPost ? (
+              <button
+                className="post-reply-count"
+                onClick={onOpenPost}
+                type="button"
+                aria-label={`${replyCount} locally known direct ${replyCount === 1 ? 'reply' : 'replies'}. Open conversation.`}
+                title={`${replyCount} locally known direct ${replyCount === 1 ? 'reply' : 'replies'}; there may be more.`}
+              >
+                {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+              </button>
+            ) : (
+              <span
+                className="post-reply-count"
+                aria-label={`${replyCount} locally known direct ${replyCount === 1 ? 'reply' : 'replies'}`}
+                title={`${replyCount} locally known direct ${replyCount === 1 ? 'reply' : 'replies'}; there may be more.`}
+              >
+                {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+              </span>
+            )
+          ) : null}
           <LikeButton isLiked={isLiked} onToggle={onLike} disabled={isOwnPost} />
           {showDislikeButton && !isLiked ? (
             <HideButton postId={post.object.object_id} onHide={onHide ?? (() => onDislike())} />
           ) : null}
-          <button className="chip" onClick={() => onReply()} type="button">Reply</button>
         </div>
         {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}
       </div>

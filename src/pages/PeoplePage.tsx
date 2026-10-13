@@ -91,7 +91,6 @@ export function PeoplePage({ contacts, myPeerId, onViewProfile, onMessage, onTog
     <section className="page-view">
       <div className="page-header">
         <h2>People</h2>
-        <p className="note">Manage your contacts, messages, and peers.</p>
       </div>
       <div className="card add-peer-card">
         <h3>Add Peer by Address</h3>

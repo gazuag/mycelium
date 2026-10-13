@@ -8,6 +8,7 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 interface ConversationPageProps {
   post: LocalPostView;
   posts: LocalPostView[];
+  replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
   myPeerId?: string;
   myPublicKey?: string;
@@ -31,6 +32,7 @@ interface ConversationPageProps {
 export function ConversationPage({
   post,
   posts,
+  replyCounts,
   contacts,
   myPeerId,
   myPublicKey,
@@ -67,12 +69,6 @@ export function ConversationPage({
   const parentPost = parentId
     ? ancestors.find((candidate) => candidate.object.object_id === parentId)
       ?? posts.find((candidate) => candidate.object.object_id === parentId)
-    : undefined;
-  const parentContact = parentPost
-    ? contacts.find((contact) => contact.fingerprint === parentPost.authorFingerprint || contact.publicKey === parentPost.object.author)
-    : undefined;
-  const parentName = parentPost
-    ? displayNameOrFallback(parentContact?.displayName ?? parentPost.authorDisplayName, parentContact?.fingerprint ?? parentPost.authorFingerprint)
     : undefined;
   const selectedContact = contacts.find((contact) =>
     contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author
@@ -217,6 +213,7 @@ export function ConversationPage({
       >
         <PostCard
           post={currentPost}
+          replyCount={replyCounts?.get(objectId) ?? 0}
           authorName={authorName}
           authorId={matchingContact?.fingerprint ?? currentPost.authorFingerprint}
           onAuthorClick={() => onAuthorClick(matchingContact?.fingerprint ?? currentPost.authorFingerprint)}
@@ -261,20 +258,6 @@ export function ConversationPage({
         )}
         <h2>Post</h2>
       </header>
-
-      {parentId ? (
-        <div className="conversation-parent">
-          {parentPost ? (
-            <button className="conversation-parent-link" type="button" onClick={() => onOpenParent(parentId, post.object.object_id)}>
-              Replying to {parentName}
-            </button>
-          ) : ancestry?.loading ? (
-            <span className="note">Loading parent post…</span>
-          ) : (
-            <span className="note">Replying to a post that is not loaded on this device</span>
-          )}
-        </div>
-      ) : null}
 
       <div className="conversation-posts">
         <div className="conversation-ancestry">

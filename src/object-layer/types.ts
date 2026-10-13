@@ -32,6 +32,7 @@ export interface LocalPostView {
   readonly source?: 'local' | 'peer' | 'discovery';
   readonly notInterested?: boolean;
   readonly hidden?: boolean;
+  readonly injectedAt?: number;
 }
 
 export type LocalPostMetadata = Omit<LocalPostView, 'object' | 'authorFingerprint'> & {

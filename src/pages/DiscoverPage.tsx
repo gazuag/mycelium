@@ -7,10 +7,10 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface DiscoverPageProps {
   discoveryPosts: LocalPostView[];
+  replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
   myPeerId?: string;
   myPublicKey?: string;
-  onRefreshDiscovery: () => void;
   onAuthorClick: (peerId: string) => void;
   onOpenPost?: (postId: string) => void;
   onFollow: (publicKey: string) => void;
@@ -21,15 +21,11 @@ interface DiscoverPageProps {
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
-export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, onRefreshDiscovery, onAuthorClick, onOpenPost, onFollow, onLike, onDislike, onHide, onBlock, getRecommendationSummary }: DiscoverPageProps) {
+export function DiscoverPage({ discoveryPosts, replyCounts, contacts, myPeerId, myPublicKey, onAuthorClick, onOpenPost, onFollow, onLike, onDislike, onHide, onBlock, getRecommendationSummary }: DiscoverPageProps) {
   return (
     <section className="page-view">
       <div className="page-header">
         <h2>Discover</h2>
-        <p className="note">Discover - Explore public posts from the wider network.</p>
-        <div className="page-header-actions">
-          <button className="btn secondary" type="button" onClick={onRefreshDiscovery}>Refresh discovery</button>
-        </div>
       </div>
 
       {discoveryPosts.length === 0 ? (
@@ -52,6 +48,7 @@ export function DiscoverPage({ discoveryPosts, contacts, myPeerId, myPublicKey, 
               <PostCard
                 key={post.object.object_id}
                 post={post}
+                replyCount={replyCounts?.get(post.object.object_id) ?? 0}
                 authorName={authorName}
                 authorId={authorFingerprint}
                 onAuthorClick={() => onAuthorClick(authorFingerprint)}

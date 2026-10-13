@@ -337,9 +337,11 @@ describe('PeerConnectionManager lifecycle', () => {
     const answerer = createManager({ localId: 'peer-b' });
     const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
     await offerer.createOffer('peer-b', socket);
+    expect(offerer.didInitiateConnection()).toBe(true);
     const offer = JSON.parse(socket.send.mock.calls[0][0]) as PeerSignalMessage;
     await answerer.handleSignal({ ...offer, from: 'peer-a', to: 'peer-b' }, socket);
 
+    expect(answerer.didInitiateConnection()).toBe(false);
     expect(offerer.getConnectionId()).not.toBe(answerer.getConnectionId());
     expect(offerer.getActiveNegotiationId()).toBe(offer.payload.negotiationId);
     expect(answerer.getActiveNegotiationId()).toBe(offer.payload.negotiationId);

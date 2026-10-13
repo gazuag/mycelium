@@ -405,6 +405,10 @@ export class PeerConnectionManager {
     return this.localConnectionId;
   }
 
+  public didInitiateConnection() {
+    return this.isOfferer;
+  }
+
   public getActiveNegotiationId() {
     return this.activeNegotiationId;
   }

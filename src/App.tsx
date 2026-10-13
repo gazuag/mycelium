@@ -31,8 +31,10 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostObject, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
+import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
+import { composeHomeFeed } from './utils/homeFeed';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
 import type { ConnectionState, Contact, PeerMetadata } from './types';
@@ -152,6 +154,7 @@ function App() {
   const initialNavigation = readAppNavigationState(window.history.state);
   const [page, setPage] = useState<PageKey>(initialNavigation.page);
   const [conversationPostId, setConversationPostId] = useState<string | null>(initialNavigation.conversationPostId);
+  const activePageRef = useRef<PageKey | null>(initialNavigation.conversationPostId ? null : initialNavigation.page);
   const [conversationFocusPostId, setConversationFocusPostId] = useState<string | null>(initialNavigation.focusedReplyId);
   const [conversationAncestry, setConversationAncestry] = useState<ConversationAncestryState | null>(null);
   const conversationReturnScrollTopRef = useRef(initialNavigation.conversationReturnScrollTop ?? 0);
@@ -188,7 +191,6 @@ function App() {
   const [popularPeers, setPopularPeers] = useState<PopularPeer[]>([]);
   const [contactsLoaded, setContactsLoaded] = useState(false);
     const [recommendationRevision, setRecommendationRevision] = useState(0);
-  const [homeSyncBusy, setHomeSyncBusy] = useState(false);
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
   const [objectTestPeerId, setObjectTestPeerId] = useState('');
@@ -231,6 +233,10 @@ function App() {
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
   const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
   const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
+  const waitingPeerIntervalsRef = useRef<Map<string, number>>(new Map());
+  const peerElectionFallbackTimersRef = useRef<Map<string, number>>(new Map());
+  const peerAttemptTimeoutsRef = useRef<Map<string, number>>(new Map());
+  const peerPostReceptionTimesRef = useRef<Map<string, number>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
 
   if (!objectStoreRef.current) {
@@ -325,6 +331,7 @@ function App() {
     if (!store) return;
     void store.query({ object_type: 'mycelium.recommendation' }).then((objects) => {
       recommendationIndexRef.current.rebuild(objects);
+      setRecommendationRevision((revision) => revision + 1);
     });
   }, []);
 
@@ -479,10 +486,10 @@ function App() {
 
   const selectedContact = selectedContactId ? contacts.find((c) => c.fingerprint === selectedContactId) : undefined;
 
-  const addLog = (entry: string) => {
+  const addLog = useCallback((entry: string) => {
     const timestampedEntry = `${new Date().toLocaleTimeString()}: ${entry}`;
     setLogs((prev) => appendBoundedLog(prev, { text: timestampedEntry, category: classifyLogEntry(entry) }));
-  };
+  }, []);
 
   async function syncFeedPeer(peerId: string): Promise<void> {
     const sync = feedSyncPeerRef.current;
@@ -938,7 +945,15 @@ function App() {
             connected: true,
           };
 
-      void saveContact(updatedContact);
+      void saveContact(updatedContact)
+        .then(() => {
+          if (existing && existing.publicKey !== updatedContact.publicKey) {
+            return deleteContact(existing.publicKey);
+          }
+        })
+        .catch((error: unknown) => {
+          addLog(`Failed to persist contact profile for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
       void saveProfile(normalizedProfile);
       return existing ? prev.map((contact) => (contact.fingerprint === peerId ? updatedContact : contact)) : [...prev, updatedContact];
     });
@@ -970,6 +985,74 @@ function App() {
     const nextContacts = dedupeContactsByFingerprint([...contactsRef.current, contact]);
     contactsRef.current = nextContacts;
     setContacts(nextContacts);
+  };
+
+  const clearPeerWaitingInterval = (peerId: string) => {
+    const interval = waitingPeerIntervalsRef.current.get(peerId);
+    if (interval !== undefined) {
+      window.clearInterval(interval);
+      waitingPeerIntervalsRef.current.delete(peerId);
+    }
+  };
+
+  const clearPeerAttemptTimeout = (peerId: string) => {
+    const timeout = peerAttemptTimeoutsRef.current.get(peerId);
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout);
+      peerAttemptTimeoutsRef.current.delete(peerId);
+    }
+  };
+
+  const clearPeerElectionFallback = (peerId: string) => {
+    const timeout = peerElectionFallbackTimersRef.current.get(peerId);
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout);
+      peerElectionFallbackTimersRef.current.delete(peerId);
+    }
+  };
+
+  const startPeerElectionFallback = (peerId: string) => {
+    if (peerElectionFallbackTimersRef.current.has(peerId)) return;
+    peerElectionFallbackTimersRef.current.set(peerId, window.setTimeout(() => {
+      peerElectionFallbackTimersRef.current.delete(peerId);
+      const manager = peerManagersRef.current[peerId];
+      const socket = signallingSocketRef.current;
+      const localPeerId = identityRef.current?.id;
+      if (!manager || !localPeerId || socket?.readyState !== WebSocket.OPEN || manager.isDataChannelOpen()) return;
+      clearPeerWaitingInterval(peerId);
+      addLog(`Peer ${peerId} election wait timed out after 15 seconds; initiating fallback connection`);
+      requestPeerOffer(peerId, manager, socket, true);
+    }, 15_000));
+  };
+
+  const startPeerAttemptTimeout = (peerId: string) => {
+    if (peerAttemptTimeoutsRef.current.has(peerId)) return;
+    peerAttemptTimeoutsRef.current.set(peerId, window.setTimeout(() => {
+      peerAttemptTimeoutsRef.current.delete(peerId);
+      addLog(`Peer ${peerId} connection failed (30-second diagnostic timeout)`);
+    }, 30_000));
+  };
+
+  const startPeerWaitingInterval = (peerId: string) => {
+    if (waitingPeerIntervalsRef.current.has(peerId)) return;
+    waitingPeerIntervalsRef.current.set(peerId, window.setInterval(() => {
+      const manager = peerManagersRef.current[peerId];
+      if (manager?.isDataChannelOpen()) {
+        clearPeerWaitingInterval(peerId);
+        clearPeerElectionFallback(peerId);
+        return;
+      }
+      addLog(`Still waiting for peer ${peerId} to initiate`);
+    }, 10_000));
+  };
+
+  const recordPeerPostReception = (peerId: string, count: number) => {
+    if (count <= 0) return;
+    const now = Date.now();
+    const previous = peerPostReceptionTimesRef.current.get(peerId);
+    const elapsed = previous === undefined ? 'first reception' : `${now - previous}ms since previous reception`;
+    peerPostReceptionTimesRef.current.set(peerId, now);
+    addLog(`Received ${count} posts from peer ${peerId} at ${new Date(now).toISOString()} (${elapsed})`);
   };
 
   const ensurePeerManager = (peerId: string) => {
@@ -1025,6 +1108,7 @@ function App() {
           addLog(`Blocked peer ${peer} post ignored`);
           return;
         }
+        if (object.object_type === 'mycelium.post') recordPeerPostReception(peer, 1);
         const store = objectStoreRef.current;
         const transport = objectTransportRef.current;
         if (!store || !transport) return;
@@ -1088,6 +1172,7 @@ function App() {
         try {
           if (!isCurrentManager(peer)) throw new Error('Feed batch peer is no longer active');
           if (blockedPeersRef.current.has(peer)) throw new Error('Feed batch peer is blocked');
+          recordPeerPostReception(peer, objects.filter((object) => object.object_type === 'mycelium.post').length);
 
           const store = objectStoreRef.current;
           const transport = objectTransportRef.current;
@@ -1116,7 +1201,7 @@ function App() {
           }
 
           setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
-          addLog(`Received ${newlyStoredObjects.length} canonical posts from ${peer}`);
+          addLog(`Received ${newlyStoredObjects.length} canonical objects from ${peer}`);
         } catch (error) {
           processingError = error instanceof Error ? error : new Error('Feed batch processing failed');
           if (page) addLog(`Feed batch processing failed for ${peer.slice(0, 12)}`);
@@ -1136,8 +1221,12 @@ function App() {
         updateContactState(peer, { connected: true });
         inboxServiceRef.current?.notifyPeerConnected();
         void dmServiceRef.current?.flushOutbox();
-        addLog(`Peer ${peer} data channel open`);
         const manager = peerManagersRef.current[peer];
+        addLog(`Peer ${peer} data channel open`);
+        addLog(`Peer ${peer} connected (initiated by ${manager?.didInitiateConnection() ? 'us' : 'them'})`);
+        clearPeerWaitingInterval(peer);
+        clearPeerElectionFallback(peer);
+        clearPeerAttemptTimeout(peer);
         if (manager) {
           await sendPeerMetadata(manager, peer);
           const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peer);
@@ -1148,6 +1237,10 @@ function App() {
       },
       (peer: string) => {
         if (!isCurrentManager(peer)) return;
+        addLog(`Peer ${peer} disconnected (data channel or peer connection closed)`);
+        clearPeerWaitingInterval(peer);
+        clearPeerElectionFallback(peer);
+        clearPeerAttemptTimeout(peer);
         feedDisconnectSubscribersRef.current.forEach((subscriber) => subscriber(peer));
         for (const state of findAggregationRef.current.values()) {
           if (state.aggregation.hasChild(peer)) {
@@ -1166,6 +1259,9 @@ function App() {
       },
       (peer: string, event: string) => {
         if (!isCurrentManager(peer)) return;
+        if (/connection=failed|(?:offer|answer|ICE).*(?:failed|error|timeout)/i.test(event)) {
+          addLog(redactNetworkAddresses(`Peer ${peer} connection failed: ${event}`));
+        }
         addLog(redactNetworkAddresses(`Peer ${peer}: ${event}`));
       },
       (peer: string) => {
@@ -1190,13 +1286,19 @@ function App() {
     return manager;
   };
 
-  const requestPeerOffer = (peerId: string, manager: PeerConnectionManager, socket: WebSocket) => {
+  const requestPeerOffer = (peerId: string, manager: PeerConnectionManager, socket: WebSocket, forceInitiation = false) => {
     if (!identity?.id || peerId === identity.id) return;
-    if (identity.id > peerId) {
+    if (identity.id > peerId && !forceInitiation) {
       addLog(`Waiting for ${peerId} to initiate the peer connection`);
+      startPeerWaitingInterval(peerId);
+      startPeerElectionFallback(peerId);
       return;
     }
-    void manager.createOffer(peerId, socket);
+    startPeerAttemptTimeout(peerId);
+    void manager.createOffer(peerId, socket).catch((error: unknown) => {
+      clearPeerAttemptTimeout(peerId);
+      addLog(`Peer ${peerId} connection failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   };
 
   const handlePeerList = async (peers: string[]) => {
@@ -1211,12 +1313,26 @@ function App() {
       addLog(`Ignoring ${invalidPeers.length} invalid peer ids from peer-list`);
     }
     addLog(`Peer-list received: ${peers.length} announced, ${validPeers.length} valid online peers`);
+    const onlinePeerIds = new Set(validPeers);
+    for (const peerId of peerElectionFallbackTimersRef.current.keys()) {
+      if (!onlinePeerIds.has(peerId)) {
+        clearPeerWaitingInterval(peerId);
+        clearPeerElectionFallback(peerId);
+      }
+    }
+    for (const peerId of waitingPeerIntervalsRef.current.keys()) {
+      if (!onlinePeerIds.has(peerId)) clearPeerWaitingInterval(peerId);
+    }
+    const peerListForLog = [localPeerId, ...validPeers].sort();
+    for (const peerId of validPeers) {
+      const lowerPeerId = localPeerId < peerId ? localPeerId : peerId;
+      addLog(`Peer list: [${peerListForLog.join(', ')}]; lower=${lowerPeerId}; elected-initiator=${localPeerId === lowerPeerId ? 'us' : 'them'}`);
+    }
 
     for (const peerId of validPeers) {
       await addKnownPeer(peerId);
     }
 
-    const onlinePeerIds = new Set(validPeers);
     const nextContacts = dedupeContactsByFingerprint(contactsRef.current).map((contact) => ({
       ...contact,
       online: onlinePeerIds.has(contact.fingerprint)
@@ -1233,18 +1349,27 @@ function App() {
       }
 
       const channelState = manager.getDataChannelState();
-      if (localPeerId > peerId) {
-        addLog(`Peer-list dial deferred for ${peerId}: local ID is not the initiator`);
-        continue;
-      }
       if (channelState === 'open') {
+        clearPeerWaitingInterval(peerId);
+        clearPeerElectionFallback(peerId);
         addLog(`Peer-list dial skipped for ${peerId}: data channel already open`);
         continue;
+      }
+      const electedToWait = localPeerId > peerId;
+      if (electedToWait) {
+        startPeerWaitingInterval(peerId);
+        startPeerElectionFallback(peerId);
       }
       if (channelState === 'connecting' || manager.isNegotiating()) {
         addLog(`Peer-list dial deferred for ${peerId}: channel=${channelState} negotiating=${manager.isNegotiating()}`);
         continue;
       }
+      if (electedToWait) {
+        addLog(`Peer-list dial deferred for ${peerId}: local ID is not the initiator`);
+        continue;
+      }
+      clearPeerWaitingInterval(peerId);
+      clearPeerElectionFallback(peerId);
       addLog(`Peer-list initiating connection to ${peerId}: channel=${channelState}`);
       requestPeerOffer(peerId, manager, socket);
     }
@@ -1382,6 +1507,7 @@ function App() {
             addLog(`Ignoring signalling message from self: ${message.type}`);
             return;
           }
+          if (message.type === 'offer') startPeerAttemptTimeout(message.from);
           const manager = ensurePeerManager(message.from);
           if (manager) {
             await manager.handleSignal(message, socket);
@@ -1461,14 +1587,18 @@ function App() {
   }, [identity?.id, signallingStatus]);
 
   useEffect(() => {
-    if (page !== 'discover' || discoveryPosts.length > 0) return;
-    void handleFetchDiscovery();
-  }, [page, discoveryPosts.length]);
+    const activePage = conversationPostId ? null : page;
+    if (activePageRef.current === activePage) return;
+    activePageRef.current = activePage;
+
+    if (!identity?.id) return;
+    if (activePage === 'discover' && signallingStatus === 'connected') void handleFetchDiscovery();
+  }, [page, conversationPostId, identity?.id, signallingStatus]);
 
   useEffect(() => {
-    if (!identity?.id || page !== 'home') return;
+    if (!identity?.id || page !== 'home' || conversationPostId) return;
     void handleRefreshHomeFeed();
-  }, [page, identity?.id, contacts.length]);
+  }, [page, conversationPostId, identity?.id, contacts.length]);
 
   useEffect(() => {
     if (!identity?.id || !contactsLoaded || connectedPeerIds.length > 0 || signallingStatus !== 'connected' || peerPoolRequestedRef.current) return;
@@ -1794,6 +1924,11 @@ function App() {
 
   const allCachedPosts = mergeLocalPostViews(postViews, discoveryPosts);
   const visibleConversationPosts = allCachedPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
+  const locallyKnownReplyCounts = useMemo(() => {
+    const cachedPosts = mergeLocalPostViews(postViews, discoveryPosts);
+    const visiblePosts = cachedPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
+    return buildLocalDirectReplyCounts(visiblePosts);
+  }, [postViews, discoveryPosts, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds]);
   const activeConversationPost = conversationPostId
     ? allCachedPosts.find((post) => post.object.object_id === conversationPostId)
     : undefined;
@@ -1856,19 +1991,50 @@ function App() {
   }, [conversationPostId, activeConversationPost?.object.object_id, identity?.id]);
 
   const visibleHomePosts = useMemo(() => {
+    const followedContacts = contacts.filter((contact) => contact.followed);
     const followedAuthorKeys = new Set([
-      ...contacts.filter((contact) => contact.followed).flatMap((contact) => [contact.fingerprint, contact.publicKey]),
+      ...followedContacts.flatMap((contact) => [contact.fingerprint, contact.publicKey]),
       ...(identity ? [identity.id, identity.publicKey] : [])
     ]);
-    const computedHomePosts = selectFollowedPosts(postViews.filter((post) => !isHiddenPost(post)), followedAuthorKeys)
-      .map((post) => ({
-        ...post,
-        homeFeedSource: 'followed' as const,
-        recommendationSummary: getRecommendationSummary(post.object.object_id)
-      }));
-    addLog(`Home feed computed: ${computedHomePosts.length} visible posts (${postViews.length} total in postViews); feedMix=${myProfile.feedMix.followedAuthors}/${myProfile.feedMix.followedLikes}/${myProfile.feedMix.discoveryRandom}; hiddenPostIds=${hiddenPostIds.size}`);
+    const followedKeyDiagnostics = [...new Set(followedContacts.map((contact) => contact.publicKey).filter(Boolean))]
+      .slice(0, 3)
+      .map((publicKey) => `${publicKey.slice(0, 12)}…:${followedAuthorKeys.has(publicKey)}`);
+    addLog(`Home feed followed keys: contacts=${followedContacts.length} sample=${followedKeyDiagnostics.join(',') || 'none'}`);
+    const authoredByFollowed = (post: LocalPostView) =>
+      followedAuthorKeys.has(post.object.author) || followedAuthorKeys.has(post.authorFingerprint);
+    const followedPostCount = postViews.filter(authoredByFollowed).length;
+    const visiblePostPool = mergeLocalPostViews(postViews, discoveryPosts)
+      .filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
+    const afterFilterCount = postViews.filter((post) =>
+      authoredByFollowed(post) && !isHiddenPost(post) && !isBlockedPost(post)
+    ).length;
+    const baseline = selectFollowedPosts(visiblePostPool, followedAuthorKeys);
+    const recommendationCandidates = selectRecommendationCandidates(
+      visiblePostPool,
+      getRecommendationSummary,
+      {
+        capacity: Math.floor(baseline.length * 20 / 70),
+        localIdentity: identity?.publicKey ?? '',
+        feedDay: new Date().toISOString().slice(0, 10),
+        followedAuthorKeys,
+        alreadySelectedIds: new Set(baseline.map((post) => post.object.object_id)),
+        isHidden: isHiddenPost,
+        isBlocked: isBlockedPost
+      }
+    );
+    const computedHomePosts = composeHomeFeed({
+      baseline,
+      recommendations: recommendationCandidates,
+      discovery: visibleDiscoveryPosts,
+      getRecommendationSummary,
+      replyCounts: locallyKnownReplyCounts
+    });
+    if (computedHomePosts.length > 0) {
+      addLog(`Selector computed: final=${computedHomePosts.length} first-injectedAt=${computedHomePosts[0].injectedAt} first-created=${computedHomePosts[0].object.created_at.slice(0, 19)}`);
+    }
+    addLog(`Home feed selector: total posts=${postViews.length} followed=${followedPostCount} after-filter=${afterFilterCount} final=${computedHomePosts.length}`);
     return computedHomePosts;
-  }, [postViews, contacts, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision]);
+  }, [postViews, discoveryPosts, contacts, identity, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
@@ -2070,45 +2236,40 @@ function App() {
 
   async function handleRefreshHomeFeed() {
     if (!identity) return;
-    setHomeSyncBusy(true);
 
-    try {
-      const socket = signallingSocketRef.current;
-      const followedPeers = contactsRef.current.filter((contact) => contact.followed && contact.fingerprint !== identity.id);
+    const socket = signallingSocketRef.current;
+    const followedPeers = contactsRef.current.filter((contact) => contact.followed && contact.fingerprint !== identity.id);
 
-      if (!socket || socket.readyState !== WebSocket.OPEN || followedPeers.length === 0) {
-        return;
-      }
-
-      for (const contact of followedPeers) {
-        const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
-        if (!manager) continue;
-
-        if (!manager.isDataChannelOpen() && contact.online) {
-          const channelState = manager.getDataChannelState();
-          if (channelState === 'closed' || channelState === 'missing') {
-            requestPeerOffer(contact.fingerprint, manager, socket);
-            addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
-          }
-        }
-      }
-
-      const connectedFollowedPeers = followedPeers
-        .filter((contact) => peerManagersRef.current[contact.fingerprint]?.isDataChannelOpen())
-        .map((contact) => contact.fingerprint);
-      let nextPeerIndex = 0;
-      const workers = Array.from({ length: Math.min(3, connectedFollowedPeers.length) }, async () => {
-        while (nextPeerIndex < connectedFollowedPeers.length) {
-          const index = nextPeerIndex++;
-          await syncFeedPeer(connectedFollowedPeers[index]);
-        }
-      });
-      await Promise.all(workers);
-
-      localStorage.setItem('myceliumLastHomeSync', new Date().toISOString());
-    } finally {
-      setHomeSyncBusy(false);
+    if (!socket || socket.readyState !== WebSocket.OPEN || followedPeers.length === 0) {
+      return;
     }
+
+    for (const contact of followedPeers) {
+      const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
+      if (!manager) continue;
+
+      if (!manager.isDataChannelOpen() && contact.online) {
+        const channelState = manager.getDataChannelState();
+        if (channelState === 'closed' || channelState === 'missing') {
+          requestPeerOffer(contact.fingerprint, manager, socket);
+          addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
+        }
+      }
+    }
+
+    const connectedFollowedPeers = followedPeers
+      .filter((contact) => peerManagersRef.current[contact.fingerprint]?.isDataChannelOpen())
+      .map((contact) => contact.fingerprint);
+    let nextPeerIndex = 0;
+    const workers = Array.from({ length: Math.min(3, connectedFollowedPeers.length) }, async () => {
+      while (nextPeerIndex < connectedFollowedPeers.length) {
+        const index = nextPeerIndex++;
+        await syncFeedPeer(connectedFollowedPeers[index]);
+      }
+    });
+    await Promise.all(workers);
+
+    localStorage.setItem('myceliumLastHomeSync', new Date().toISOString());
   }
 
   async function handleFetchDiscovery() {
@@ -2932,6 +3093,7 @@ function App() {
             <ConversationPage
               post={activeConversationPost}
               posts={visibleConversationPosts}
+              replyCounts={locallyKnownReplyCounts}
               contacts={contacts}
               myPeerId={identity.id}
               myPublicKey={identity.publicKey}
@@ -2970,13 +3132,14 @@ function App() {
         {page === 'home' && (
           <HomePage
             posts={visibleHomePosts}
+            onDiagnosticLog={addLog}
+            replyCounts={locallyKnownReplyCounts}
             contacts={contacts}
             popularPeers={popularPeers}
             onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={handleCreatePost}
-            onRefreshPosts={handleRefreshHomeFeed}
             canCreatePost={Boolean(identity)}
             onAuthorClick={handleOpenPeerProfile}
             onOpenPost={handleOpenConversation}
@@ -2988,7 +3151,6 @@ function App() {
               }
             }}
             onHide={handleHidePost}
-            isRefreshing={homeSyncBusy}
           />
         )}
 
@@ -3008,10 +3170,10 @@ function App() {
         {page === 'discover' && (
           <DiscoverPage
             discoveryPosts={discoverFeedPosts}
+            replyCounts={locallyKnownReplyCounts}
             contacts={contacts}
             myPeerId={identity.id}
             myPublicKey={identity.publicKey}
-            onRefreshDiscovery={handleFetchDiscovery}
             onAuthorClick={handleOpenPeerProfile}
             onOpenPost={handleOpenConversation}
             onFollow={handleToggleFollow}
@@ -3028,6 +3190,7 @@ function App() {
             contact={activeProfileContact}
             posts={profilePosts}
             likedPosts={likedProfilePosts}
+            replyCounts={locallyKnownReplyCounts}
             myPeerId={identity.id}
             notice={profileNotice}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
@@ -3047,6 +3210,7 @@ function App() {
             contact={myProfileContact}
             posts={postViews.filter((post) => (post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey) && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            replyCounts={locallyKnownReplyCounts}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -3071,24 +3235,7 @@ function App() {
                   <textarea value={myProfile.bio} onChange={(e) => setMyProfile((prev) => ({ ...prev, bio: e.target.value }))} placeholder="Write a short bio" />
                 </label>
                 <h3>Home Feed Mix</h3>
-                <p className="note">Set how much of your home feed should come from people you follow; the rest comes from their recommendations.</p>
-                <label>
-                  From people you follow: {myProfile.feedMix.followedAuthors}%
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={myProfile.feedMix.followedAuthors}
-                    onChange={(e) => setMyProfile((prev) => ({
-                      ...prev,
-                      feedMix: {
-                        ...prev.feedMix,
-                        followedAuthors: Math.max(0, Math.min(100, Number(e.target.value) || 0)),
-                        followedLikes: Math.max(0, 100 - Math.max(0, Math.min(100, Number(e.target.value) || 0)))
-                      }
-                    }))}
-                  />
-                </label>
+                <p className="note">The feed is composed of 70% followed posts, 20% recommendations, and 10% Discovery posts ranked by replies.</p>
                 <div className="row">
                   <button className="btn" onClick={() => {
                     const rawDisplayName = myProfile.displayName.trim();

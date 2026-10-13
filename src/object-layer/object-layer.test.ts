@@ -526,8 +526,7 @@ describe('distributed object foundation', () => {
     expect(recommendationWeight(3)).toBeCloseTo(0.488);
   });
 
-  // Temporarily skipped while the home feed uses followed-author posts only.
-  it.skip('builds a deterministic recommendation pool while excluding followed, hidden, blocked, and withdrawn posts', () => {
+  it('builds a deterministic recommendation pool while excluding followed, hidden, blocked, and withdrawn posts', () => {
     const makePost = (id: string, author: string): LocalPostView => ({
       object: {
         object_id: id,
@@ -571,8 +570,7 @@ describe('distributed object foundation', () => {
     expect(second.map((post) => post.object.object_id)).toEqual(first.map((post) => post.object.object_id));
   });
 
-  // Temporarily skipped while the home feed uses followed-author posts only.
-  it.skip('does not duplicate posts already selected from the followed-author pool', () => {
+  it('does not duplicate posts already selected from the followed-author pool', () => {
     const post = {
       object: { object_id: 'duplicate', object_type: 'mycelium.post', author: 'unfollowed', created_at: '2026-09-17T00:00:00.000Z', payload: {}, signature: '', replication_policy: {} },
       authorFingerprint: 'unfollowed-fingerprint'
