@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
+import { IdentityAvatar } from '../components/IdentityAvatar';
+import { OnlineName } from '../components/OnlineName';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
@@ -16,6 +18,7 @@ interface HomePageProps {
   onSubmitPost: (publish: boolean) => void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
+  myPeerId?: string;
   onOpenPost?: (postId: string) => void;
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
@@ -35,6 +38,7 @@ export function HomePage({
   onSubmitPost,
   canCreatePost,
   onAuthorClick,
+  myPeerId,
   onOpenPost,
   onLike,
   onDislike,
@@ -45,7 +49,6 @@ export function HomePage({
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
   const [publishToDiscovery, setPublishToDiscovery] = useState(true);
-  const [composerOpen, setComposerOpen] = useState(false);
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
@@ -69,6 +72,43 @@ export function HomePage({
 
   return (
     <section className="page-view">
+      <div className="card home-composer">
+        <div className="home-composer-entry">
+          <button
+            className="home-composer-avatar"
+            type="button"
+            onClick={() => myPeerId && onAuthorClick(myPeerId)}
+            aria-label="View your profile"
+            disabled={!myPeerId}
+          >
+            <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" />
+          </button>
+          <textarea
+            value={postText}
+            onChange={(event) => onPostTextChange(event.target.value)}
+            placeholder="Share what is happening..."
+          />
+        </div>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={publishToDiscovery}
+            onChange={(event) => setPublishToDiscovery(event.target.checked)}
+          />
+          <span>Publish to discovery</span>
+        </label>
+        <div className="row">
+          <button
+            className="btn"
+            type="button"
+            onClick={() => onSubmitPost(publishToDiscovery)}
+            disabled={!canCreatePost || !postText.trim()}
+          >
+            Send
+          </button>
+        </div>
+      </div>
+
       {followedPeerCount === 0 && !popularPeersDismissed ? (
         <div className="popular-posters-banner">
           <div className="popular-posters-heading">
@@ -87,7 +127,10 @@ export function HomePage({
             <div className="popular-posters-list">
               {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
                 <div className="popular-poster-item" key={peerId}>
-                  <span>{displayNameOrFallback(undefined, peerId)} <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
+                  <span><OnlineName online={contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.online === true}>{displayNameOrFallback(
+                    contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
+                    peerId
+                  )}</OnlineName> <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
                   {onFollowPeer ? (
                     <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
                       {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
@@ -99,46 +142,6 @@ export function HomePage({
           )}
         </div>
       ) : null}
-      <div className="page-header">
-        <h2>Home</h2>
-      </div>
-
-      <div className="card home-composer">
-        <div className="row between">
-          <h3>Create Post</h3>
-          <button className="chip secondary" type="button" onClick={() => setComposerOpen((prev) => !prev)}>
-            {composerOpen ? 'Hide' : 'Write'}
-          </button>
-        </div>
-
-        {composerOpen ? (
-          <>
-            <textarea
-              value={postText}
-              onChange={(event) => onPostTextChange(event.target.value)}
-              placeholder="Share what is happening..."
-            />
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={publishToDiscovery}
-                onChange={(event) => setPublishToDiscovery(event.target.checked)}
-              />
-              <span>Publish to discovery</span>
-            </label>
-            <div className="row">
-              <button
-                className="btn"
-                type="button"
-                onClick={() => onSubmitPost(publishToDiscovery)}
-                disabled={!canCreatePost || !postText.trim()}
-              >
-                Send
-              </button>
-            </div>
-          </>
-        ) : null}
-      </div>
 
       {visiblePosts.length === 0 ? (
         <div className="empty-state card">
@@ -185,6 +188,7 @@ export function HomePage({
                 replyCount={replyCounts?.get(objectId) ?? 0}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
+                authorOnline={matchingContact?.online === true}
                 onAuthorClick={onAuthorClick}
                 onOpenPost={onOpenPost ? () => onOpenPost(objectId) : undefined}
                 onLike={() => onLike(objectId)}

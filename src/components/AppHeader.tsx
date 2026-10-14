@@ -1,8 +1,7 @@
-import { useState } from 'react';
 import type { ConnectionState } from '../types';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { BrandLogo } from './BrandLogo';
-import { useDmUnread } from '../hooks/useDmUnread';
+import { OnlineName } from './OnlineName';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -13,9 +12,6 @@ interface AppHeaderProps {
   connectedPeerIds: string[];
   syncStatus: string;
   myFingerprint?: string;
-  onOpenMyProfile: () => void;
-  onOpenSettings: () => void;
-  onOpenPeopleInbox: () => void;
 }
 
 export function AppHeader({
@@ -26,13 +22,8 @@ export function AppHeader({
   connectedPeers,
   connectedPeerIds,
   syncStatus,
-  myFingerprint,
-  onOpenMyProfile,
-  onOpenSettings,
-  onOpenPeopleInbox
+  myFingerprint
 }: AppHeaderProps) {
-  const { total: unreadCount } = useDmUnread();
-  const [peersExpanded, setPeersExpanded] = useState(false);
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
   const tone = isGood ? 'good' : isWarning ? 'warn' : 'bad';
@@ -41,6 +32,7 @@ export function AppHeader({
     : isWarning
       ? 'Connecting to network'
       : 'Disconnected. See diagnostics';
+  const statusLabel = isGood ? 'Connected' : isWarning ? 'Connecting' : 'Disconnected';
 
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
@@ -49,43 +41,33 @@ export function AppHeader({
           <BrandLogo variant="default" className="brand-logo app-brand-logo" size={32} />
           <p className="app-title">Mycelium - Private peer-to-peer social</p>
         </div>
-        <button className="icon-btn" onClick={onToggleCollapse} aria-label="Toggle header">
-          {collapsed ? '▼' : '▲'}
+        <button
+          className={`icon-btn header-menu-toggle ${tone}`}
+          onClick={onToggleCollapse}
+          aria-label={collapsed ? 'Open main menu' : 'Close main menu'}
+          aria-expanded={!collapsed}
+        >
+          <span className="status-light" aria-hidden="true" />
         </button>
       </div>
 
       <div className={`app-header-body ${collapsed ? 'collapsed' : ''}`}>
-        <div className={`network-status-wrap ${peersExpanded ? 'expanded' : ''}`}>
-          <button
-            className={`network-status ${tone}`}
-            onClick={() => setPeersExpanded((expanded) => !expanded)}
-            aria-expanded={peersExpanded}
-            aria-controls="connected-peer-list"
-          >
+        <section className={`network-status-panel ${tone}`} aria-label="Peer connection status">
+          <div className="network-status-summary">
             <span className="status-light" aria-hidden="true" />
-            <strong>{summary}</strong>
-            <span className="network-status-arrow" aria-hidden="true">{peersExpanded ? '▲' : '▼'}</span>
-          </button>
-          {peersExpanded ? (
-            <div id="connected-peer-list" className="connected-peer-list">
-              <strong>Open peer connections</strong>
-              {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
-                <div className="connected-peer" key={peerId}>
-                  <span>{fingerprintToHumanName(peerId)}</span>
-                  <code>{peerId}</code>
-                </div>
-              )) : <span className="connected-peer-empty">No open data channels</span>}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="app-header-actions">
-          {unreadCount > 0 ? (
-            <button className="btn secondary" onClick={onOpenPeopleInbox}>Unread inbox ({unreadCount})</button>
-          ) : null}
-          <button className="btn" onClick={onOpenMyProfile}>My profile</button>
-          <button className="btn secondary" onClick={onOpenSettings}>Diagnostics</button>
-        </div>
+            <strong>{statusLabel}</strong>
+            <span>{summary}</span>
+          </div>
+          <div id="connected-peer-list" className="connected-peer-list">
+            <strong>Open peer connections</strong>
+            {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
+              <div className="connected-peer" key={peerId}>
+                <OnlineName online>{fingerprintToHumanName(peerId)}</OnlineName>
+                <code>{peerId}</code>
+              </div>
+            )) : <span className="connected-peer-empty">No open data channels</span>}
+          </div>
+        </section>
       </div>
     </header>
   );

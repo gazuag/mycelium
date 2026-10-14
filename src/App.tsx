@@ -12,6 +12,7 @@ import { createOutboxService } from './object-layer/outbox-service';
 import { createFeedRequestAdapter, type ProcessedFeedBatchHandler } from './object-layer/feed-request-adapter';
 import { dedupeContactsByFingerprint } from './contact-utils';
 import { DmUnreadProvider } from './hooks/useDmUnread';
+import { listConversations, previewConversation, type ConversationSummary } from './object-layer/conversations';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
@@ -22,8 +23,10 @@ import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
 import { ConversationPage } from './pages/ConversationPage';
 import { DiscoverPage } from './pages/DiscoverPage';
-import { PeoplePage } from './pages/PeoplePage';
+import { MessagesPage } from './pages/MessagesPage';
 import { ProfilePage } from './pages/ProfilePage';
+import { RelationshipsPage } from './pages/RelationshipsPage';
+import type { RelationshipTab } from './pages/RelationshipsPage';
 import { DmChatPage } from './pages/DmChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
@@ -70,26 +73,30 @@ function classifyLogEntry(entry: string): LogCategory {
   return 'general';
 }
 
-type PageKey = 'home' | 'people' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
+type PageKey = 'home' | 'messages' | 'relationships' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
 
 interface AppNavigationState {
   page: PageKey;
   conversationPostId: string | null;
   focusedReplyId: string | null;
   profileContactId: string | null;
+  relationshipOwnerId: string | null;
+  relationshipTab: RelationshipTab;
   chatContactId: string | null;
   scrollTop: number;
   conversationReturnScrollTop: number | null;
 }
 
 const APP_NAVIGATION_STATE_KEY = 'myceliumNavigation';
-const PAGE_KEYS: PageKey[] = ['home', 'people', 'discover', 'profile', 'myProfile', 'chat', 'settings'];
+const PAGE_KEYS: PageKey[] = ['home', 'messages', 'relationships', 'discover', 'profile', 'myProfile', 'chat', 'settings'];
 
 function readAppNavigationState(state: unknown): AppNavigationState {
   const historyState = state && typeof state === 'object' ? state as Record<string, unknown> : {};
   const navigation = historyState[APP_NAVIGATION_STATE_KEY];
   const appState = navigation && typeof navigation === 'object' ? navigation as Record<string, unknown> : {};
-  const page = PAGE_KEYS.includes(appState.page as PageKey) ? appState.page as PageKey : 'home';
+  const page = appState.page === 'people'
+    ? 'messages'
+    : PAGE_KEYS.includes(appState.page as PageKey) ? appState.page as PageKey : 'home';
   const legacyConversationId = historyState.myceliumConversationPostId;
   const conversationPostId = typeof appState.conversationPostId === 'string'
     ? appState.conversationPostId
@@ -102,6 +109,8 @@ function readAppNavigationState(state: unknown): AppNavigationState {
       ? appState.focusedReplyId
       : typeof legacyFocusedReplyId === 'string' ? legacyFocusedReplyId : null,
     profileContactId: typeof appState.profileContactId === 'string' ? appState.profileContactId : null,
+    relationshipOwnerId: typeof appState.relationshipOwnerId === 'string' ? appState.relationshipOwnerId : null,
+    relationshipTab: appState.relationshipTab === 'followers' ? 'followers' : 'following',
     chatContactId: typeof appState.chatContactId === 'string' ? appState.chatContactId : null,
     scrollTop: typeof appState.scrollTop === 'number' && Number.isFinite(appState.scrollTop) ? appState.scrollTop : 0,
     conversationReturnScrollTop: typeof appState.conversationReturnScrollTop === 'number'
@@ -161,8 +170,10 @@ function App() {
   const pendingScrollRestoreRef = useRef<number | null>(initialNavigation.scrollTop);
   const [navigationRevision, setNavigationRevision] = useState(0);
   const [profileContactId, setProfileContactId] = useState<string | null>(initialNavigation.profileContactId);
+  const [relationshipOwnerId, setRelationshipOwnerId] = useState<string | null>(initialNavigation.relationshipOwnerId);
+  const [relationshipTab, setRelationshipTab] = useState<RelationshipTab>(initialNavigation.relationshipTab);
   const [chatContactId, setChatContactId] = useState<string | null>(initialNavigation.chatContactId);
-  const [collapsedHeader, setCollapsedHeader] = useState<boolean>(() => localStorage.getItem('myceliumHeaderCollapsed') === 'true');
+  const [collapsedHeader, setCollapsedHeader] = useState(true);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
@@ -179,9 +190,10 @@ function App() {
   });
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
-    people: 0,
+    messages: 0,
     discover: 0,
     profile: 0,
+    relationships: 0,
     myProfile: 0,
     chat: 0,
     settings: 0
@@ -189,6 +201,11 @@ function App() {
   const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
   const [possiblePeerIds, setPossiblePeerIds] = useState<string[]>([]);
   const [popularPeers, setPopularPeers] = useState<PopularPeer[]>([]);
+  const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
+  const [conversationPreviews, setConversationPreviews] = useState<Record<string, string>>({});
+  const [conversationListLoading, setConversationListLoading] = useState(false);
+  const [conversationListError, setConversationListError] = useState<string | null>(null);
+  const [conversationPreviewError, setConversationPreviewError] = useState<string | null>(null);
   const [contactsLoaded, setContactsLoaded] = useState(false);
     const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [newPostContent, setNewPostContent] = useState('');
@@ -291,6 +308,8 @@ function App() {
       setConversationFocusPostId(next.focusedReplyId);
       setProfileContactId(next.profileContactId);
       profileContactIdRef.current = next.profileContactId;
+      setRelationshipOwnerId(next.relationshipOwnerId);
+      setRelationshipTab(next.relationshipTab);
       setChatContactId(next.chatContactId);
       if (next.chatContactId) setSelectedContactId(next.chatContactId);
       conversationReturnScrollTopRef.current = next.conversationReturnScrollTop ?? 0;
@@ -1614,7 +1633,7 @@ function App() {
   }, [identity?.id, contactsLoaded, connectedPeerIds.length, signallingStatus]);
 
   useEffect(() => {
-    if (!identity?.id || !contactsLoaded || contacts.some((contact) => contact.followed) || signallingStatus !== 'connected' || popularPeersRequestedRef.current) return;
+    if (!identity?.id || !contactsLoaded || signallingStatus !== 'connected' || popularPeersRequestedRef.current) return;
     const socket = signallingSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     popularPeersRequestedRef.current = true;
@@ -2062,6 +2081,8 @@ function App() {
       conversationPostId,
       focusedReplyId: conversationFocusPostId,
       profileContactId,
+      relationshipOwnerId,
+      relationshipTab,
       chatContactId,
       conversationReturnScrollTop: conversationPostId
         ? conversationReturnScrollTopRef.current
@@ -2085,6 +2106,7 @@ function App() {
         && target.conversationPostId === current.conversationPostId
         && target.focusedReplyId === current.focusedReplyId
         && target.profileContactId === current.profileContactId
+        && target.relationshipOwnerId === current.relationshipOwnerId
         && target.chatContactId === current.chatContactId;
       if (sameDestination) return;
       window.history.pushState(
@@ -2105,6 +2127,8 @@ function App() {
     setConversationFocusPostId(target.focusedReplyId);
     setProfileContactId(target.profileContactId);
     profileContactIdRef.current = target.profileContactId;
+    setRelationshipOwnerId(target.relationshipOwnerId);
+    setRelationshipTab(target.relationshipTab);
     setChatContactId(target.chatContactId);
     if (target.chatContactId) setSelectedContactId(target.chatContactId);
     conversationReturnScrollTopRef.current = target.conversationReturnScrollTop ?? 0;
@@ -2121,10 +2145,35 @@ function App() {
       conversationPostId: null,
       focusedReplyId: null,
       profileContactId: null,
+      relationshipOwnerId: null,
+      relationshipTab,
       chatContactId: null,
       scrollTop: pageScrollPositions[nextPage] ?? 0,
       conversationReturnScrollTop: null
     });
+  }
+
+  function handleOpenRelationships(ownerId: string, tab: RelationshipTab) {
+    commitNavigation({
+      ...currentNavigationState(),
+      page: 'relationships',
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: null,
+      relationshipOwnerId: ownerId,
+      relationshipTab: tab,
+      chatContactId: null,
+      scrollTop: pageScrollPositions.relationships ?? 0,
+      conversationReturnScrollTop: null
+    });
+  }
+
+  function handleRelationshipTabChange(tab: RelationshipTab) {
+    if (tab === relationshipTab) return;
+    commitNavigation({
+      ...currentNavigationState(),
+      relationshipTab: tab
+    }, 'replace');
   }
 
   function handleOpenConversation(postId: string, focusedReplyId?: string) {
@@ -2158,10 +2207,7 @@ function App() {
   }
 
   const handleToggleHeader = () => {
-    setCollapsedHeader((prev) => {
-      localStorage.setItem('myceliumHeaderCollapsed', JSON.stringify(!prev));
-      return !prev;
-    });
+    setCollapsedHeader((prev) => !prev);
   };
 
   const handleHidePeer = (peerId: string) => {
@@ -2480,8 +2526,6 @@ function App() {
     localStorage.removeItem('myProfile');
     localStorage.removeItem('hiddenPosts');
     localStorage.removeItem('hiddenDiscovery');
-    localStorage.removeItem('myceliumHeaderCollapsed');
-
     setIdentity(null);
     dmServiceRef.current = null;
     if (dmOutboxIntervalRef.current !== null) {
@@ -2501,6 +2545,8 @@ function App() {
       conversationPostId: null,
       focusedReplyId: null,
       profileContactId: null,
+      relationshipOwnerId: null,
+      relationshipTab: 'following',
       chatContactId: null,
       scrollTop: 0,
       conversationReturnScrollTop: null
@@ -2521,7 +2567,11 @@ function App() {
   }
 
   async function handleSelectContact(peerId: string) {
-    setSelectedContactId(peerId);
+    const knownContact = contactsRef.current.find((contact) => (
+      contact.fingerprint === peerId || contact.publicKey === peerId
+    ));
+    const chatId = knownContact?.fingerprint ?? peerId;
+    setSelectedContactId(chatId);
     const current = currentNavigationState();
     commitNavigation({
       ...current,
@@ -2529,17 +2579,18 @@ function App() {
       conversationPostId: null,
       focusedReplyId: null,
       profileContactId: null,
-      chatContactId: peerId,
+      relationshipOwnerId: null,
+      chatContactId: chatId,
       scrollTop: pageScrollPositions.chat ?? 0,
       conversationReturnScrollTop: null
     });
-    addLog(`Selected contact ${peerId}`);
+    addLog(`Selected contact ${chatId}`);
     const socket = signallingSocketRef.current;
-    const manager = ensurePeerManager(peerId);
-    const targetContact = contacts.find((contact) => contact.fingerprint === peerId);
+    const manager = ensurePeerManager(chatId);
+    const targetContact = knownContact;
     if (socket && socket.readyState === WebSocket.OPEN && manager && !targetContact?.connected) {
-      requestPeerOffer(peerId, manager, socket);
-      addLog(`Opening encrypted conversation and connecting to ${peerId}`);
+      requestPeerOffer(chatId, manager, socket);
+      addLog(`Opening encrypted conversation and connecting to ${chatId}`);
     }
   }
 
@@ -2554,6 +2605,7 @@ function App() {
         conversationPostId: null,
         focusedReplyId: null,
         profileContactId: null,
+        relationshipOwnerId: null,
         chatContactId: null,
         scrollTop: pageScrollPositions.myProfile ?? 0,
         conversationReturnScrollTop: null
@@ -2591,6 +2643,7 @@ function App() {
       conversationPostId: null,
       focusedReplyId: null,
       profileContactId: peerId,
+      relationshipOwnerId: null,
       chatContactId: null,
       scrollTop: pageScrollPositions.profile ?? 0,
       conversationReturnScrollTop: null
@@ -3026,7 +3079,15 @@ function App() {
       } as any
     };
   }, [identity, myProfile.displayName, myProfile.bio]);
-  const activeChatContact = chatContactId ? contacts.find((c) => c.fingerprint === chatContactId) : undefined;
+  const activeChatContact = chatContactId
+    ? contacts.find((contact) => contact.fingerprint === chatContactId || contact.publicKey === chatContactId)
+      ?? {
+        publicKey: chatContactId,
+        fingerprint: chatContactId,
+        addedAt: '',
+        followed: false
+      }
+    : undefined;
   const getDmIdentity = useCallback(() => identity ? ({
     id: identity.id,
     publicKey: identity.publicKey,
@@ -3041,6 +3102,85 @@ function App() {
   const isDmContactKnown = useCallback((publicKey: string) => (
     contactsRef.current.some((contact) => contact.publicKey === publicKey)
   ), []);
+
+  useEffect(() => {
+    if (!identity || page !== 'messages' || !objectStoreRef.current) {
+      setConversationListLoading(false);
+      return;
+    }
+
+    let active = true;
+    let requestRevision = 0;
+    const store = objectStoreRef.current;
+    const myPublicKey = identity.publicKey;
+    const refresh = async () => {
+      const revision = ++requestRevision;
+      setConversationListLoading(true);
+      try {
+        const summaries = await listConversations({ store, myPublicKey });
+        if (!active || revision !== requestRevision) return;
+        setConversationSummaries(summaries);
+        setConversationPreviews({});
+        setConversationListError(null);
+        setConversationPreviewError(null);
+
+        const dmIdentity = getDmIdentity();
+        const outbox = outboxStoreRef.current;
+        if (!dmIdentity || !outbox) {
+          setConversationPreviewError('Message previews are unavailable for this identity.');
+          return;
+        }
+
+        const previewResults = await Promise.all(summaries.map(async (summary) => {
+          try {
+            const message = await previewConversation({
+              store,
+              identity: dmIdentity,
+              counterparty: summary.counterparty,
+              resolveSenderEncryptionKey: resolveDmSenderEncryptionKey,
+              getOutboxEntry: (objectId) => outbox.get(objectId)
+            });
+            return {
+              counterparty: summary.counterparty,
+              text: message?.status === 'ok' ? message.text : null,
+              error: null as string | null
+            };
+          } catch (error) {
+            return {
+              counterparty: summary.counterparty,
+              text: null,
+              error: error instanceof Error ? error.message : String(error)
+            };
+          }
+        }));
+        if (!active || revision !== requestRevision) return;
+        setConversationPreviews(Object.fromEntries(
+          previewResults.flatMap((result) => result.text === null
+            ? []
+            : [[result.counterparty, result.text] as const])
+        ));
+        const failedPreview = previewResults.find((result) => result.error !== null);
+        setConversationPreviewError(failedPreview
+          ? `Could not load a message preview for ${failedPreview.counterparty}: ${failedPreview.error}`
+          : null);
+      } catch (error) {
+        if (!active || revision !== requestRevision) return;
+        setConversationListError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (active && revision === requestRevision) setConversationListLoading(false);
+      }
+    };
+
+    void refresh();
+    const unsubscribe = dmEventsRef.current.onDmArrived((object) => {
+      if (object.object_type === 'mycelium.dm' && object.recipient === myPublicKey) void refresh();
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [identity?.publicKey, page, navigationRevision]);
+
   if (!identity) {
     return (
       <LandingPage
@@ -3069,7 +3209,18 @@ function App() {
     >
     <div className="app-shell">
       <aside className="app-sidebar">
-        <TabBar active={page === 'home' || page === 'people' || page === 'discover' ? page : 'home'} onChange={handlePageChange} />
+        <TabBar
+          active={
+            page === 'relationships'
+              ? 'myProfile'
+              : page === 'chat'
+                ? 'messages'
+                : page === 'messages' || page === 'discover' || page === 'myProfile' || page === 'settings'
+              ? page
+              : 'home'
+          }
+          onChange={handlePageChange}
+        />
       </aside>
 
       <div className="app-main-column">
@@ -3082,9 +3233,6 @@ function App() {
           connectedPeerIds={connectedPeerIds}
           syncStatus={syncStatus}
           myFingerprint={identity?.id}
-          onOpenMyProfile={() => handlePageChange('myProfile')}
-          onOpenSettings={() => handlePageChange('settings')}
-          onOpenPeopleInbox={() => handlePageChange('people')}
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -3142,6 +3290,7 @@ function App() {
             onSubmitPost={handleCreatePost}
             canCreatePost={Boolean(identity)}
             onAuthorClick={handleOpenPeerProfile}
+            myPeerId={identity.id}
             onOpenPost={handleOpenConversation}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -3154,16 +3303,29 @@ function App() {
           />
         )}
 
-        {page === 'people' && (
-          <PeoplePage
+        {page === 'messages' && (
+          <MessagesPage
             contacts={visibleContacts}
-            suggestedPeerIds={possiblePeerIds}
+            myPublicKey={identity.publicKey}
             myPeerId={identity.id}
+            conversations={conversationSummaries}
+            previews={conversationPreviews}
+            loading={conversationListLoading}
+            error={conversationListError}
+            previewError={conversationPreviewError}
+            onOpenChat={handleSelectContact}
+          />
+        )}
+
+        {page === 'relationships' && relationshipOwnerId && (
+          <RelationshipsPage
+            ownerId={relationshipOwnerId}
+            myPeerId={identity.id}
+            initialTab={relationshipTab}
+            contacts={visibleContacts}
+            onTabChange={handleRelationshipTabChange}
             onViewProfile={handleOpenPeerProfile}
-            onMessage={handleSelectContact}
             onToggleFollow={handleToggleFollow}
-            onBlockPeer={handleBlockPeer}
-            onAddPeerAddress={handleAddPeerByAddress}
           />
         )}
 
@@ -3171,7 +3333,9 @@ function App() {
           <DiscoverPage
             discoveryPosts={discoverFeedPosts}
             replyCounts={locallyKnownReplyCounts}
-            contacts={contacts}
+            contacts={visibleContacts}
+            suggestedPeerIds={possiblePeerIds}
+            popularPeers={popularPeers}
             myPeerId={identity.id}
             myPublicKey={identity.publicKey}
             onAuthorClick={handleOpenPeerProfile}
@@ -3190,8 +3354,10 @@ function App() {
             contact={activeProfileContact}
             posts={profilePosts}
             likedPosts={likedProfilePosts}
+            contacts={visibleContacts}
             replyCounts={locallyKnownReplyCounts}
             myPeerId={identity.id}
+            onOpenRelationships={(tab) => handleOpenRelationships(activeProfileContact.fingerprint, tab)}
             notice={profileNotice}
             onFollowToggle={() => handleToggleFollow(activeProfileContact.publicKey)}
             onBlock={() => handleBlockPeer(activeProfileContact.fingerprint)}
@@ -3210,7 +3376,11 @@ function App() {
             contact={myProfileContact}
             posts={postViews.filter((post) => (post.authorFingerprint === identity?.id || post.object.author === identity?.publicKey) && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
             likedPosts={postViews.filter((post) => getRecommendationSummary(post.object.object_id).recommended_by_me && post.object.author !== identity?.publicKey && !isHiddenPost(post)).sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime())}
+            contacts={visibleContacts}
             replyCounts={locallyKnownReplyCounts}
+            followingCount={visibleContacts.filter((contact) => contact.followed).length}
+            followerCount={visibleContacts.filter((contact) => contact.follower).length}
+            onOpenRelationships={(tab) => handleOpenRelationships(identity.id, tab)}
             onAuthorClick={handleOpenPeerProfile}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -3304,6 +3474,8 @@ function App() {
             events={dmEventsRef.current}
             isContactKnown={isDmContactKnown}
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
+            myPeerId={identity.id}
+            onViewProfile={handleOpenPeerProfile}
           />
         )}
 
@@ -3319,13 +3491,13 @@ function App() {
             signallingStatus={signallingStatus}
             connectedPeers={connectedPeersCount}
             syncStatus={syncStatus}
+            onAddPeerAddress={handleAddPeerByAddress}
             onResetApp={() => {
               setHiddenPostIds(new Set());
               setHiddenDiscoveryIds(new Set());
-              setCollapsedHeader(false);
+              setCollapsedHeader(true);
               localStorage.removeItem('hiddenPosts');
               localStorage.removeItem('hiddenDiscovery');
-              localStorage.removeItem('myceliumHeaderCollapsed');
             }}
           />
         )}

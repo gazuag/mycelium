@@ -216,6 +216,10 @@ export function ConversationPage({
           replyCount={replyCounts?.get(objectId) ?? 0}
           authorName={authorName}
           authorId={matchingContact?.fingerprint ?? currentPost.authorFingerprint}
+          authorOnline={
+            currentPost.object.author !== myPublicKey
+            && matchingContact?.online === true
+          }
           onAuthorClick={() => onAuthorClick(matchingContact?.fingerprint ?? currentPost.authorFingerprint)}
           onOpenPost={isRoot ? undefined : () => onOpenPost(objectId)}
           onLike={() => onLike(objectId)}

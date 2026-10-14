@@ -82,6 +82,8 @@ function renderPage(): string {
       dmService={{ sendMessage: async () => ({ status: 'invalid', replicatedTo: [], queued: false, keyChanged: false }) }}
       events={events}
       connectionText="Connected"
+      myPeerId="me-id"
+      onViewProfile={vi.fn()}
     />
   );
 }
@@ -135,6 +137,19 @@ describe('DmChatPage', () => {
 
     expect(markup).toContain('Waiting to send');
     expect(markup).toContain('Sent');
+  });
+
+  it('renders small profile links for both incoming and outgoing messages', () => {
+    hookState.result.messages = [
+      message('incoming', 'ok'),
+      message('outgoing', 'ok', { direction: 'out', delivery: 'sent' })
+    ];
+    const markup = renderPage();
+
+    expect(markup).toContain('aria-label="View Peer&#x27;s profile"');
+    expect(markup).toContain('aria-label="View your profile"');
+    expect(markup).toContain('width="21" height="21"');
+    expect(markup).toContain('message text');
   });
 
   it('disables the compose controls with the missing-key explanation', () => {

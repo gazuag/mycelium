@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { IdentityAvatar } from '../components/IdentityAvatar';
+import { OnlineName } from '../components/OnlineName';
 import type { Contact } from '../types';
 import type { DmEvents } from '../object-layer/dm-events';
 import type { DmObjectIdentity } from '../object-layer/dm-object';
@@ -21,6 +23,8 @@ export interface DmChatPageProps {
   events: DmEvents;
   isContactKnown?: (publicKey: string) => boolean;
   connectionText: string;
+  myPeerId: string;
+  onViewProfile: (peerId: string) => void;
 }
 
 export function shouldSendOnEnter(key: string, shiftKey: boolean): boolean {
@@ -47,7 +51,9 @@ export function DmChatPage({
   dmService,
   events,
   isContactKnown,
-  connectionText
+  connectionText,
+  myPeerId,
+  onViewProfile
 }: DmChatPageProps) {
   const { messages, loading, send, sending, canSend, noKey } = useDmConversation({
     counterparty,
@@ -91,7 +97,7 @@ export function DmChatPage({
   return (
     <section className="chat-page dm-chat-page">
       <div className="chat-header">
-        <span className="chat-header-title">Chat with {displayName}</span>
+        <span className="chat-header-title">Chat with <OnlineName online={contact.online === true}>{displayName}</OnlineName></span>
         <span className="chat-header-status">{connectionText}</span>
       </div>
 
@@ -100,24 +106,38 @@ export function DmChatPage({
         {!loading && messages.length === 0 && <p className="chat-empty">No messages yet.</p>}
         {messages.map((message) => (
           <div
-            className={`chat-bubble ${message.direction === 'out' ? 'mine' : 'theirs'}`}
+            className={`chat-message-row ${message.direction === 'out' ? 'mine' : 'theirs'}`}
             key={message.objectId}
           >
-            {message.status === 'ok' && message.text !== null
-              ? <p>{message.text}</p>
-              : <p className={`dm-message-placeholder ${message.status}`}>
-                  {message.status === 'unverified'
-                    ? "Can't verify the sender yet. Connect with them once to exchange encryption keys."
-                    : message.status === 'key_changed'
-                      ? "This contact's encryption key changed. Verify with them before trusting new messages."
-                      : 'This message could not be opened.'}
-                </p>}
-            <span className="chat-timestamp">
-              {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              {message.direction === 'out' && message.delivery && (
-                <> · {message.delivery === 'pending' ? 'Waiting to send' : 'Sent'}</>
-              )}
-            </span>
+            <button
+              className="chat-message-avatar"
+              type="button"
+              onClick={() => onViewProfile(message.direction === 'out' ? myPeerId : contact.fingerprint)}
+              aria-label={message.direction === 'out' ? 'View your profile' : `View ${displayName}'s profile`}
+            >
+              <IdentityAvatar
+                seed={message.direction === 'out' ? myPeerId : contact.fingerprint}
+                size={21}
+                alt=""
+              />
+            </button>
+            <div className={`chat-bubble ${message.direction === 'out' ? 'mine' : 'theirs'}`}>
+              {message.status === 'ok' && message.text !== null
+                ? <p>{message.text}</p>
+                : <p className={`dm-message-placeholder ${message.status}`}>
+                    {message.status === 'unverified'
+                      ? "Can't verify the sender yet. Connect with them once to exchange encryption keys."
+                      : message.status === 'key_changed'
+                        ? "This contact's encryption key changed. Verify with them before trusting new messages."
+                        : 'This message could not be opened.'}
+                  </p>}
+              <span className="chat-timestamp">
+                {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {message.direction === 'out' && message.delivery && (
+                  <> · {message.delivery === 'pending' ? 'Waiting to send' : 'Sent'}</>
+                )}
+              </span>
+            </div>
           </div>
         ))}
       </div>

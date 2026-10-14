@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView, RecommendationSummary } from '../object-layer';
+import type { RelationshipTab } from './RelationshipsPage';
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
@@ -12,8 +13,12 @@ interface ProfilePageProps {
   contact: Contact;
   posts: LocalPostView[];
   likedPosts: LocalPostView[];
+  contacts?: Contact[];
   replyCounts?: ReadonlyMap<string, number>;
   myPeerId?: string;
+  followingCount?: number;
+  followerCount?: number;
+  onOpenRelationships?: (tab: RelationshipTab) => void;
   onFollowToggle?: () => void;
   onBlock?: () => void;
   onMessage?: () => void;
@@ -34,8 +39,12 @@ export function ProfilePage({
   contact,
   posts,
   likedPosts,
+  contacts = [],
   replyCounts,
   myPeerId,
+  followingCount,
+  followerCount,
+  onOpenRelationships,
   onFollowToggle,
   onBlock,
   onMessage,
@@ -92,9 +101,21 @@ export function ProfilePage({
         onFollowToggle={onFollowToggle}
         onBlock={onBlock}
         onMessage={onMessage}
+        onAvatarClick={() => onAuthorClick(contact.fingerprint || contact.publicKey)}
         showOnlineIndicator={!isOwnProfile}
         showActions={!isOwnProfile && Boolean(onFollowToggle && onBlock && onMessage)}
       />
+
+      {onOpenRelationships ? (
+        <div className="profile-relationship-links" aria-label="Profile relationships">
+          <button type="button" onClick={() => onOpenRelationships('following')}>
+            <strong>{followingCount ?? ''}</strong> Following
+          </button>
+          <button type="button" onClick={() => onOpenRelationships('followers')}>
+            <strong>{followerCount ?? ''}</strong> Followers
+          </button>
+        </div>
+      ) : null}
 
       {isOwnProfile && profileSettings ? (
         <CollapsibleSection
@@ -116,8 +137,14 @@ export function ProfilePage({
       ) : (
         <>
           <div className="feed-list">
-            {visibleItems.map((post) => (
-              <PostCard
+            {visibleItems.map((post) => {
+              const postAuthorContact = contacts.find((candidate) => (
+                candidate.fingerprint === post.authorFingerprint
+                || candidate.publicKey === post.object.author
+              ));
+              const isProfileAuthor = post.authorFingerprint === contact.fingerprint
+                || post.object.author === contact.publicKey;
+              return <PostCard
                 key={post.object.object_id}
                 post={post}
                 replyCount={replyCounts?.get(post.object.object_id) ?? 0}
@@ -126,6 +153,7 @@ export function ProfilePage({
                   post.authorFingerprint
                 )}
                 authorId={post.authorFingerprint}
+                authorOnline={!isOwnProfile && (postAuthorContact?.online === true || (isProfileAuthor && contact.online === true))}
                 onAuthorClick={() => onAuthorClick(post.authorFingerprint)}
                 onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                 onLike={() => onLike(post.object.object_id)}
@@ -134,8 +162,8 @@ export function ProfilePage({
                 onReply={() => {} }
                 isLiked={getRecommendationSummary(post.object.object_id).recommended_by_me}
                 isOwnPost={isOwnProfile}
-              />
-            ))}
+              />;
+            })}
           </div>
           {remainingItems > 0 ? (
             <div className="card" style={{ marginTop: '1rem' }}>

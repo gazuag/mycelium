@@ -15,6 +15,15 @@ describe('legacy plaintext chat removal', () => {
     expect(existsSync(new URL('./pages/ChatPage.tsx', import.meta.url))).toBe(false);
   });
 
+  it('routes Messages and profile actions through the existing encrypted DM page', () => {
+    expect(appSource).toContain("import { MessagesPage } from './pages/MessagesPage'");
+    expect(appSource).toContain("page === 'messages' &&");
+    expect(appSource).toContain('onOpenChat={handleSelectContact}');
+    expect(appSource).toContain("page === 'chat' && activeChatContact && identity");
+    expect(appSource).toContain('onMessage={() => handleSelectContact(activeProfileContact.fingerprint)}');
+    expect(appSource).not.toContain("import { PeoplePage } from './pages/PeoplePage'");
+  });
+
   it('has no exports or transport APIs for the removed plaintext chat', () => {
     for (const symbol of [
       'saveDirectChatMessage',

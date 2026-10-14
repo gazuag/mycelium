@@ -2,6 +2,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
+import { OnlineName } from './OnlineName';
 import { BlockButton } from './BlockButton';
 
 interface ProfileHeaderProps {
@@ -12,6 +13,7 @@ interface ProfileHeaderProps {
   showOnlineIndicator?: boolean;
   showActions?: boolean;
   myPeerId?: string;
+  onAvatarClick?: () => void;
 }
 
 export function ProfileHeader({
@@ -21,7 +23,8 @@ export function ProfileHeader({
   onMessage,
   showOnlineIndicator = true,
   showActions = true,
-  myPeerId
+  myPeerId,
+  onAvatarClick
 }: ProfileHeaderProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
@@ -29,9 +32,15 @@ export function ProfileHeader({
     <section className="profile-header card">
       <div className="profile-title">
         <div className="profile-title-main">
-          <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} />
-          <div>
-            <strong>{displayName}</strong>
+          {onAvatarClick ? (
+            <button className="profile-avatar-link" type="button" onClick={onAvatarClick} aria-label={`View ${displayName}'s profile`}>
+              <IdentityAvatar seed={contact.fingerprint} size={42} alt="" />
+            </button>
+          ) : (
+            <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} />
+          )}
+          <div className="profile-title-name">
+            <strong><OnlineName online={!showOnlineIndicator ? false : contact.online === true}>{displayName}</OnlineName></strong>
             <p className="note">{contact.fingerprint}</p>
           </div>
         </div>

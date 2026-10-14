@@ -4,8 +4,11 @@ import { PostCard } from '../components/PostCard';
 import { DiscoverPage } from './DiscoverPage';
 import { HomePage } from './HomePage';
 import { MyProfilePage } from './MyProfilePage';
-import { PeoplePage } from './PeoplePage';
+import { MessagesPage } from './MessagesPage';
 import { ProfilePage } from './ProfilePage';
+import { RelationshipsPage } from './RelationshipsPage';
+import { PersonRow } from '../components/PersonRow';
+import { ProfileHeader } from '../components/ProfileHeader';
 import { createLocalPostView, upsertLocalPostView, type LocalPostView, type PostObject } from '../object-layer';
 import type { Contact } from '../types';
 
@@ -51,6 +54,53 @@ const emptyRecommendationSummary = (postId: string) => ({
 });
 
 describe('LocalPostView UI migration', () => {
+  it('keeps the Home composer open at the top without redundant headings or toggle controls', () => {
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).toContain('placeholder="Share what is happening..."');
+    expect(markup.indexOf('home-composer')).toBeLessThan(markup.indexOf('popular-posters-banner'));
+    expect(markup).not.toContain('<h2>Home</h2>');
+    expect(markup).not.toContain('<h3>Create Post</h3>');
+    expect(markup).not.toContain('>Hide</button>');
+    expect(markup).not.toContain('>Write</button>');
+  });
+
+  it('renders the current user avatar as a profile link beside the Home composer', () => {
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[]}
+        myPeerId="my-peer-id"
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+    expect(markup).toContain('class="home-composer-avatar"');
+    expect(markup).toContain('aria-label="View your profile"');
+    expect(markup).toContain('width="40" height="40"');
+  });
+
   it('shows only positive reply counts beside Reply and makes the count open the conversation', () => {
     const view = makeView();
     const openPost = vi.fn();
@@ -69,6 +119,14 @@ describe('LocalPostView UI migration', () => {
     expect(oneReply).toContain('aria-label="1 locally known direct reply. Open conversation."');
     expect(severalReplies).toContain('3 replies</button>');
     expect(oneReply).toContain('>Reply</button>');
+  });
+
+  it('shows the shared online indicator for an explicitly online post author only', () => {
+    const view = makeView();
+    const online = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline />);
+    const offline = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline={false} />);
+    expect(online).toContain('class="online-name-dot"');
+    expect(offline).not.toContain('online-name-dot');
   });
 
   it('orders injected Home feed posts by injectedAt and keeps baseline posts chronological', () => {
@@ -183,6 +241,9 @@ describe('LocalPostView UI migration', () => {
         contact={contact}
         posts={[view]}
         likedPosts={[]}
+        followingCount={2}
+        followerCount={3}
+        onOpenRelationships={noop}
         onAuthorClick={noop}
         onLike={noop}
         onDislike={noop}
@@ -230,6 +291,8 @@ describe('LocalPostView UI migration', () => {
     expect(postCard).toContain('canonical post content');
     expect(home).toContain('canonical post content');
     expect(profile).toContain('canonical post content');
+    expect(profile).toContain('Following');
+    expect(profile).toContain('Followers');
     expect(myProfile).toContain('Posts');
     expect(discover).toContain('canonical post content');
     expect(home).not.toContain('New posts from people you follow.');
@@ -238,18 +301,24 @@ describe('LocalPostView UI migration', () => {
     expect(discover).not.toContain('Refresh discovery');
   });
 
-  it('does not show the removed People page subtitle', () => {
+  it('keeps inbox content out of the removed People page destination', () => {
     const markup = renderToStaticMarkup(
-      <PeoplePage
+      <MessagesPage
         contacts={[]}
-        onViewProfile={noop}
-        onMessage={noop}
-        onToggleFollow={noop}
-        onAddPeerAddress={async () => undefined}
+        myPublicKey="my-key"
+        myPeerId="my-id"
+        conversations={[]}
+        previews={{}}
+        loading={false}
+        error={null}
+        previewError={null}
+        onOpenChat={noop}
       />
     );
 
     expect(markup).not.toContain('Manage your contacts, messages, and peers.');
+    expect(markup).not.toContain('Unread Inbox');
+    expect(markup).not.toContain('Add Peer by Address');
   });
 
   it('uses object_id as the sole stable identity when local and peer paths meet', () => {
@@ -389,23 +458,138 @@ describe('LocalPostView UI migration', () => {
   });
 });
 
-describe('peer discovery suggestion UI', () => {
-  it('shows Stage 2 peer-pool suggestions at the bottom of the People page', () => {
-    const markup = renderToStaticMarkup(
-      <PeoplePage
-        contacts={[]}
-        myPeerId="local-peer"
-        suggestedPeerIds={['aa:bb:cc:dd:ee:ff:00:22']}
+describe('relationship and discovery people UI', () => {
+  it('shows the shared indicator in profile headers only for online peers', () => {
+    const online = renderToStaticMarkup(
+      <ProfileHeader contact={{ ...contact, online: true }} showActions={false} />
+    );
+    const offline = renderToStaticMarkup(
+      <ProfileHeader contact={{ ...contact, online: false }} showActions={false} />
+    );
+    expect(online).toContain('class="online-name-dot"');
+    expect(offline).not.toContain('online-name-dot');
+  });
+
+  it('uses the shared online indicator in reusable relationship/person rows', () => {
+    const onlineContact: Contact = { ...contact, online: true };
+    const offlineContact: Contact = { ...contact, online: false };
+    const online = renderToStaticMarkup(<PersonRow contact={onlineContact} onViewProfile={noop} />);
+    const offline = renderToStaticMarkup(<PersonRow contact={offlineContact} onViewProfile={noop} />);
+    expect(online).toContain('class="online-name-dot"');
+    expect(offline).not.toContain('online-name-dot');
+  });
+
+  it('shows the requested Following or Followers list and the correct existing follow state', () => {
+    const contacts: Contact[] = [
+      { publicKey: 'mutual-key', fingerprint: 'mutual-id', displayName: 'Mutual', addedAt: '', followed: true, follower: true },
+      { publicKey: 'follower-key', fingerprint: 'follower-id', displayName: 'Follower', addedAt: '', followed: false, follower: true },
+      { publicKey: 'following-key', fingerprint: 'following-id', displayName: 'Following Only', addedAt: '', followed: true, follower: false }
+    ];
+    const following = renderToStaticMarkup(
+      <RelationshipsPage
+        ownerId="local-id"
+        myPeerId="local-id"
+        initialTab="following"
+        contacts={contacts}
+        onTabChange={noop}
         onViewProfile={noop}
-        onMessage={noop}
         onToggleFollow={noop}
-        onAddPeerAddress={async () => undefined}
+      />
+    );
+    const followers = renderToStaticMarkup(
+      <RelationshipsPage
+        ownerId="local-id"
+        myPeerId="local-id"
+        initialTab="followers"
+        contacts={contacts}
+        onTabChange={noop}
+        onViewProfile={noop}
+        onToggleFollow={noop}
       />
     );
 
-    expect(markup).toContain('Popular Peers');
-    expect(markup).toContain('aa:bb:cc:dd:ee:ff:00:22');
-    expect(markup).toContain('Follow');
+    expect(following).toContain('aria-selected="true" class="active">Following</button>');
+    expect(following).toContain('Follows you');
+    expect(following).not.toContain('Follower</strong>');
+    expect(followers).toContain('aria-selected="true" class="active">Followers</button>');
+    expect(followers).toContain('Follow back');
+    expect(followers).toContain('>Following</button>');
+  });
+
+  it('shows an explicit unavailable state for another profile relationship graph', () => {
+    const markup = renderToStaticMarkup(
+      <RelationshipsPage
+        ownerId="remote-id"
+        myPeerId="local-id"
+        initialTab="followers"
+        contacts={[]}
+        onTabChange={noop}
+        onViewProfile={noop}
+        onToggleFollow={noop}
+      />
+    );
+    expect(markup).toContain('This device does not have followers information for this profile.');
+  });
+
+  it('defaults Discovery to Posts and combines/deduplicates existing people suggestions', () => {
+    const online: Contact = {
+      publicKey: 'online-id',
+      fingerprint: 'online-id',
+      displayName: 'Online Person',
+      addedAt: '',
+      followed: false,
+      follower: false,
+      online: true
+    };
+    const recent: Contact = {
+      publicKey: 'recent-id',
+      fingerprint: 'recent-id',
+      displayName: 'Recent Person',
+      addedAt: '',
+      followed: false,
+      follower: false,
+      online: false,
+      lastSeen: '2026-10-14T12:00:00.000Z'
+    };
+    const old: Contact = {
+      publicKey: 'old-id',
+      fingerprint: 'old-id',
+      displayName: 'Older Person',
+      addedAt: '',
+      followed: false,
+      follower: false,
+      online: false,
+      lastSeen: '2026-10-13T12:00:00.000Z'
+    };
+    const props = {
+      discoveryPosts: [],
+      contacts: [online, recent, old],
+      suggestedPeerIds: ['online-id', 'pool-id'],
+      popularPeers: Array.from({ length: 12 }, (_, index) => ({
+        peer_id: `popular-${String(index + 1).padStart(2, '0')}`,
+        reply_count: 12 - index
+      })),
+      myPeerId: 'local-id',
+      myPublicKey: 'local-key',
+      onAuthorClick: noop,
+      onFollow: noop,
+      onLike: noop,
+      onDislike: noop,
+      onBlock: noop,
+      getRecommendationSummary: emptyRecommendationSummary
+    };
+    const postsTab = renderToStaticMarkup(<DiscoverPage {...props} />);
+    const peopleTab = renderToStaticMarkup(<DiscoverPage {...props} initialTab="people" />);
+
+    expect(postsTab).toContain('aria-selected="true" class="active">Posts</button>');
+    expect(postsTab).not.toContain('Popular right now');
+    expect(peopleTab).toContain('Popular right now');
+    expect(peopleTab.match(/@popular-/g)).toHaveLength(10);
+    expect(peopleTab).toContain('@pool-id');
+    expect(peopleTab.match(/@online-id/g)).toHaveLength(1);
+    expect(peopleTab).toContain('class="online-name-dot"');
+    expect(peopleTab.indexOf('Online Person')).toBeLessThan(peopleTab.indexOf('Recent Person'));
+    expect(peopleTab.indexOf('Recent Person')).toBeLessThan(peopleTab.indexOf('Older Person'));
   });
 
   it('hides popular peer suggestions when the user already follows someone', () => {

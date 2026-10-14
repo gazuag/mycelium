@@ -1,6 +1,7 @@
 import type { LocalPostView } from '../object-layer';
 import { postContent, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
+import { OnlineName } from './OnlineName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
 
@@ -23,6 +24,7 @@ interface PostCardProps {
   replyComposer?: React.ReactNode;
   showDislikeButton?: boolean;
   isOwnPost?: boolean;
+  authorOnline?: boolean;
 }
 
 export function PostCard({
@@ -43,7 +45,8 @@ export function PostCard({
   feedSource,
   replyComposer,
   showDislikeButton = true,
-  isOwnPost = false
+  isOwnPost = false,
+  authorOnline = false
 }: PostCardProps) {
   const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
   const keyLabel = fingerprintLike ? authorId : undefined;
@@ -65,7 +68,7 @@ export function PostCard({
             <IdentityAvatar seed={authorId} size={36} alt="" />
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
-            <strong>{authorName}</strong>
+            <strong><OnlineName online={authorOnline}>{authorName}</OnlineName></strong>
             {keyLabel ? <span className="note">{keyLabel}</span> : null}
           </button>
         </div>

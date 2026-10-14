@@ -5,6 +5,7 @@ interface SettingsPageProps {
   identityId: string;
   publicKey: string;
   onResetApp: () => void;
+  onAddPeerAddress: (address: string) => Promise<void>;
   logs: LogEntry[];
   onClearLogs: () => void;
   signalEndpoint: string;
@@ -19,6 +20,7 @@ export function SettingsPage({
   identityId,
   publicKey,
   onResetApp,
+  onAddPeerAddress,
   logs,
   onClearLogs,
   signalEndpoint,
@@ -28,6 +30,7 @@ export function SettingsPage({
   connectedPeers,
   syncStatus
 }: SettingsPageProps) {
+  const [newPeerAddress, setNewPeerAddress] = useState('');
   const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
     pingPong: true,
     discovery: true,
@@ -67,7 +70,7 @@ export function SettingsPage({
   return (
     <section className="page-view">
       <div className="page-header">
-        <h2>Diagnostics</h2>
+        <h2>Settings</h2>
         <p className="note">Runtime status, endpoints, and app diagnostics.</p>
       </div>
 
@@ -129,6 +132,33 @@ export function SettingsPage({
           </div>
         </section>
 
+        <section>
+          <h3>Advanced</h3>
+          <div className="add-peer-card">
+            <h4>Add Peer by Address</h4>
+            <p className="note">Paste peer node ID or public key, then add and connect.</p>
+            <div className="row">
+              <input
+                value={newPeerAddress}
+                onChange={(event) => setNewPeerAddress(event.target.value)}
+                placeholder="Peer address"
+                aria-label="Peer address"
+              />
+              <button
+                className="btn"
+                type="button"
+                onClick={async () => {
+                  const normalized = newPeerAddress.trim();
+                  if (!normalized) return;
+                  await onAddPeerAddress(normalized);
+                  setNewPeerAddress('');
+                }}
+              >
+                Add peer
+              </button>
+            </div>
+          </div>
+        </section>
         <section>
           <div className="row">
             <button className="btn secondary destructive" onClick={onResetApp}>Reset local state</button>
