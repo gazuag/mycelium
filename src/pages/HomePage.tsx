@@ -3,7 +3,6 @@ import type { Contact } from '../types';
 import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { IdentityAvatar } from '../components/IdentityAvatar';
-import { OnlineName } from '../components/OnlineName';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
@@ -127,10 +126,10 @@ export function HomePage({
             <div className="popular-posters-list">
               {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
                 <div className="popular-poster-item" key={peerId}>
-                  <span><OnlineName online={contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.online === true}>{displayNameOrFallback(
+                  <span>{displayNameOrFallback(
                     contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
                     peerId
-                  )}</OnlineName> <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
+                  )} <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
                   {onFollowPeer ? (
                     <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
                       {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}

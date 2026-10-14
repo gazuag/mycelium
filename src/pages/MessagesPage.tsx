@@ -1,10 +1,9 @@
 import { useMemo, useState } from 'react';
 import type { ConversationSummary } from '../object-layer/conversations';
 import { IdentityAvatar } from '../components/IdentityAvatar';
-import { OnlineName } from '../components/OnlineName';
 import { useDmUnread } from '../hooks/useDmUnread';
 import type { Contact } from '../types';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 
 interface MessagesPageProps {
   contacts: Contact[];
@@ -165,10 +164,10 @@ export function MessagesPage({
                   onClick={() => onOpenChat(contact.fingerprint || contact.publicKey)}
                   aria-label={`Start conversation with ${name}`}
                 >
-                  <IdentityAvatar seed={contact.fingerprint} size={42} alt={name} />
+                  <IdentityAvatar seed={contact.fingerprint} size={42} alt={name} online={contact.online === true} />
                   <span className="message-row-content">
-                    <strong><OnlineName online={contact.online === true}>{name}</OnlineName></strong>
-                    <span className="message-row-identifier">{contact.fingerprint}</span>
+                    <strong>{name}</strong>
+                    <span className="message-row-identifier" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
                   </span>
                   <span className="message-row-action" aria-hidden="true">›</span>
                 </button>
@@ -202,10 +201,17 @@ export function MessagesPage({
                     onClick={() => onOpenChat(contact?.fingerprint ?? conversation.counterparty)}
                     aria-label={`Open conversation with ${name}${unread ? ', unread messages' : ''}`}
                   >
-                    <IdentityAvatar seed={contact?.fingerprint ?? conversation.counterparty} size={42} alt={name} />
+                    <IdentityAvatar
+                      seed={contact?.fingerprint ?? conversation.counterparty}
+                      size={42}
+                      alt={name}
+                      online={contact?.online === true}
+                    />
                     <span className="message-row-content">
-                      <strong><OnlineName online={contact?.online === true}>{name}</OnlineName></strong>
-                      <span className="message-row-identifier">{contact?.fingerprint ?? conversation.counterparty}</span>
+                      <strong>{name}</strong>
+                      <span className="message-row-identifier" title={contact?.fingerprint ?? conversation.counterparty}>
+                        {shortPeerId(contact?.fingerprint ?? conversation.counterparty)}
+                      </span>
                       <span className="message-row-activity">{activity}</span>
                     </span>
                     <span className="message-row-trailing">

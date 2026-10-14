@@ -153,7 +153,10 @@ export function ProfilePage({
                   post.authorFingerprint
                 )}
                 authorId={post.authorFingerprint}
-                authorOnline={!isOwnProfile && (postAuthorContact?.online === true || (isProfileAuthor && contact.online === true))}
+                authorOnline={
+                  (postAuthorContact?.online === true && !isProfileAuthor)
+                  || (isProfileAuthor && !isOwnProfile && contact.online === true)
+                }
                 onAuthorClick={() => onAuthorClick(post.authorFingerprint)}
                 onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                 onLike={() => onLike(post.object.object_id)}

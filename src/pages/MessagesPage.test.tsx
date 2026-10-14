@@ -87,7 +87,7 @@ describe('MessagesPage', () => {
 
     expect(markup.indexOf('Alice')).toBeLessThan(markup.indexOf('Bob'));
     expect(markup.match(/class="message-unread-dot"/g)).toHaveLength(1);
-    expect(markup.match(/class="online-name-dot"/g)).toHaveLength(1);
+    expect(markup.match(/class="identity-avatar-online"/g)).toHaveLength(1);
     expect(markup).toContain('Received a message');
     expect(markup).toContain('Latest message preview');
     expect(markup).toContain('New message');

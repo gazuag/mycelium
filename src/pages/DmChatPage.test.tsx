@@ -35,6 +35,7 @@ const contact: Contact = {
   displayName: 'Peer',
   addedAt: '2026-10-01T00:00:00.000Z',
   followed: false,
+  online: true,
   encryptionPublicKey: 'trusted-encryption-key'
 };
 
@@ -128,6 +129,11 @@ describe('DmChatPage', () => {
     expect(markup).not.toContain('null');
   });
 
+  it('preserves literal @ text in message content', () => {
+    hookState.result.messages = [message('literal-at', 'ok', { text: 'Hello @alice' })];
+    expect(renderPage()).toContain('Hello @alice');
+  });
+
   it('renders outgoing delivery as Waiting to send or Sent', () => {
     hookState.result.messages = [
       message('pending', 'ok', { direction: 'out', delivery: 'pending' }),
@@ -149,6 +155,7 @@ describe('DmChatPage', () => {
     expect(markup).toContain('aria-label="View Peer&#x27;s profile"');
     expect(markup).toContain('aria-label="View your profile"');
     expect(markup).toContain('width="21" height="21"');
+    expect(markup.match(/class="identity-avatar-online"/g)).toHaveLength(1);
     expect(markup).toContain('message text');
   });
 

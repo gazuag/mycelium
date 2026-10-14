@@ -151,6 +151,19 @@ export function decode64(text: string): bigint {
   return result;
 }
 
+export function shortPeerId(peerId: string): string {
+  const trimmed = peerId.trim();
+  if (!trimmed) return 'Unknown peer';
+
+  const bytes = trimmed.split(':');
+  if (bytes.length === 8 && bytes.every((byte) => /^[0-9a-f]{2}$/i.test(byte))) {
+    return `${bytes[0]}:${bytes[1]}:…:${bytes[6]}:${bytes[7]}`;
+  }
+
+  if (trimmed.length <= 16) return trimmed;
+  return `${trimmed.slice(0, 8)}…${trimmed.slice(-4)}`;
+}
+
 function capitalizeWord(text: string) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
@@ -158,7 +171,7 @@ function capitalizeWord(text: string) {
 export function fingerprintToHumanName(fingerprint: string): string {
   const normalized = fingerprint.replace(/[^0-9a-f]/gi, '').toLowerCase();
   if (!normalized || normalized.length !== 16) {
-    return fingerprint.trim() || 'Unknown peer';
+    return shortPeerId(fingerprint);
   }
 
   const value = BigInt(`0x${normalized}`);

@@ -22,6 +22,8 @@ describe('SettingsPage', () => {
     );
 
     expect(markup).toContain('<h3>Advanced</h3>');
+    expect(markup).toContain('Copy fingerprint');
+    expect(markup).toContain('my-peer-id');
     expect(markup).toContain('Add Peer by Address');
     expect(markup).toContain('aria-label="Peer address"');
     expect(markup).toContain('Add peer');

@@ -31,6 +31,7 @@ export function SettingsPage({
   syncStatus
 }: SettingsPageProps) {
   const [newPeerAddress, setNewPeerAddress] = useState('');
+  const [identityCopyStatus, setIdentityCopyStatus] = useState('');
   const [logFilters, setLogFilters] = useState<Record<LogCategory, boolean>>({
     pingPong: true,
     discovery: true,
@@ -47,6 +48,28 @@ export function SettingsPage({
     : isWarning
       ? 'Connecting to network'
       : 'Disconnected. See diagnostics';
+
+  const handleCopyFingerprint = async () => {
+    try {
+      try {
+        await navigator.clipboard.writeText(identityId);
+      } catch {
+        const textarea = document.createElement('textarea');
+        textarea.value = identityId;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (!copied) throw new Error('Clipboard copy was rejected.');
+      }
+      setIdentityCopyStatus('Fingerprint copied.');
+    } catch {
+      setIdentityCopyStatus('Could not copy fingerprint. Select and copy it manually.');
+    }
+  };
 
   const handleCopyDiagnostics = async () => {
     const text = logs.filter((entry) => logFilters[entry.category]).map((entry) => entry.text).join('\n');
@@ -79,6 +102,10 @@ export function SettingsPage({
           <h3>Identity</h3>
           <p><strong>Fingerprint</strong></p>
           <p className="note monospace">{identityId}</p>
+          <div className="row">
+            <button className="btn secondary" type="button" onClick={() => void handleCopyFingerprint()}>Copy fingerprint</button>
+            {identityCopyStatus ? <span className="note" role="status">{identityCopyStatus}</span> : null}
+          </div>
           <p><strong>Public key</strong></p>
           <p className="note monospace break-word">{publicKey}</p>
         </section>

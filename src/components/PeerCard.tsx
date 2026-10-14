@@ -1,8 +1,7 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
-import { OnlineName } from './OnlineName';
 import { BlockButton } from './BlockButton';
 import { useDmUnread } from '../hooks/useDmUnread';
 
@@ -24,10 +23,10 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
     <article className="peer-card">
       <div className="peer-card-main">
         <button className="ghost-link" onClick={() => onViewProfile(contact.fingerprint)} type="button">
-          <IdentityAvatar seed={contact.fingerprint} size={36} alt={displayName} />
+          <IdentityAvatar seed={contact.fingerprint} size={36} alt={displayName} online={contact.online === true} />
           <div className="peer-label-block">
-            <strong><OnlineName online={contact.online === true}>{displayName}</OnlineName></strong>
-            <span className="note">{contact.fingerprint}</span>
+            <strong>{displayName}</strong>
+            <span className="note" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
           </div>
         </button>
         <div className="peer-badges">

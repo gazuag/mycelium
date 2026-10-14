@@ -99,6 +99,7 @@ describe('LocalPostView UI migration', () => {
     expect(markup).toContain('class="home-composer-avatar"');
     expect(markup).toContain('aria-label="View your profile"');
     expect(markup).toContain('width="40" height="40"');
+    expect(markup).not.toContain('identity-avatar-online');
   });
 
   it('shows only positive reply counts beside Reply and makes the count open the conversation', () => {
@@ -125,8 +126,16 @@ describe('LocalPostView UI migration', () => {
     const view = makeView();
     const online = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline />);
     const offline = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline={false} />);
-    expect(online).toContain('class="online-name-dot"');
-    expect(offline).not.toContain('online-name-dot');
+    expect(online).toContain('class="identity-avatar-online"');
+    expect(offline).not.toContain('identity-avatar-online');
+  });
+
+  it('preserves literal @ text authored in posts', () => {
+    const view = makeView();
+    const post = { ...view, object: { ...view.object, payload: { content: 'Hello @alice' } } };
+    const markup = renderToStaticMarkup(<PostCard post={post} {...commonPostProps} />);
+
+    expect(markup).toContain('Hello @alice');
   });
 
   it('orders injected Home feed posts by injectedAt and keeps baseline posts chronological', () => {
@@ -466,8 +475,8 @@ describe('relationship and discovery people UI', () => {
     const offline = renderToStaticMarkup(
       <ProfileHeader contact={{ ...contact, online: false }} showActions={false} />
     );
-    expect(online).toContain('class="online-name-dot"');
-    expect(offline).not.toContain('online-name-dot');
+    expect(online).toContain('class="identity-avatar-online"');
+    expect(offline).not.toContain('identity-avatar-online');
   });
 
   it('uses the shared online indicator in reusable relationship/person rows', () => {
@@ -475,8 +484,11 @@ describe('relationship and discovery people UI', () => {
     const offlineContact: Contact = { ...contact, online: false };
     const online = renderToStaticMarkup(<PersonRow contact={onlineContact} onViewProfile={noop} />);
     const offline = renderToStaticMarkup(<PersonRow contact={offlineContact} onViewProfile={noop} />);
-    expect(online).toContain('class="online-name-dot"');
-    expect(offline).not.toContain('online-name-dot');
+    expect(online).toContain('class="identity-avatar-online"');
+    expect(offline).not.toContain('identity-avatar-online');
+    expect(online).toContain('aa:bb:…:00:11');
+    expect(online).not.toContain('@aa:bb:cc:dd:ee:ff:00:11');
+    expect(online).toContain('Author');
   });
 
   it('shows the requested Following or Followers list and the correct existing follow state', () => {
@@ -584,10 +596,12 @@ describe('relationship and discovery people UI', () => {
     expect(postsTab).toContain('aria-selected="true" class="active">Posts</button>');
     expect(postsTab).not.toContain('Popular right now');
     expect(peopleTab).toContain('Popular right now');
-    expect(peopleTab.match(/@popular-/g)).toHaveLength(10);
-    expect(peopleTab).toContain('@pool-id');
-    expect(peopleTab.match(/@online-id/g)).toHaveLength(1);
-    expect(peopleTab).toContain('class="online-name-dot"');
+    expect(peopleTab).toContain('popular-01');
+    expect(peopleTab).not.toContain('@popular-');
+    expect(peopleTab).toContain('pool-id');
+    expect(peopleTab.match(/Online Person/g)).toHaveLength(1);
+    expect(peopleTab).not.toContain('@online-id');
+    expect(peopleTab).toContain('class="identity-avatar-online"');
     expect(peopleTab.indexOf('Online Person')).toBeLessThan(peopleTab.indexOf('Recent Person'));
     expect(peopleTab.indexOf('Recent Person')).toBeLessThan(peopleTab.indexOf('Older Person'));
   });

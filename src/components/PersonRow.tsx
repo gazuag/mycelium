@@ -1,7 +1,6 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
-import { OnlineName } from './OnlineName';
 
 interface PersonRowProps {
   contact: Contact;
@@ -25,10 +24,12 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
         type="button"
         onClick={() => onViewProfile(contact.fingerprint || contact.publicKey)}
       >
-        <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={40} alt="" />
+        <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={40} alt="" online={contact.online === true} />
         <span className="person-row-details">
-          <strong><OnlineName online={contact.online === true}>{displayName}</OnlineName></strong>
-          <span className="note person-row-identifier">@{contact.fingerprint || contact.publicKey}</span>
+          <strong>{displayName}</strong>
+          <span className="note person-row-identifier" title={contact.fingerprint || contact.publicKey}>
+            {shortPeerId(contact.fingerprint || contact.publicKey)}
+          </span>
           {contact.profile?.bio ? <span className="person-row-bio">{contact.profile.bio}</span> : null}
           {mutualLabel ? <span className="person-row-mutual">{mutualLabel}</span> : null}
           {metric ? <span className="person-row-metric">{metric}</span> : null}

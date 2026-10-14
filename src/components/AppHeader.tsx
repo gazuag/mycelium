@@ -1,7 +1,6 @@
 import type { ConnectionState } from '../types';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { BrandLogo } from './BrandLogo';
-import { OnlineName } from './OnlineName';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -62,7 +61,7 @@ export function AppHeader({
             <strong>Open peer connections</strong>
             {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
               <div className="connected-peer" key={peerId}>
-                <OnlineName online>{fingerprintToHumanName(peerId)}</OnlineName>
+                {fingerprintToHumanName(peerId)}
                 <code>{peerId}</code>
               </div>
             )) : <span className="connected-peer-empty">No open data channels</span>}

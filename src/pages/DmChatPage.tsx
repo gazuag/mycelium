@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from '../components/IdentityAvatar';
-import { OnlineName } from '../components/OnlineName';
 import type { Contact } from '../types';
 import type { DmEvents } from '../object-layer/dm-events';
 import type { DmObjectIdentity } from '../object-layer/dm-object';
@@ -97,7 +96,7 @@ export function DmChatPage({
   return (
     <section className="chat-page dm-chat-page">
       <div className="chat-header">
-        <span className="chat-header-title">Chat with <OnlineName online={contact.online === true}>{displayName}</OnlineName></span>
+        <span className="chat-header-title">Chat with {displayName}</span>
         <span className="chat-header-status">{connectionText}</span>
       </div>
 
@@ -119,6 +118,7 @@ export function DmChatPage({
                 seed={message.direction === 'out' ? myPeerId : contact.fingerprint}
                 size={21}
                 alt=""
+                online={message.direction === 'in' && contact.online === true}
               />
             </button>
             <div className={`chat-bubble ${message.direction === 'out' ? 'mine' : 'theirs'}`}>

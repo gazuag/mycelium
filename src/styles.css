@@ -675,8 +675,8 @@ body, html, #root {
 
 
 .identity-avatar {
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   border: 1px solid var(--color-border);
   background: var(--color-surface-subtle);
@@ -685,23 +685,23 @@ body, html, #root {
   box-shadow: 0 0 0 2px var(--color-surface);
 }
 
-.online-name {
+.identity-avatar-wrap {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  max-width: 100%;
-  gap: 0.35rem;
-  overflow: hidden;
-  white-space: nowrap;
+  flex: 0 0 auto;
+  line-height: 0;
+  overflow: visible;
 }
 
-.online-name-dot {
-  display: inline-block;
-  flex: 0 0 0.45rem;
-  width: 0.45rem;
-  height: 0.45rem;
+.identity-avatar-online {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: clamp(6px, 25%, 10px);
+  height: clamp(6px, 25%, 10px);
   border-radius: 50%;
   background: var(--color-accent);
+  border: 1.5px solid var(--color-surface);
 }
 
 .profile-avatar-link,
@@ -729,11 +729,6 @@ body, html, #root {
 .home-composer-avatar .identity-avatar,
 .chat-message-avatar .identity-avatar {
   box-shadow: none;
-}
-
-.chat-message-avatar .identity-avatar {
-  width: 1.3125rem;
-  height: 1.3125rem;
 }
 
 .tab-bar {
@@ -1086,11 +1081,6 @@ body, html, #root {
   min-width: 0;
 }
 
-.post-author-line .identity-avatar {
-  width: 2.5rem;
-  height: 2.5rem;
-}
-
 .post-avatar-button {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1115,11 +1105,6 @@ body, html, #root {
   color: var(--color-text);
   font-size: var(--font-size-base);
   line-height: 1.3;
-}
-
-.post-author-button .online-name {
-  max-width: 100%;
-  overflow-wrap: anywhere;
 }
 
 .post-author-button .note {
@@ -1582,10 +1567,7 @@ button.post-reply-count:focus-visible {
   cursor: text;
 }
 
-.conversation-reply-placeholder .identity-avatar {
-  width: 2.5rem;
-  height: 2.5rem;
-}
+
 
 .conversation-reply-placeholder:hover {
   color: var(--color-text);
@@ -1610,10 +1592,7 @@ button.post-reply-count:focus-visible {
   min-width: 0;
 }
 
-.conversation-inline-composer .identity-avatar {
-  width: 2.5rem;
-  height: 2.5rem;
-}
+
 
 .conversation-inline-fields {
   display: grid;
@@ -1817,7 +1796,7 @@ button.post-reply-count:focus-visible {
   text-align: left;
 }
 
-.person-row-profile .identity-avatar {
+.person-row-profile .identity-avatar-wrap {
   flex: 0 0 2.5rem;
   width: 2.5rem;
   height: 2.5rem;
