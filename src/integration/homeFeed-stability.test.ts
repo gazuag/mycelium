@@ -102,8 +102,14 @@ async function readPersistedFollowState(page: Page, peerId: string) {
 
 async function readFeed(page: Page): Promise<FeedSnapshot> {
   await goTo(page, 'Home');
-  while (await page.getByRole('button', { name: 'Load more', exact: true }).count()) {
-    await page.getByRole('button', { name: 'Load more', exact: true }).click({ force: true });
+  while (await page.locator('.home-feed-end').count()) {
+    const fallback = page.getByRole('button', { name: 'Load more', exact: true });
+    if (await fallback.count()) {
+      await fallback.click({ force: true });
+    } else {
+      await page.locator('.home-feed-end').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(50);
+    }
   }
 
   const entries = await page.locator('.feed-list .post-card').evaluateAll((cards) => cards.map((card) => {

@@ -34,7 +34,7 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostObject, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, ensurePostChainCached, expandObjectsWithPostChains, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
@@ -239,6 +239,7 @@ function App() {
   const recommendationIndexRef = useRef(new RecommendationIndex());
   const objectTransportRef = useRef<PeerConnectionObjectTransport | null>(null);
   const feedBatchSubscribersRef = useRef(new Set<ProcessedFeedBatchHandler>());
+  const feedBatchProcessingQueuesRef = useRef(new Map<string, Promise<void>>());
   const feedDisconnectSubscribersRef = useRef(new Set<(peerId: string) => void>());
   const feedSyncPeerRef = useRef<((peerId: string) => Promise<void>) | null>(null);
   const profileContactIdRef = useRef<string | null>(null);
@@ -254,6 +255,7 @@ function App() {
   const peerElectionFallbackTimersRef = useRef<Map<string, number>>(new Map());
   const peerAttemptTimeoutsRef = useRef<Map<string, number>>(new Map());
   const peerPostReceptionTimesRef = useRef<Map<string, number>>(new Map());
+  const postParentLookupRef = useRef<Map<string, { attemptedAt: number; promise: Promise<DistributedObject | null> }>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
 
   if (!objectStoreRef.current) {
@@ -565,6 +567,47 @@ function App() {
     });
   };
 
+  const resolvePostParentFromPeers: PostParentResolver = async (objectId) => {
+    const store = objectStoreRef.current;
+    if (!store) throw new Error('Object store is unavailable');
+    const cached = await store.get(objectId);
+    if (cached && cached.object_type === 'mycelium.post' && await validateObject(cached)) return cached;
+
+    const previousLookup = postParentLookupRef.current.get(objectId);
+    if (previousLookup && Date.now() - previousLookup.attemptedAt < 10_000) {
+      return previousLookup.promise;
+    }
+    const transport = objectTransportRef.current;
+    const localIdentity = identityRef.current;
+    if (!transport || !localIdentity) return null;
+    const lookup = (async () => {
+      const peers = transport.connectedPeers()
+        .filter((peerId) => !blockedPeersRef.current.has(peerId))
+        .slice(0, 4);
+      let lastError: unknown;
+      for (const peerId of peers) {
+        try {
+          const object = await findObject(localIdentity.id, peerId, objectId, transport, store, 2);
+          if (object) return object;
+        } catch (error) {
+          lastError = error;
+          addLog(`Ancestor FIND via ${peerId} failed for ${objectId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (lastError) {
+        throw new Error(`Ancestor retrieval failed for ${objectId}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+      }
+      return null;
+    })();
+    postParentLookupRef.current.set(objectId, { attemptedAt: Date.now(), promise: lookup });
+    while (postParentLookupRef.current.size > 256) {
+      const oldestObjectId = postParentLookupRef.current.keys().next().value;
+      if (oldestObjectId === undefined) break;
+      postParentLookupRef.current.delete(oldestObjectId);
+    }
+    return lookup;
+  };
+
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
     const store = objectStoreRef.current;
     if (!store) return;
@@ -848,7 +891,14 @@ function App() {
       }
       return;
     }
+    const incomingPost = packet.type === 'OBJECT_STORE' && packet.payload.object.object_type === 'mycelium.post'
+      ? packet.payload.object
+      : null;
+    const validIncomingPost = incomingPost ? await validateObject(incomingPost) : false;
     const stored = await receiveObjectPacket(packet, store);
+    if (validIncomingPost && incomingPost) {
+      await cachePostChain(incomingPost);
+    }
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
     if (stored && packet.type === 'OBJECT_STORE') {
       inboxServiceRef.current?.notifyObjectStored(packet.payload.object);
@@ -883,6 +933,39 @@ function App() {
     } catch {
       return author;
     }
+  };
+
+  const logPostChainResult = (postId: string, result: PostChainResult) => {
+    if (result.complete && result.storageFailures.length === 0) {
+      addLog(`POST ancestry complete for ${postId}: ${result.objects.length} canonical posts cached`);
+      return;
+    }
+    addLog(`POST ancestry incomplete for ${postId}: reason=${result.stopReason}${result.missingObjectId ? ` missing=${result.missingObjectId}` : ''}${result.error ? ` error=${result.error}` : ''} cached=${result.objects.length} storageFailures=${result.storageFailures.length}`);
+  };
+
+  const cachePostChain = async (
+    post: DistributedObject,
+    source: LocalPostView['source'] = 'peer'
+  ): Promise<PostChainResult> => {
+    const store = objectStoreRef.current;
+    if (!store) throw new Error('Object store is unavailable');
+    const result = await ensurePostChainCached(post, store, resolvePostParentFromPeers);
+    logPostChainResult(post.object_id, result);
+    const metadataStore = localPostMetadataStoreRef.current;
+    const views = await Promise.all(result.objects.map(async (object) => {
+      const metadata = await metadataStore?.get(object.object_id);
+      const fingerprint = metadata?.authorFingerprint ?? await resolvePostAuthorFingerprint(object.author);
+      const view = createLocalPostView(object as PostObject, fingerprint, {
+        ...(metadata?.authorDisplayName ? { authorDisplayName: metadata.authorDisplayName } : {}),
+        source: metadata?.source ?? source,
+        ...(metadata?.notInterested === undefined ? {} : { notInterested: metadata.notInterested }),
+        ...(metadata?.hidden === undefined ? {} : { hidden: metadata.hidden })
+      });
+      if (metadataStore && !metadata) await metadataStore.put(localPostMetadata(view));
+      return view;
+    }));
+    setPostViews((previous) => views.reduce(upsertLocalPostView, previous));
+    return result;
   };
 
   const generatedDisplayName = useMemo(() => identity ? fingerprintToHumanName(identity.id) : 'Me', [identity]);
@@ -1134,14 +1217,28 @@ function App() {
         const existedBefore = await store.get(object.object_id);
         let stored: boolean;
         try {
-          stored = await receiveAndReplicate(object, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
+          stored = await receiveAndReplicate(
+            object,
+            peer,
+            store,
+            transport,
+            identityRef.current?.id ?? identity.id,
+            packetSigner,
+            addLog,
+            resolvePostParentFromPeers
+          );
         } catch (error) {
           if (!existedBefore && await store.get(object.object_id)) {
             inboxServiceRef.current?.notifyObjectStored(object);
           }
           throw error;
         }
-        if (!stored) return;
+        if (!stored) {
+          if (object.object_type === 'mycelium.post' && await validateObject(object)) {
+            await cachePostChain(object);
+          }
+          return;
+        }
         inboxServiceRef.current?.notifyObjectStored(object);
         recommendationIndexRef.current.add(object);
         setRecommendationRevision((revision) => revision + 1);
@@ -1149,7 +1246,10 @@ function App() {
         const view = object.object_type === 'mycelium.post'
           ? createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' })
           : null;
-        if (view) setPostViews((prev) => upsertLocalPostView(prev, view));
+        if (view) {
+          setPostViews((prev) => upsertLocalPostView(prev, view));
+          await cachePostChain(object);
+        }
         addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
       async (peer: string, metadata: PeerMetadata) => {
@@ -1176,60 +1276,104 @@ function App() {
           ? await queryFeedPage(store, identityRef.current.publicKey, { after, limit: Math.max(1, limit) })
           : { objects: [], next_cursor: after, has_more: false };
 
-        const manager = peerManagersRef.current[peer];
-        if (manager) {
-          manager.sendObjectsBatch(feedPage.objects, {
+        const transport = objectTransportRef.current;
+        const localIdentity = identityRef.current;
+        if (!store || !transport || !localIdentity || !transport.connectedPeers().includes(peer)) return;
+        const expandedPage = await expandObjectsWithPostChains(
+          feedPage.objects,
+          store,
+          resolvePostParentFromPeers
+        );
+        expandedPage.chains.forEach((chain) => {
+          if (!chain.complete || chain.storageFailures.length > 0) {
+            logPostChainResult(chain.objects[chain.objects.length - 1]?.object_id ?? 'unknown', chain);
+          }
+        });
+        const sentCount = await sendObjectBatches(
+          localIdentity.id,
+          peer,
+          expandedPage.objects,
+          transport,
+          packetSigner,
+          {
             request_id: requestId ?? null,
             next_cursor: feedPage.next_cursor,
             has_more: feedPage.has_more
-          });
-          addLog(`Sent ${feedPage.objects.length} canonical feed objects to ${peer}`);
-        }
+          }
+        );
+        addLog(`Sent ${feedPage.objects.length} feed objects and ancestor-expanded ${sentCount} canonical objects to ${peer}`);
       },
       async (peer: string, objects: DistributedObject[], page?: FeedPageMetadata) => {
-        let processingError: unknown;
-        try {
-          if (!isCurrentManager(peer)) throw new Error('Feed batch peer is no longer active');
-          if (blockedPeersRef.current.has(peer)) throw new Error('Feed batch peer is blocked');
-          recordPeerPostReception(peer, objects.filter((object) => object.object_type === 'mycelium.post').length);
-
-          const store = objectStoreRef.current;
-          const transport = objectTransportRef.current;
-          if (!store || !transport) throw new Error('Feed batch storage is unavailable');
-          const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
-          const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
-          let storedFlags: boolean[];
+        const processBatch = async () => {
+          let processingError: unknown;
           try {
-            storedFlags = await receiveBatchAndReplicate(objects, peer, store, transport, identityRef.current?.id ?? identity.id, packetSigner, addLog);
-          } catch (error) {
-            for (const object of objects) {
-              if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
-                inboxServiceRef.current?.notifyObjectStored(object);
+            if (!isCurrentManager(peer)) throw new Error('Feed batch peer is no longer active');
+            if (blockedPeersRef.current.has(peer)) throw new Error('Feed batch peer is blocked');
+            recordPeerPostReception(peer, objects.filter((object) => object.object_type === 'mycelium.post').length);
+
+            const store = objectStoreRef.current;
+            const transport = objectTransportRef.current;
+            if (!store || !transport) throw new Error('Feed batch storage is unavailable');
+            const existingObjects = await Promise.all(objects.map((object) => store.get(object.object_id)));
+            const existingIds = new Set(objects.filter((_, index) => existingObjects[index]).map((object) => object.object_id));
+            let storedFlags: boolean[];
+            try {
+              storedFlags = await receiveBatchAndReplicate(
+                objects,
+                peer,
+                store,
+                transport,
+                identityRef.current?.id ?? identity.id,
+                packetSigner,
+                addLog,
+                resolvePostParentFromPeers
+              );
+            } catch (error) {
+              for (const object of objects) {
+                if (!existingIds.has(object.object_id) && await store.get(object.object_id)) {
+                  inboxServiceRef.current?.notifyObjectStored(object);
+                }
+              }
+              throw error;
+            }
+            const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+            for (let index = 0; index < objects.length; index += 1) {
+              const object = objects[index];
+              if (!storedFlags[index] && object?.object_type === 'mycelium.post' && await validateObject(object)) {
+                await cachePostChain(object);
               }
             }
-            throw error;
-          }
-          const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
-          newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
-          const receivedViews: LocalPostView[] = [];
-          for (const object of newlyStoredObjects) {
-            recommendationIndexRef.current.add(object);
-            setRecommendationRevision((revision) => revision + 1);
-            const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
-            if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
-          }
+            newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
+            const receivedViews: LocalPostView[] = [];
+            for (const object of newlyStoredObjects) {
+              recommendationIndexRef.current.add(object);
+              setRecommendationRevision((revision) => revision + 1);
+              const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
+              if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
+            }
 
-          setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
-          addLog(`Received ${newlyStoredObjects.length} canonical objects from ${peer}`);
-        } catch (error) {
-          processingError = error instanceof Error ? error : new Error('Feed batch processing failed');
-          if (page) addLog(`Feed batch processing failed for ${peer.slice(0, 12)}`);
-          else throw error;
+            setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
+            addLog(`Received ${newlyStoredObjects.length} canonical objects from ${peer}`);
+          } catch (error) {
+            processingError = error instanceof Error ? error : new Error('Feed batch processing failed');
+            if (page) addLog(`Feed batch processing failed for ${peer.slice(0, 12)}`);
+            else throw error;
+          } finally {
+            if (page?.request_id) {
+              feedBatchSubscribersRef.current.forEach((subscriber) => {
+                subscriber(peer, page, objects, processingError);
+              });
+            }
+          }
+        };
+        const previousBatch = feedBatchProcessingQueuesRef.current.get(peer) ?? Promise.resolve();
+        const queuedBatch = previousBatch.catch(() => undefined).then(processBatch);
+        feedBatchProcessingQueuesRef.current.set(peer, queuedBatch);
+        try {
+          await queuedBatch;
         } finally {
-          if (page?.request_id) {
-            feedBatchSubscribersRef.current.forEach((subscriber) => {
-              subscriber(peer, page, objects, processingError);
-            });
+          if (feedBatchProcessingQueuesRef.current.get(peer) === queuedBatch) {
+            feedBatchProcessingQueuesRef.current.delete(peer);
           }
         }
       },
@@ -1824,6 +1968,13 @@ function App() {
   const handleLikePost = async (objectId: string) => {
     const target = discoveryPosts.find((post) => post.object.object_id === objectId) ?? postViews.find((post) => post.object.object_id === objectId);
     if (target && identity && target.object.author !== identity.publicKey) {
+      const store = objectStoreRef.current;
+      if (!store) throw new Error('Object store is unavailable');
+      const chain = await cachePostChain(target.object, target.source ?? 'peer');
+      if (chain.stopReason === 'invalid-object' || chain.storageFailures.includes(objectId)) {
+        addLog(`Like cancelled: target post ${objectId} could not be validated and cached`);
+        return;
+      }
       const isLiked = getRecommendationSummary(objectId).recommended_by_me;
       const sequence = await recommendationSequenceStoreRef.current!.next(identity.publicKey);
       const recommendation = await createSignedRecommendationObject(objectId, isLiked ? 'withdraw' : 'recommend', sequence, createObjectIdentity(identity));
@@ -1854,7 +2005,36 @@ function App() {
     const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
     const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
-    const replyTarget = replyTo ? postViews.find((post) => post.object.object_id === replyTo) : undefined;
+    const objectStore = objectStoreRef.current;
+    if (!objectStore) throw new Error('Object store is unavailable');
+    let replyTarget = replyTo
+      ? [...postViews, ...discoveryPosts].find((post) => post.object.object_id === replyTo)
+      : undefined;
+    if (replyTo) {
+      if (!/^[0-9a-f]{64}$/.test(replyTo)) {
+        addLog(`Reply cancelled: invalid parent object ID ${replyTo}`);
+        return;
+      }
+      let parentObject = await objectStore.get(replyTo);
+      if (!parentObject && replyTarget) parentObject = replyTarget.object;
+      if (!parentObject) parentObject = await resolvePostParentFromPeers(replyTo);
+      if (!parentObject || parentObject.object_id !== replyTo || parentObject.object_type !== 'mycelium.post') {
+        addLog(`Reply cancelled: parent post ${replyTo} is unavailable`);
+        return;
+      }
+      const parentChain = await cachePostChain(parentObject, replyTarget?.source ?? 'peer');
+      if (parentChain.stopReason === 'invalid-object' || parentChain.storageFailures.includes(replyTo)) {
+        addLog(`Reply cancelled: parent post ${replyTo} could not be validated and cached`);
+        return;
+      }
+      if (!replyTarget || replyTarget.object.object_id !== replyTo) {
+        replyTarget = createLocalPostView(
+          parentObject as PostObject,
+          await resolvePostAuthorFingerprint(parentObject.author),
+          { source: 'peer' }
+        );
+      }
+    }
     const objectIdentity = createObjectIdentity(identity);
     const postObject = await createSignedObject({
       object_type: 'mycelium.post',
@@ -1866,9 +2046,9 @@ function App() {
       },
       replication_policy: {}
     }, objectIdentity) as PostObject;
-    const objectStore = objectStoreRef.current;
-    if (!objectStore) throw new Error('Object store is unavailable');
     await objectStore.put(postObject);
+    const postChain = await ensurePostChainCached(postObject, objectStore, resolvePostParentFromPeers);
+    logPostChainResult(postObject.object_id, postChain);
 
     const localPostView = createLocalPostView(postObject, identity.id, { source: 'local' });
     setPostViews((prev) => upsertLocalPostView(prev, localPostView));
@@ -1900,13 +2080,24 @@ function App() {
       }
     }
 
-    Object.entries(peerManagersRef.current).forEach(([peerId, manager]) => {
+    const objectTransport = objectTransportRef.current;
+    for (const peerId of objectTransport?.connectedPeers() ?? []) {
       const contact = contacts.find((c) => c.fingerprint === peerId);
-      if (contact?.followed && contact.connected && manager) {
-        manager.sendObject(postObject);
-        addLog(`Shared canonical post ${postObject.object_id} with connected followed peer ${peerId}`);
+      if (contact?.followed && contact.connected && objectTransport) {
+        try {
+          const sentCount = await sendObjectBatches(
+            identity.id,
+            peerId,
+            postChain.objects,
+            objectTransport,
+            (packet) => signString(identity.privateKey, canonicalize(packet))
+          );
+          addLog(`Shared canonical post chain (${sentCount} objects) ending ${postObject.object_id} with connected followed peer ${peerId}`);
+        } catch (error) {
+          addLog(`Failed to share post chain ending ${postObject.object_id} with ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-    });
+    }
 
     if (publishToDiscovery) {
       const socket = signallingSocketRef.current;
@@ -2153,6 +2344,20 @@ function App() {
     });
   }
 
+  function handleBackToMessages() {
+    commitNavigation({
+      ...currentNavigationState(),
+      page: 'messages',
+      conversationPostId: null,
+      focusedReplyId: null,
+      profileContactId: null,
+      relationshipOwnerId: null,
+      chatContactId: null,
+      scrollTop: pageScrollPositions.messages ?? 0,
+      conversationReturnScrollTop: null
+    }, 'replace');
+  }
+
   function handleOpenRelationships(ownerId: string, tab: RelationshipTab) {
     commitNavigation({
       ...currentNavigationState(),
@@ -2351,6 +2556,19 @@ function App() {
           });
           }));
           const verifiedPosts = verificationResults.filter((view): view is LocalPostView => view !== null);
+      const discoveryStore = objectStoreRef.current;
+      if (discoveryStore) {
+        const expanded = await expandObjectsWithPostChains(
+          verifiedPosts.map((view) => view.object),
+          discoveryStore,
+          resolvePostParentFromPeers
+        );
+        expanded.chains.forEach((chain) => {
+          if (!chain.complete || chain.storageFailures.length > 0) {
+            logPostChainResult(chain.objects[chain.objects.length - 1]?.object_id ?? 'unknown', chain);
+          }
+        });
+      }
       setDiscoveryPosts((prev) => {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
         return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
@@ -3393,11 +3611,15 @@ function App() {
             profileSettings={
               <div className="card profile-edit-card">
                 <label>
-                  Nickname
+                  Generated handle
+                  <input value={`@${fingerprintToHumanName(identity.id)}`} readOnly />
+                </label>
+                <label>
+                  Display Name
                   <input
-                    value={myProfile.displayName || fingerprintToHumanName(identity?.id ?? '')}
+                    value={myProfile.displayName}
                     onChange={(e) => setMyProfile((prev) => ({ ...prev, displayName: e.target.value }))}
-                    placeholder="Your display name"
+                    placeholder="Optional"
                   />
                 </label>
                 <label>
@@ -3408,10 +3630,7 @@ function App() {
                 <p className="note">The feed is composed of 70% followed posts, 20% recommendations, and 10% Discovery posts ranked by replies.</p>
                 <div className="row">
                   <button className="btn" onClick={() => {
-                    const rawDisplayName = myProfile.displayName.trim();
-                    const nextDisplayName = rawDisplayName && /^([0-9a-fA-F]{16,})$/.test(rawDisplayName)
-                      ? fingerprintToHumanName(identity?.id ?? rawDisplayName)
-                      : (rawDisplayName || fingerprintToHumanName(identity?.id ?? ''));
+                    const nextDisplayName = myProfile.displayName.trim();
 
                     const persistedProfile = {
                       ...myProfile,
@@ -3476,6 +3695,7 @@ function App() {
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
             myPeerId={identity.id}
             onViewProfile={handleOpenPeerProfile}
+            onBackToMessages={handleBackToMessages}
           />
         )}
 

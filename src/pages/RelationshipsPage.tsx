@@ -33,6 +33,7 @@ export function RelationshipsPage({
   const people = isOwnRelationships
     ? contacts.filter((contact) => activeTab === 'following' ? contact.followed : contact.follower)
     : [];
+  people.sort((left, right) => Number(right.online === true) - Number(left.online === true));
 
   const selectTab = (tab: RelationshipTab) => {
     setActiveTab(tab);

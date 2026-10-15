@@ -704,6 +704,24 @@ body, html, #root {
   border: 1.5px solid var(--color-surface);
 }
 
+.peer-name {
+  display: inline-flex;
+  min-width: 0;
+  flex-direction: column;
+  vertical-align: middle;
+}
+
+.peer-name-primary {
+  min-width: 0;
+}
+
+.peer-name-handle {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  line-height: 1.25;
+}
+
 .profile-avatar-link,
 .home-composer-avatar,
 .chat-message-avatar {
@@ -1719,6 +1737,10 @@ button.post-reply-count:focus-visible {
   margin-top: 0.75rem;
 }
 
+.home-feed-end {
+  min-height: 1px;
+}
+
 .popular-poster-item {
   display: flex;
   align-items: center;
@@ -2077,6 +2099,13 @@ button.post-reply-count:focus-visible {
   white-space: nowrap;
 }
 
+.dm-chat-back {
+  flex: 0 0 auto;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.6rem;
+  white-space: nowrap;
+}
+
 .chat-header-status {
   font-size: var(--font-size-sm);
   opacity: 0.6;
@@ -2181,11 +2210,15 @@ button.post-reply-count:focus-visible {
 }
 
 .landing-page {
-  min-height: 100vh;
+  height: var(--app-height);
+  min-height: 0;
   padding: 1rem;
   display: grid;
   gap: 1rem;
   align-content: start;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   background: var(--color-page);
 }
 
@@ -2199,6 +2232,7 @@ button.post-reply-count:focus-visible {
 .landing-brand-logo {
   display: block;
   width: min(100%, 220px);
+  height: auto;
   margin: 0 0 0.75rem;
 }
 

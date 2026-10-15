@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ConversationSummary } from '../object-layer/conversations';
 import { IdentityAvatar } from '../components/IdentityAvatar';
+import { PeerName } from '../components/PeerName';
 import { useDmUnread } from '../hooks/useDmUnread';
 import type { Contact } from '../types';
 import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
@@ -29,7 +30,7 @@ export function relationshipContacts(
     if (!contact.followed && !contact.follower) continue;
     if (!unique.has(contact.publicKey)) unique.set(contact.publicKey, contact);
   }
-  return [...unique.values()];
+  return [...unique.values()].sort((left, right) => Number(right.online === true) - Number(left.online === true));
 }
 
 export function conversationMatchesSearch(
@@ -166,7 +167,7 @@ export function MessagesPage({
                 >
                   <IdentityAvatar seed={contact.fingerprint} size={42} alt={name} online={contact.online === true} />
                   <span className="message-row-content">
-                    <strong>{name}</strong>
+                    <strong><PeerName peerId={contact.fingerprint || contact.publicKey} displayName={name} /></strong>
                     <span className="message-row-identifier" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
                   </span>
                   <span className="message-row-action" aria-hidden="true">›</span>
@@ -208,7 +209,7 @@ export function MessagesPage({
                       online={contact?.online === true}
                     />
                     <span className="message-row-content">
-                      <strong>{name}</strong>
+                      <strong><PeerName peerId={contact?.fingerprint ?? conversation.counterparty} displayName={name} /></strong>
                       <span className="message-row-identifier" title={contact?.fingerprint ?? conversation.counterparty}>
                         {shortPeerId(contact?.fingerprint ?? conversation.counterparty)}
                       </span>

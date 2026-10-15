@@ -53,8 +53,9 @@ describe('MessagesPage', () => {
       followed: true
     };
 
-    expect(relationshipContacts([alice, duplicateAlice, bob, self], 'my-public-key', 'my-peer-id'))
-      .toEqual([alice, bob]);
+    const result = relationshipContacts([bob, duplicateAlice, alice, self], 'my-public-key', 'my-peer-id');
+    expect(result.map((contact) => contact.publicKey)).toEqual([alice.publicKey, bob.publicKey]);
+    expect(result[0].online).toBe(true);
   });
 
   it('filters conversations by participant identity or a locally decrypted latest-message preview', () => {

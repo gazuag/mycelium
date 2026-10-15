@@ -85,6 +85,7 @@ function renderPage(): string {
       connectionText="Connected"
       myPeerId="me-id"
       onViewProfile={vi.fn()}
+      onBackToMessages={vi.fn()}
     />
   );
 }
@@ -127,6 +128,10 @@ describe('DmChatPage', () => {
     expect(markup).toContain('This message could not be opened.');
     expect(markup).not.toContain('ciphertext');
     expect(markup).not.toContain('null');
+  });
+
+  it('provides a back-to-inbox control in the conversation header', () => {
+    expect(renderPage()).toContain('aria-label="Back to Messages"');
   });
 
   it('preserves literal @ text in message content', () => {

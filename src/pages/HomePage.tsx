@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { IdentityAvatar } from '../components/IdentityAvatar';
+import { PeerName } from '../components/PeerName';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
@@ -52,6 +53,8 @@ export function HomePage({
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
   const [popularPeersDismissed, setPopularPeersDismissed] = useState(false);
+  const [autoLoadAvailable, setAutoLoadAvailable] = useState(false);
+  const feedEndRef = useRef<HTMLDivElement>(null);
 
   const visiblePosts = useMemo(
     () => [...posts]
@@ -67,7 +70,39 @@ export function HomePage({
     if (!firstPost) return;
     onDiagnosticLog?.(`HomePage render: posts=${posts.length} first-injectedAt=${firstPost.injectedAt} first-created=${firstPost.object.created_at.slice(0, 19)}`);
   }, [visiblePosts, posts.length, onDiagnosticLog]);
-  const followedPeerCount = contacts.filter((contact) => contact.followed).length;
+  useEffect(() => {
+    const sentinel = feedEndRef.current;
+    if (!sentinel || visibleCount >= posts.length) {
+      setAutoLoadAvailable(false);
+      return;
+    }
+    if (typeof IntersectionObserver === 'undefined') {
+      setAutoLoadAvailable(false);
+      return;
+    }
+
+    let requested = false;
+    let observer: IntersectionObserver | undefined;
+    try {
+      observer = new IntersectionObserver((entries) => {
+        if (requested || !entries.some((entry) => entry.isIntersecting)) return;
+        requested = true;
+        setVisibleCount((count) => Math.min(count + 8, posts.length));
+      }, {
+        root: document.getElementById('page-content'),
+        rootMargin: '0px 0px 480px 0px'
+      });
+      observer.observe(sentinel);
+      setAutoLoadAvailable(true);
+    } catch (error: unknown) {
+      setAutoLoadAvailable(false);
+      onDiagnosticLog?.(`Home feed automatic loading unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return () => observer?.disconnect();
+  }, [onDiagnosticLog, posts.length, visibleCount]);
+
+  const loadMorePosts = () => setVisibleCount((count) => Math.min(count + 8, posts.length));
 
   return (
     <section className="page-view">
@@ -108,7 +143,7 @@ export function HomePage({
         </div>
       </div>
 
-      {followedPeerCount === 0 && !popularPeersDismissed ? (
+      {!popularPeersDismissed ? (
         <div className="popular-posters-banner">
           <div className="popular-posters-heading">
             <strong>Popular posters right now.</strong>
@@ -126,10 +161,15 @@ export function HomePage({
             <div className="popular-posters-list">
               {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
                 <div className="popular-poster-item" key={peerId}>
-                  <span>{displayNameOrFallback(
-                    contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
-                    peerId
-                  )} <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span></span>
+                  <span>
+                    <PeerName
+                      peerId={peerId}
+                      displayName={displayNameOrFallback(
+                        contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
+                        peerId
+                      )}
+                    /> <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span>
+                  </span>
                   {onFollowPeer ? (
                     <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
                       {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
@@ -252,9 +292,11 @@ export function HomePage({
         </div>
       )}
 
-      {visibleCount < posts.length ? (
+      {visibleCount < posts.length ? <div ref={feedEndRef} className="home-feed-end" aria-hidden="true" /> : null}
+
+      {visibleCount < posts.length && !autoLoadAvailable ? (
         <div className="load-more-wrap">
-          <button className="btn secondary" type="button" onClick={() => setVisibleCount((prev) => prev + 8)}>
+          <button className="btn secondary" type="button" onClick={loadMorePosts}>
             Load more
           </button>
         </div>

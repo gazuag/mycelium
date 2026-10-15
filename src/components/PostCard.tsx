@@ -2,6 +2,7 @@ import type { LocalPostView } from '../object-layer';
 import { postContent, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
 import { shortPeerId } from '../utils/fingerprintNames';
+import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
 
@@ -68,7 +69,7 @@ export function PostCard({
             <IdentityAvatar seed={authorId} size={36} alt="" online={authorOnline} />
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
-            <strong>{authorName}</strong>
+            <strong><PeerName peerId={authorId} displayName={authorName} /></strong>
             {keyLabel ? <span className="note" title={authorId}>{keyLabel}</span> : null}
           </button>
         </div>

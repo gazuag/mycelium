@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from '../components/IdentityAvatar';
+import { PeerName } from '../components/PeerName';
 import type { Contact } from '../types';
 import type { DmEvents } from '../object-layer/dm-events';
 import type { DmObjectIdentity } from '../object-layer/dm-object';
@@ -24,6 +25,7 @@ export interface DmChatPageProps {
   connectionText: string;
   myPeerId: string;
   onViewProfile: (peerId: string) => void;
+  onBackToMessages?: () => void;
 }
 
 export function shouldSendOnEnter(key: string, shiftKey: boolean): boolean {
@@ -52,7 +54,8 @@ export function DmChatPage({
   isContactKnown,
   connectionText,
   myPeerId,
-  onViewProfile
+  onViewProfile,
+  onBackToMessages
 }: DmChatPageProps) {
   const { messages, loading, send, sending, canSend, noKey } = useDmConversation({
     counterparty,
@@ -96,7 +99,17 @@ export function DmChatPage({
   return (
     <section className="chat-page dm-chat-page">
       <div className="chat-header">
-        <span className="chat-header-title">Chat with {displayName}</span>
+        {onBackToMessages ? (
+          <button
+            className="btn secondary dm-chat-back"
+            type="button"
+            onClick={onBackToMessages}
+            aria-label="Back to Messages"
+          >
+            ← Messages
+          </button>
+        ) : null}
+        <span className="chat-header-title">Chat with <PeerName peerId={contact.fingerprint} displayName={displayName} /></span>
         <span className="chat-header-status">{connectionText}</span>
       </div>
 

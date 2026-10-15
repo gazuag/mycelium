@@ -1,10 +1,12 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
 import { isObjectExpired, validateDistributedObject, validateObject } from './envelope';
+import { ensurePostChainCached, type PostParentResolver } from './post-ancestry';
 import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, FeedPageMetadata, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
 const FIND_REQUEST_LIFETIME_MS = 5000;
 export const MAX_FIND_QUERY_LIMIT = 500;
 export const MAX_FIND_REQUEST_OBJECT_IDS = 200;
+export const MAX_OBJECT_BATCH_SIZE = 50;
 export const FIND_GRACE_PERIOD_MS = 1000;
 export type FindAggregationCompletionReason = 'all-objects-found' | 'all-children-responded-or-failed' | 'grace-expired' | 'child-failure-grace-expired' | 'deadline-expired';
 
@@ -25,6 +27,31 @@ export async function buildObjectBatchPacket(
   page?: FeedPageMetadata
 ): Promise<ObjectBatchPacket> {
   return await buildPacket(sender, recipient, 'OBJECT_BATCH', { objects, ...(page ? { page } : {}) }, signer) as ObjectBatchPacket;
+}
+
+export async function sendObjectBatches(
+  sender: string,
+  recipient: string,
+  objects: readonly DistributedObject[],
+  transport: ObjectTransport,
+  signer?: PacketSigner,
+  page?: FeedPageMetadata
+): Promise<number> {
+  const uniqueObjects = [...new Map(objects.map((object) => [object.object_id, object])).values()];
+  const batchCount = Math.max(1, Math.ceil(uniqueObjects.length / MAX_OBJECT_BATCH_SIZE));
+  for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+    const start = batchIndex * MAX_OBJECT_BATCH_SIZE;
+    const batch = uniqueObjects.slice(start, start + MAX_OBJECT_BATCH_SIZE);
+    const isFinalBatch = batchIndex === batchCount - 1;
+    await transport.send(recipient, await buildObjectBatchPacket(
+      sender,
+      recipient,
+      batch,
+      signer,
+      isFinalBatch ? page : undefined
+    ));
+  }
+  return uniqueObjects.length;
 }
 
 export async function buildFindPacket(
@@ -146,16 +173,32 @@ export function shouldRetainFindRequestRoute(
   return aggregationState.aggregation.pendingChildren().length > 0;
 }
 
-export async function receiveObjectPacket(packet: unknown, store: ObjectStore): Promise<boolean> {
+export async function receiveObjectPacket(
+  packet: unknown,
+  store: ObjectStore,
+  resolvePostParent?: PostParentResolver
+): Promise<boolean> {
   if (!isMyceliumPacket(packet) || packet.type !== 'OBJECT_STORE') return false;
   const object = packet.payload?.object;
   if (!object || typeof object !== 'object' || Array.isArray(object)) return false;
   if (!(await validateObject(object))) return false;
 
-  return await store.put(object as DistributedObject);
+  const distributedObject = object as DistributedObject;
+  const stored = await store.put(distributedObject);
+  if (distributedObject.object_type === 'mycelium.post' && resolvePostParent) {
+    const chain = await ensurePostChainCached(distributedObject, store, resolvePostParent);
+    if (!chain.complete || chain.storageFailures.length > 0) {
+      console.warn(`Post ancestry incomplete for ${distributedObject.object_id}: ${chain.stopReason}${chain.missingObjectId ? ` (${chain.missingObjectId})` : ''}`);
+    }
+  }
+  return stored;
 }
 
-export async function receiveObjectBatchPacket(packet: unknown, store: ObjectStore): Promise<boolean[]> {
+export async function receiveObjectBatchPacket(
+  packet: unknown,
+  store: ObjectStore,
+  resolvePostParent?: PostParentResolver
+): Promise<boolean[]> {
   if (!isMyceliumPacket(packet) || packet.type !== 'OBJECT_BATCH') return [];
   const objects = packet.payload?.objects;
   if (!Array.isArray(objects)) return [];
@@ -165,7 +208,15 @@ export async function receiveObjectBatchPacket(packet: unknown, store: ObjectSto
       storedFlags.push(false);
       continue;
     }
-    storedFlags.push(await store.put(object as DistributedObject));
+    const distributedObject = object as DistributedObject;
+    const stored = await store.put(distributedObject);
+    if (distributedObject.object_type === 'mycelium.post' && resolvePostParent) {
+      const chain = await ensurePostChainCached(distributedObject, store, resolvePostParent);
+      if (!chain.complete || chain.storageFailures.length > 0) {
+        console.warn(`Post ancestry incomplete for ${distributedObject.object_id}: ${chain.stopReason}${chain.missingObjectId ? ` (${chain.missingObjectId})` : ''}`);
+      }
+    }
+    storedFlags.push(stored);
   }
   return storedFlags;
 }
@@ -177,16 +228,40 @@ export async function receiveAndReplicate(
   transport: ObjectTransport,
   sender: string,
   signer?: PacketSigner,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void = () => {},
+  resolvePostParent?: PostParentResolver,
+  replicatedToByObject = new Map<string, Set<string>>()
 ): Promise<boolean> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !(await validateObject(value))) return false;
 
   const object = value as DistributedObject;
   const stored = await store.put(object);
-  if (!stored) return false;
+  if (!stored && object.object_type !== 'mycelium.post') return false;
 
-  await replicateObject(sender, object, transport, signer, new Set([sourcePeerId]), log);
-  return true;
+  let objectsToReplicate = [object];
+  if (object.object_type === 'mycelium.post' && resolvePostParent) {
+    const chain = await ensurePostChainCached(object, store, resolvePostParent);
+    objectsToReplicate = stored
+      ? chain.objects
+      : chain.objects.filter((chainObject) =>
+          chainObject.object_id !== object.object_id && chain.newlyCachedObjectIds.includes(chainObject.object_id)
+        );
+    if (!chain.complete || chain.storageFailures.length > 0) {
+      log(`POST ancestry incomplete after receiving ${object.object_id}: reason=${chain.stopReason}${chain.missingObjectId ? ` missing=${chain.missingObjectId}` : ''}${chain.error ? ` error=${chain.error}` : ''} storageFailures=${chain.storageFailures.length}`);
+    }
+  } else if (!stored) {
+    return false;
+  }
+
+  if (objectsToReplicate.length === 0) return false;
+  for (const chainObject of objectsToReplicate) {
+    const alreadyReplicatedTo = replicatedToByObject.get(chainObject.object_id) ?? new Set<string>();
+    if (chainObject.object_id === object.object_id) alreadyReplicatedTo.add(sourcePeerId);
+    const result = await replicateObject(sender, chainObject, transport, signer, alreadyReplicatedTo, log);
+    result.stored.forEach((peerId) => alreadyReplicatedTo.add(peerId));
+    replicatedToByObject.set(chainObject.object_id, alreadyReplicatedTo);
+  }
+  return stored;
 }
 
 export async function receiveBatchAndReplicate(
@@ -196,11 +271,23 @@ export async function receiveBatchAndReplicate(
   transport: ObjectTransport,
   sender: string,
   signer?: PacketSigner,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void = () => {},
+  resolvePostParent?: PostParentResolver
 ): Promise<boolean[]> {
   const storedFlags: boolean[] = [];
+  const replicatedToByObject = new Map<string, Set<string>>();
   for (const object of objects) {
-    storedFlags.push(await receiveAndReplicate(object, sourcePeerId, store, transport, sender, signer, log));
+    storedFlags.push(await receiveAndReplicate(
+      object,
+      sourcePeerId,
+      store,
+      transport,
+      sender,
+      signer,
+      log,
+      resolvePostParent,
+      replicatedToByObject
+    ));
   }
   return storedFlags;
 }

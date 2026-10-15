@@ -79,6 +79,36 @@ describe('LocalPostView UI migration', () => {
     expect(markup).not.toContain('>Write</button>');
   });
 
+  it('renders an automatic feed continuation point with a manual fallback', () => {
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={Array.from({ length: 9 }, (_, index) => {
+          const view = makeView();
+          return {
+            ...view,
+            object: {
+              ...view.object,
+              object_id: `home-page-${index}`,
+              created_at: new Date(Date.UTC(2026, 7, 25, 0, index)).toISOString()
+            }
+          };
+        })}
+        contacts={[]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+    expect(markup).toContain('class="home-feed-end"');
+    expect(markup).toContain('>Load more</button>');
+  });
+
   it('renders the current user avatar as a profile link beside the Home composer', () => {
     const markup = renderToStaticMarkup(
       <HomePage
@@ -128,6 +158,9 @@ describe('LocalPostView UI migration', () => {
     const offline = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline={false} />);
     expect(online).toContain('class="identity-avatar-online"');
     expect(offline).not.toContain('identity-avatar-online');
+    expect(online).toContain('Author');
+    expect(online).toContain('@');
+    expect(offline).toContain('Author');
   });
 
   it('preserves literal @ text authored in posts', () => {
@@ -282,6 +315,9 @@ describe('LocalPostView UI migration', () => {
         onUnblockPeer={noop}
       />
     );
+    expect(myProfile).toContain('Generated handle');
+    expect(myProfile).toContain('readonly=""');
+    expect(myProfile).toContain('Display Name');
     const discover = renderToStaticMarkup(
       <DiscoverPage
         discoveryPosts={[view]}
@@ -493,9 +529,9 @@ describe('relationship and discovery people UI', () => {
 
   it('shows the requested Following or Followers list and the correct existing follow state', () => {
     const contacts: Contact[] = [
-      { publicKey: 'mutual-key', fingerprint: 'mutual-id', displayName: 'Mutual', addedAt: '', followed: true, follower: true },
+      { publicKey: 'mutual-key', fingerprint: 'mutual-id', displayName: 'Mutual', addedAt: '', followed: true, follower: true, online: false },
       { publicKey: 'follower-key', fingerprint: 'follower-id', displayName: 'Follower', addedAt: '', followed: false, follower: true },
-      { publicKey: 'following-key', fingerprint: 'following-id', displayName: 'Following Only', addedAt: '', followed: true, follower: false }
+      { publicKey: 'following-key', fingerprint: 'following-id', displayName: 'Following Only', addedAt: '', followed: true, follower: false, online: true }
     ];
     const following = renderToStaticMarkup(
       <RelationshipsPage
@@ -522,6 +558,7 @@ describe('relationship and discovery people UI', () => {
 
     expect(following).toContain('aria-selected="true" class="active">Following</button>');
     expect(following).toContain('Follows you');
+    expect(following.indexOf('Following Only')).toBeLessThan(following.indexOf('Mutual'));
     expect(following).not.toContain('Follower</strong>');
     expect(followers).toContain('aria-selected="true" class="active">Followers</button>');
     expect(followers).toContain('Follow back');
@@ -606,7 +643,7 @@ describe('relationship and discovery people UI', () => {
     expect(peopleTab.indexOf('Recent Person')).toBeLessThan(peopleTab.indexOf('Older Person'));
   });
 
-  it('hides popular peer suggestions when the user already follows someone', () => {
+  it('keeps popular peer suggestions visible after the user follows someone', () => {
     const followedPeer: Contact = {
       publicKey: 'aa:bb:cc:dd:ee:ff:00:22',
       fingerprint: 'aa:bb:cc:dd:ee:ff:00:22',
@@ -631,9 +668,9 @@ describe('relationship and discovery people UI', () => {
       />
     );
 
-    expect(markup).not.toContain('Popular posters right now.');
-    expect(markup).not.toContain('Unfollow');
-    expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
+    expect(markup).toContain('Popular posters right now.');
+    expect(markup).toContain('Unfollow');
+    expect(markup).toContain('aria-label="Dismiss popular peer suggestions"');
     expect(markup).not.toContain('New posts from people you follow.');
     expect(markup).not.toContain('Refresh posts');
   });

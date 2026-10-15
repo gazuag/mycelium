@@ -56,11 +56,15 @@ export function MyProfilePage({
 
       <div className="card profile-edit-card">
         <label>
-          Nickname
+          Generated handle
+          <input value={`@${generatedNickname}`} readOnly />
+        </label>
+        <label>
+          Display Name
           <input
-            value={nickname || generatedNickname}
+            value={nickname}
             onChange={(e) => onNicknameChange(e.target.value)}
-            placeholder="Your display name"
+            placeholder="Optional"
           />
         </label>
         <label>
