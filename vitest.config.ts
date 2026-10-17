@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
+import { usernameVocabularyPlugin } from './scripts/username-vocabulary';
 
 export default defineConfig({
+  plugins: [usernameVocabularyPlugin()],
   test: {
     exclude: [
       '**/node_modules/**',

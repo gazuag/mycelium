@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { buildSecurityHeaders } from './scripts/security-headers';
+import { usernameVocabularyPlugin } from './scripts/username-vocabulary';
 
 function cloudflareSecurityHeaders(): Plugin {
   let headers: string;
@@ -32,7 +33,7 @@ function cloudflareSecurityHeaders(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), cloudflareSecurityHeaders()],
+  plugins: [react(), usernameVocabularyPlugin(), cloudflareSecurityHeaders()],
   server: {
     host: 'localhost',
     port: 8080

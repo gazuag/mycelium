@@ -1,3 +1,5 @@
+import { keyToUsername } from './usernameCodec';
+
 const INITIALS = [
   "q", "w", "r", "t", "y", "p", "s", "d", "f", "g",
   "h", "j", "k", "l", "z", "x", "c", "v", "b", "n", "m",
@@ -164,27 +166,13 @@ export function shortPeerId(peerId: string): string {
   return `${trimmed.slice(0, 8)}…${trimmed.slice(-4)}`;
 }
 
-function capitalizeWord(text: string) {
-  return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
 export function fingerprintToHumanName(fingerprint: string): string {
   const normalized = fingerprint.replace(/[^0-9a-f]/gi, '').toLowerCase();
   if (!normalized || normalized.length !== 16) {
     return shortPeerId(fingerprint);
   }
 
-  const value = BigInt(`0x${normalized}`);
-  const syllables = [] as string[];
-
-  for (let i = 0; i < 4; i++) {
-    const chunk = Number((value >> BigInt(i * 16)) & 0xFFFFn);
-    syllables.push(encodeSyllable(chunk));
-  }
-
-  const firstWord = capitalizeWord(syllables[0] + syllables[1]);
-  const secondWord = capitalizeWord(syllables[2] + syllables[3]);
-  return `${firstWord} ${secondWord}`;
+  return keyToUsername(BigInt(`0x${normalized}`));
 }
 
 export function displayNameOrFallback(displayName: string | undefined, fingerprint: string): string {
@@ -192,6 +180,5 @@ export function displayNameOrFallback(displayName: string | undefined, fingerpri
   if (trimmed) {
     return trimmed;
   }
-
   return fingerprintToHumanName(fingerprint);
 }

@@ -777,6 +777,14 @@ body, html, #root {
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 
+.tab-item-home {
+  background-image: url('/mycelium-home-icon-organic.svg');
+  background-repeat: no-repeat;
+  background-position: 1rem center;
+  background-size: 1.15rem 1.15rem;
+  padding-left: 2.9rem;
+}
+
 .tab-unread-dot,
 .message-unread-dot {
   display: inline-block;

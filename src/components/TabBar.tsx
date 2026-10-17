@@ -22,7 +22,7 @@ export function TabBar({ active, onChange }: TabBarProps) {
       {tabs.map((tab) => (
         <button
           key={tab.key}
-          className={`tab-item ${active === tab.key ? 'active' : ''}`}
+          className={['tab-item', tab.key === 'home' ? 'tab-item-home' : '', active === tab.key ? 'active' : ''].filter(Boolean).join(' ')}
           onClick={() => onChange(tab.key)}
           type="button"
           aria-label={tab.key === 'messages' && unreadCount > 0 ? 'Messages, unread messages' : tab.label}
