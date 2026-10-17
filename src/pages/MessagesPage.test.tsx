@@ -83,6 +83,7 @@ describe('MessagesPage', () => {
         error={null}
         previewError={null}
         onOpenChat={() => {}}
+        onViewProfile={() => {}}
       />
     );
 
@@ -106,6 +107,7 @@ describe('MessagesPage', () => {
         error={null}
         previewError={null}
         onOpenChat={() => {}}
+        onViewProfile={() => {}}
       />
     );
     expect(markup).toContain('Search conversations or messages');

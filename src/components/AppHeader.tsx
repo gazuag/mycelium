@@ -1,6 +1,6 @@
 import type { ConnectionState } from '../types';
-import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { BrandLogo } from './BrandLogo';
+import { CompactUsername } from './CompactUsername';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -11,6 +11,7 @@ interface AppHeaderProps {
   connectedPeerIds: string[];
   syncStatus: string;
   myFingerprint?: string;
+  onPeerProfileClick: (peerId: string) => void;
 }
 
 export function AppHeader({
@@ -21,7 +22,8 @@ export function AppHeader({
   connectedPeers,
   connectedPeerIds,
   syncStatus,
-  myFingerprint
+  myFingerprint,
+  onPeerProfileClick
 }: AppHeaderProps) {
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
@@ -61,7 +63,7 @@ export function AppHeader({
             <strong>Open peer connections</strong>
             {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
               <div className="connected-peer" key={peerId}>
-                {fingerprintToHumanName(peerId)}
+                <CompactUsername peerId={peerId} onProfileClick={onPeerProfileClick} />
                 <code>{peerId}</code>
               </div>
             )) : <span className="connected-peer-empty">No open data channels</span>}

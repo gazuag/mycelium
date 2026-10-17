@@ -3451,6 +3451,7 @@ function App() {
           connectedPeerIds={connectedPeerIds}
           syncStatus={syncStatus}
           myFingerprint={identity?.id}
+          onPeerProfileClick={handleOpenPeerProfile}
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -3532,6 +3533,7 @@ function App() {
             error={conversationListError}
             previewError={conversationPreviewError}
             onOpenChat={handleSelectContact}
+            onViewProfile={handleOpenPeerProfile}
           />
         )}
 
@@ -3665,7 +3667,11 @@ function App() {
                     isOpen={blockedPeersOpen}
                     onToggle={() => setBlockedPeersOpen((open) => !open)}
                   >
-                    <BlockedPeerList peerIds={myProfile.blockedPeers} onUnblock={handleUnblockPeer} />
+                    <BlockedPeerList
+                      peerIds={myProfile.blockedPeers}
+                      onUnblock={handleUnblockPeer}
+                      onViewProfile={handleOpenPeerProfile}
+                    />
                   </CollapsibleSection>
                   <CollapsibleSection
                     title="Hidden Posts"

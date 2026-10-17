@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ConversationSummary } from '../object-layer/conversations';
 import { IdentityAvatar } from '../components/IdentityAvatar';
-import { PeerName } from '../components/PeerName';
+import { CompactUsername } from '../components/CompactUsername';
 import { useDmUnread } from '../hooks/useDmUnread';
 import type { Contact } from '../types';
 import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
@@ -16,6 +16,7 @@ interface MessagesPageProps {
   error: string | null;
   previewError: string | null;
   onOpenChat: (peerId: string) => void;
+  onViewProfile: (peerId: string) => void;
 }
 
 export function relationshipContacts(
@@ -71,7 +72,8 @@ export function MessagesPage({
   loading,
   error,
   previewError,
-  onOpenChat
+  onOpenChat,
+  onViewProfile
 }: MessagesPageProps) {
   const { byContact } = useDmUnread();
   const [selectingPeer, setSelectingPeer] = useState(false);
@@ -158,20 +160,29 @@ export function MessagesPage({
             {visiblePeers.map((contact) => {
               const name = displayNameOrFallback(contact.displayName, contact.fingerprint);
               return (
-                <button
+                <div
                   className="message-list-row"
-                  type="button"
                   key={contact.publicKey}
-                  onClick={() => onOpenChat(contact.fingerprint || contact.publicKey)}
-                  aria-label={`Start conversation with ${name}`}
                 >
+                  <button
+                    className="message-list-row-open"
+                    type="button"
+                    onClick={() => onOpenChat(contact.fingerprint || contact.publicKey)}
+                    aria-label={`Start conversation with ${name}`}
+                  />
                   <IdentityAvatar seed={contact.fingerprint} size={42} alt={name} online={contact.online === true} />
                   <span className="message-row-content">
-                    <strong><PeerName peerId={contact.fingerprint || contact.publicKey} displayName={name} /></strong>
+                    <strong>
+                      <CompactUsername
+                        peerId={contact.fingerprint || contact.publicKey}
+                        displayName={name}
+                        onProfileClick={onViewProfile}
+                      />
+                    </strong>
                     <span className="message-row-identifier" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
                   </span>
                   <span className="message-row-action" aria-hidden="true">›</span>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -195,13 +206,16 @@ export function MessagesPage({
                   ?? (conversation.lastDirection === 'out' ? 'You sent a message' : 'Received a message');
                 const time = formatActivityTime(conversation.lastAt);
                 return (
-                  <button
+                  <div
                     className={`message-list-row${unread ? ' unread' : ''}`}
-                    type="button"
                     key={conversation.counterparty}
-                    onClick={() => onOpenChat(contact?.fingerprint ?? conversation.counterparty)}
-                    aria-label={`Open conversation with ${name}${unread ? ', unread messages' : ''}`}
                   >
+                    <button
+                      className="message-list-row-open"
+                      type="button"
+                      onClick={() => onOpenChat(contact?.fingerprint ?? conversation.counterparty)}
+                      aria-label={`Open conversation with ${name}${unread ? ', unread messages' : ''}`}
+                    />
                     <IdentityAvatar
                       seed={contact?.fingerprint ?? conversation.counterparty}
                       size={42}
@@ -209,7 +223,13 @@ export function MessagesPage({
                       online={contact?.online === true}
                     />
                     <span className="message-row-content">
-                      <strong><PeerName peerId={contact?.fingerprint ?? conversation.counterparty} displayName={name} /></strong>
+                      <strong>
+                        <CompactUsername
+                          peerId={contact?.fingerprint ?? conversation.counterparty}
+                          displayName={name}
+                          onProfileClick={onViewProfile}
+                        />
+                      </strong>
                       <span className="message-row-identifier" title={contact?.fingerprint ?? conversation.counterparty}>
                         {shortPeerId(contact?.fingerprint ?? conversation.counterparty)}
                       </span>
@@ -219,7 +239,7 @@ export function MessagesPage({
                       {time ? <time dateTime={conversation.lastAt}>{time}</time> : null}
                       {unread ? <span className="message-unread-dot" aria-hidden="true" /> : null}
                     </span>
-                  </button>
+                  </div>
                 );
               })}
             </div>

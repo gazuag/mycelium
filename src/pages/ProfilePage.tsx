@@ -5,6 +5,7 @@ import type { RelationshipTab } from './RelationshipsPage';
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
+import { CompactUsername } from '../components/CompactUsername';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 const PROFILE_LOAD_STEP = 50;
@@ -86,7 +87,14 @@ export function ProfilePage({
   return (
     <section className="page-view profile-page">
       <div className="page-header compact-profile-header">
-        <h2>{isOwnProfile ? `Profile of ${displayNameOrFallback(contact.displayName, contact.fingerprint)}` : `Profile of ${displayNameOrFallback(contact.displayName, contact.fingerprint)}`}</h2>
+        <h2>
+          Profile of{' '}
+          <CompactUsername
+            peerId={contact.fingerprint || contact.publicKey}
+            displayName={displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey)}
+            onProfileClick={onAuthorClick}
+          />
+        </h2>
       </div>
 
       {notice ? (

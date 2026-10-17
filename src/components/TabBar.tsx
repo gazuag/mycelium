@@ -22,11 +22,23 @@ export function TabBar({ active, onChange }: TabBarProps) {
       {tabs.map((tab) => (
         <button
           key={tab.key}
-          className={['tab-item', tab.key === 'home' ? 'tab-item-home' : '', active === tab.key ? 'active' : ''].filter(Boolean).join(' ')}
+          className={['tab-item', `tab-item-${tab.key}`, active === tab.key ? 'active' : ''].join(' ')}
           onClick={() => onChange(tab.key)}
           type="button"
           aria-label={tab.key === 'messages' && unreadCount > 0 ? 'Messages, unread messages' : tab.label}
         >
+          <img
+            className="tab-item-icon"
+            src={
+              tab.key === 'messages'
+                ? '/mycelium-messages-envelope.svg'
+                : tab.key === 'discover'
+                  ? '/mycelium-discovery.svg'
+                  : '/mycelium-home-icon-organic.svg'
+            }
+            alt=""
+            aria-hidden="true"
+          />
           <span className="tab-item-label">{tab.label}</span>
           {tab.key === 'messages' && unreadCount > 0 ? (
             <span className="tab-unread-dot" aria-hidden="true" />

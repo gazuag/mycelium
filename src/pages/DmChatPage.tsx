@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from '../components/IdentityAvatar';
-import { PeerName } from '../components/PeerName';
+import { CompactUsername } from '../components/CompactUsername';
 import type { Contact } from '../types';
 import type { DmEvents } from '../object-layer/dm-events';
 import type { DmObjectIdentity } from '../object-layer/dm-object';
@@ -109,7 +109,15 @@ export function DmChatPage({
             ← Messages
           </button>
         ) : null}
-        <span className="chat-header-title">Chat with <PeerName peerId={contact.fingerprint} displayName={displayName} /></span>
+        <span className="chat-header-title">
+          <span className="chat-header-prefix">Chat with</span>
+          <CompactUsername
+            peerId={contact.fingerprint || contact.publicKey}
+            displayName={displayName}
+            onProfileClick={onViewProfile}
+            className="chat-compact-username"
+          />
+        </span>
         <span className="chat-header-status">{connectionText}</span>
       </div>
 

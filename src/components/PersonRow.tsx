@@ -1,7 +1,7 @@
 import type { Contact } from '../types';
 import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
-import { PeerName } from './PeerName';
+import { CompactUsername } from './CompactUsername';
 
 interface PersonRowProps {
   contact: Contact;
@@ -20,14 +20,23 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
 
   return (
     <article className="person-row">
-      <button
-        className="person-row-profile"
-        type="button"
-        onClick={() => onViewProfile(contact.fingerprint || contact.publicKey)}
-      >
-        <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={40} alt="" online={contact.online === true} />
+      <div className="person-row-profile">
+        <button
+          className="person-row-avatar-button"
+          type="button"
+          onClick={() => onViewProfile(contact.fingerprint || contact.publicKey)}
+          aria-label={`View ${displayName}'s profile`}
+        >
+          <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={40} alt="" online={contact.online === true} />
+        </button>
         <span className="person-row-details">
-          <strong><PeerName peerId={contact.fingerprint || contact.publicKey} displayName={displayName} /></strong>
+          <strong>
+            <CompactUsername
+              peerId={contact.fingerprint || contact.publicKey}
+              displayName={displayName}
+              onProfileClick={onViewProfile}
+            />
+          </strong>
           <span className="note person-row-identifier" title={contact.fingerprint || contact.publicKey}>
             {shortPeerId(contact.fingerprint || contact.publicKey)}
           </span>
@@ -37,7 +46,7 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
           {contact.online === true ? <span className="person-row-status online">Online</span> : null}
           {contact.online === false && lastSeen ? <span className="person-row-status">Last seen {lastSeen}</span> : null}
         </span>
-      </button>
+      </div>
       {actionLabel && onAction ? (
         <button className="person-row-action" type="button" onClick={onAction}>
           {actionLabel}

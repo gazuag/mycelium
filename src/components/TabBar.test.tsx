@@ -17,7 +17,10 @@ describe('TabBar', () => {
       .map((match) => match[1]);
 
     expect(labels).toEqual(['Home', 'Messages', 'Discover', 'Profile', 'Settings']);
-    expect(markup).toMatch(/class="tab-item active"[^>]*><span class="tab-item-label">Settings<\/span><\/button>/);
+    expect(markup).toContain('src="/mycelium-messages-envelope.svg"');
+    expect(markup).toContain('src="/mycelium-discovery.svg"');
+    expect(markup.match(/src="\/mycelium-home-icon-organic.svg"/g)).toHaveLength(3);
+    expect(markup).toMatch(/class="tab-item tab-item-settings active"[^>]*><img class="tab-item-icon"[^>]*><span class="tab-item-label">Settings<\/span><\/button>/);
   });
 
   it('shows one accessible red-dot indicator only when unread conversations exist', () => {

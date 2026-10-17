@@ -3,6 +3,7 @@ import type { Contact } from '../types';
 import type { LocalPostView } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { IdentityAvatar } from '../components/IdentityAvatar';
+import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
@@ -162,12 +163,13 @@ export function HomePage({
               {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
                 <div className="popular-poster-item" key={peerId}>
                   <span>
-                    <PeerName
+                    <CompactUsername
                       peerId={peerId}
                       displayName={displayNameOrFallback(
                         contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
                         peerId
                       )}
+                      onProfileClick={onAuthorClick}
                     /> <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span>
                   </span>
                   {onFollowPeer ? (

@@ -2,7 +2,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
-import { PeerName } from './PeerName';
+import { CompactUsername } from './CompactUsername';
 import { BlockButton } from './BlockButton';
 
 interface ProfileHeaderProps {
@@ -40,7 +40,13 @@ export function ProfileHeader({
             <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} />
           )}
           <div className="profile-title-name">
-            <strong><PeerName peerId={contact.fingerprint} displayName={displayName} /></strong>
+            <strong>
+              <CompactUsername
+                peerId={contact.fingerprint || contact.publicKey}
+                displayName={displayName}
+                onProfileClick={onAvatarClick ? () => onAvatarClick() : undefined}
+              />
+            </strong>
             <p className="note" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</p>
           </div>
         </div>

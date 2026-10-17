@@ -2,7 +2,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
-import { PeerName } from './PeerName';
+import { CompactUsername } from './CompactUsername';
 import { BlockButton } from './BlockButton';
 import { useDmUnread } from '../hooks/useDmUnread';
 
@@ -23,13 +23,26 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
   return (
     <article className="peer-card">
       <div className="peer-card-main">
-        <button className="ghost-link" onClick={() => onViewProfile(contact.fingerprint)} type="button">
-          <IdentityAvatar seed={contact.fingerprint} size={36} alt={displayName} online={contact.online === true} />
+        <div className="ghost-link">
+          <button
+            className="peer-card-avatar-button"
+            onClick={() => onViewProfile(contact.fingerprint)}
+            type="button"
+            aria-label={`View ${displayName}'s profile`}
+          >
+            <IdentityAvatar seed={contact.fingerprint} size={36} alt="" online={contact.online === true} />
+          </button>
           <div className="peer-label-block">
-            <strong><PeerName peerId={contact.fingerprint} displayName={displayName} /></strong>
+            <strong>
+              <CompactUsername
+                peerId={contact.fingerprint}
+                displayName={displayName}
+                onProfileClick={onViewProfile}
+              />
+            </strong>
             <span className="note" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
           </div>
-        </button>
+        </div>
         <div className="peer-badges">
           <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
           {unreadCount > 0 ? <span className="status-pill unread">{unreadCount} new</span> : null}

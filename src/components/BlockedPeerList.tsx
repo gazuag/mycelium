@@ -1,12 +1,14 @@
 import { IdentityAvatar } from './IdentityAvatar';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
+import { CompactUsername } from './CompactUsername';
 
 interface BlockedPeerListProps {
   peerIds: string[];
   onUnblock: (peerId: string) => void;
+  onViewProfile?: (peerId: string) => void;
 }
 
-export function BlockedPeerList({ peerIds, onUnblock }: BlockedPeerListProps) {
+export function BlockedPeerList({ peerIds, onUnblock, onViewProfile }: BlockedPeerListProps) {
   if (peerIds.length === 0) {
     return <p className="note">No blocked peers yet.</p>;
   }
@@ -18,7 +20,12 @@ export function BlockedPeerList({ peerIds, onUnblock }: BlockedPeerListProps) {
           <div className="peer-card-main">
             <IdentityAvatar seed={peerId} size={32} alt={fingerprintToHumanName(peerId)} />
             <div className="peer-label-block">
-              <strong>{fingerprintToHumanName(peerId)}</strong>
+              <strong>
+                <CompactUsername
+                  peerId={peerId}
+                  onProfileClick={onViewProfile}
+                />
+              </strong>
               <span className="note monospace">{peerId}</span>
             </div>
           </div>

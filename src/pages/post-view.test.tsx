@@ -358,6 +358,7 @@ describe('LocalPostView UI migration', () => {
         error={null}
         previewError={null}
         onOpenChat={noop}
+        onViewProfile={noop}
       />
     );
 
@@ -636,7 +637,7 @@ describe('relationship and discovery people UI', () => {
     expect(peopleTab).toContain('popular-01');
     expect(peopleTab).not.toContain('@popular-');
     expect(peopleTab).toContain('pool-id');
-    expect(peopleTab.match(/Online Person/g)).toHaveLength(1);
+    expect(peopleTab.match(/class="peer-name-primary">Online Person<\/span>/g)).toHaveLength(1);
     expect(peopleTab).not.toContain('@online-id');
     expect(peopleTab).toContain('class="identity-avatar-online"');
     expect(peopleTab.indexOf('Online Person')).toBeLessThan(peopleTab.indexOf('Recent Person'));

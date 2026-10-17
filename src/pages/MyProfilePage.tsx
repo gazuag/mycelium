@@ -23,6 +23,7 @@ interface MyProfilePageProps {
   onCreateIdentity: () => void;
   onClearIdentity: () => void;
   onUnblockPeer: (peerId: string) => void;
+  onViewProfile?: (peerId: string) => void;
 }
 
 export function MyProfilePage({
@@ -44,7 +45,8 @@ export function MyProfilePage({
   onImportIdentity,
   onCreateIdentity,
   onClearIdentity,
-  onUnblockPeer
+  onUnblockPeer,
+  onViewProfile
 }: MyProfilePageProps) {
   const generatedNickname = identityId ? fingerprintToHumanName(identityId) : 'Peer';
 
@@ -104,7 +106,7 @@ export function MyProfilePage({
 
       <div className="card">
         <h3>Blocked Peers</h3>
-        <BlockedPeerList peerIds={blockedPeers} onUnblock={onUnblockPeer} />
+        <BlockedPeerList peerIds={blockedPeers} onUnblock={onUnblockPeer} onViewProfile={onViewProfile} />
       </div>
 
       <div className="card">
