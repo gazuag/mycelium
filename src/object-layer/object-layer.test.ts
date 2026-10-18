@@ -499,6 +499,23 @@ describe('distributed object foundation', () => {
     expect(index.getSummary('b'.repeat(64)).active_recommender_count).toBe(0);
   });
 
+  it('counts distinct active peers once when a recommendation is delivered repeatedly', async () => {
+    const makeIdentity = async (id: string) => {
+      const keys = await generateIdentityKeyPair();
+      return createObjectIdentity({ id, publicKey: await exportPublicKey(keys.publicKey), privateKey: await exportPrivateKey(keys.privateKey) });
+    };
+    const firstPeer = await makeIdentity('duplicate-first-peer');
+    const secondPeer = await makeIdentity('duplicate-second-peer');
+    const postId = 'd'.repeat(64);
+    const firstLike = await createSignedRecommendationObject(postId, 'recommend', 1, firstPeer);
+    const secondLike = await createSignedRecommendationObject(postId, 'recommend', 1, secondPeer);
+    const index = new RecommendationIndex();
+
+    index.addAll([firstLike, firstLike, secondLike, secondLike]);
+
+    expect(index.getSummary(postId).active_recommender_count).toBe(2);
+  });
+
   it('computes followed recommenders and local-user recommendation state', async () => {
     const makeIdentity = async (id: string) => {
       const keys = await generateIdentityKeyPair();

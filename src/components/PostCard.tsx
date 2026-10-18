@@ -16,6 +16,7 @@ interface PostCardProps {
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
   onOpenPost?: () => void;
   replyCount?: number;
+  likeCount?: number;
   isLiked?: boolean;
   footerActions?: React.ReactNode;
   recommendationLabel?: string;
@@ -38,6 +39,7 @@ export function PostCard({
   onReply,
   onOpenPost,
   replyCount = 0,
+  likeCount = 0,
   isLiked: isLikedOverride,
   footerActions,
   recommendationLabel,
@@ -140,6 +142,14 @@ export function PostCard({
             )
           ) : null}
           <LikeButton isLiked={isLiked} onToggle={onLike} disabled={isOwnPost} />
+          {likeCount > 0 ? (
+            <span
+              className="post-like-count"
+              aria-label={`${likeCount} ${likeCount === 1 ? 'person likes' : 'people like'} this`}
+            >
+              {likeCount} {likeCount === 1 ? 'like' : 'likes'}
+            </span>
+          ) : null}
           {showDislikeButton && !isLiked ? (
             <HideButton postId={post.object.object_id} onHide={onHide ?? (() => onDislike())} />
           ) : null}

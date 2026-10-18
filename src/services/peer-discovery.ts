@@ -2,7 +2,7 @@ import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 
 export interface PopularPeer {
   peer_id: string;
-  reply_count: number;
+  activity_score: number;
 }
 
 type PendingPeerDiscovery = {
@@ -32,9 +32,10 @@ export function handlePeerDiscoveryResult(packet: unknown): boolean {
   } else {
     pending.resolve(peers.flatMap((peer) => {
       if (!peer || typeof peer !== 'object') return [];
-      const value = peer as { peer_id?: unknown; reply_count?: unknown };
-      return typeof value.peer_id === 'string' && typeof value.reply_count === 'number'
-        ? [{ peer_id: value.peer_id, reply_count: value.reply_count }]
+      const value = peer as { peer_id?: unknown; activity_score?: unknown; reply_count?: unknown };
+      const score = typeof value.activity_score === 'number' ? value.activity_score : value.reply_count;
+      return typeof value.peer_id === 'string' && typeof score === 'number'
+        ? [{ peer_id: value.peer_id, activity_score: score }]
         : [];
     }));
   }

@@ -160,7 +160,7 @@ export function HomePage({
           </div>
           {popularPeers.length === 0 ? <p className="note">No popular posters found yet.</p> : (
             <div className="popular-posters-list">
-              {popularPeers.map(({ peer_id: peerId, reply_count: replyCount }) => (
+              {popularPeers.map(({ peer_id: peerId }) => (
                 <div className="popular-poster-item" key={peerId}>
                   <span>
                     <CompactUsername
@@ -170,7 +170,7 @@ export function HomePage({
                         peerId
                       )}
                       onProfileClick={onAuthorClick}
-                    /> <span className="note">{replyCount} {replyCount === 1 ? 'reply' : 'replies'}</span>
+                    /> <span className="note">Reply activity</span>
                   </span>
                   {onFollowPeer ? (
                     <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
@@ -227,6 +227,7 @@ export function HomePage({
                 key={objectId}
                 post={post}
                 replyCount={replyCounts?.get(objectId) ?? 0}
+                likeCount={recommendationSummary?.active_recommender_count ?? 0}
                 authorName={authorName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 authorOnline={matchingContact?.online === true}

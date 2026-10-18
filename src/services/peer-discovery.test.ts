@@ -29,18 +29,31 @@ describe('peer discovery WebSocket packets', () => {
     await expect(result).resolves.toEqual(['peer-a', 'peer-b']);
   });
 
-  it('loads popular reply targets and counts from a correlated response', async () => {
+  it('loads reply-activity suggestions from a correlated response', async () => {
     const socket = fakeSocket();
     const result = fetchPopularPeers(socket);
     const request = await sentRequest(socket);
     expect(request.type).toBe('POPULAR_PEERS_GET');
 
-    const popular = [{ peer_id: 'peer-a', reply_count: 7 }, { peer_id: 'peer-b', reply_count: 3 }];
+    const popular = [{ peer_id: 'peer-a', activity_score: 3 }, { peer_id: 'peer-b', activity_score: 2 }];
     const response = await buildPacket('discovery-server', request.sender, 'POPULAR_PEERS_RESULT', {
       requestId: request.id,
       peers: popular
     });
     expect(handlePeerDiscoveryResult(response)).toBe(true);
     await expect(result).resolves.toEqual(popular);
+  });
+
+  it('accepts a legacy reply_count field without exposing it as an exact count', async () => {
+    const socket = fakeSocket();
+    const result = fetchPopularPeers(socket);
+    const request = await sentRequest(socket);
+    const response = await buildPacket('discovery-server', request.sender, 'POPULAR_PEERS_RESULT', {
+      requestId: request.id,
+      peers: [{ peer_id: 'legacy-peer', reply_count: 12 }]
+    });
+
+    expect(handlePeerDiscoveryResult(response)).toBe(true);
+    await expect(result).resolves.toEqual([{ peer_id: 'legacy-peer', activity_score: 12 }]);
   });
 });

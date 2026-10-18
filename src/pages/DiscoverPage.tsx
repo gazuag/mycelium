@@ -96,7 +96,7 @@ export function DiscoverPage({
     if (rightSeen === null) return -1;
     return rightSeen - leftSeen;
   });
-  const popularPeople: Array<{ peer: Contact; replyCount: number }> = [];
+  const popularPeople: Array<{ peer: Contact }> = [];
   const seenPopularAliases = new Set<string>();
   for (const popular of popularPeers) {
     if (popularPeople.length >= 10 || popular.peer_id === myPeerId || popular.peer_id === myPublicKey) continue;
@@ -106,7 +106,7 @@ export function DiscoverPage({
     const aliases = peerAliases(contact);
     if (aliases.some((alias) => seenPopularAliases.has(alias))) continue;
     aliases.forEach((alias) => seenPopularAliases.add(alias));
-    popularPeople.push({ peer: contact, replyCount: popular.reply_count });
+    popularPeople.push({ peer: contact });
   }
 
   return (
@@ -142,14 +142,14 @@ export function DiscoverPage({
             <h3>Popular right now</h3>
             {popularPeople.length > 0 ? (
               <div className="person-list">
-                {popularPeople.map(({ peer, replyCount }) => (
+                {popularPeople.map(({ peer }) => (
                   <PersonRow
                     key={peer.fingerprint || peer.publicKey}
                     contact={peer}
                     onViewProfile={onAuthorClick}
                     actionLabel={peer.followed ? 'Following' : 'Follow'}
                     onAction={() => onFollow(peer.fingerprint || peer.publicKey)}
-                    metric={`${replyCount} ${replyCount === 1 ? 'reply' : 'replies'} on Discovery`}
+                    metric="Reply activity"
                   />
                 ))}
               </div>
@@ -194,6 +194,7 @@ export function DiscoverPage({
                   key={post.object.object_id}
                   post={post}
                   replyCount={replyCounts?.get(post.object.object_id) ?? 0}
+                  likeCount={recommendationSummary.active_recommender_count}
                   authorName={authorName}
                   authorId={authorFingerprint}
                   authorOnline={matchedContact?.online === true}

@@ -30,4 +30,17 @@ describe('buildLocalDirectReplyCounts', () => {
     expect(multipleReplies.get(root.object.object_id)).toBe(2);
     expect(multipleReplies.get(directOne.object.object_id)).toBe(1);
   });
+
+  it('counts a duplicated signed reply object only once', () => {
+    const root = makePost('e');
+    const reply = makePost('f', root.object.object_id);
+
+    expect(buildLocalDirectReplyCounts([root, reply, reply]).get(root.object.object_id)).toBe(1);
+  });
+
+  it('does not count a reply with a malformed parent object ID', () => {
+    const invalidReply = makePost('g', 'not-an-object-id');
+
+    expect(buildLocalDirectReplyCounts([invalidReply]).size).toBe(0);
+  });
 });

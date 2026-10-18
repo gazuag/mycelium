@@ -1,13 +1,78 @@
-import type { DistributedObject } from '../object-layer';
+import {
+  isObjectExpired,
+  isRecommendationObject,
+  validateObject,
+  type DistributedObject,
+  type PostObject,
+  type RecommendationObject
+} from '../object-layer';
 import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 
 const MAX_BATCH_SIZE = 30;
 const RESPONSE_TIMEOUT_MS = 15000;
 const WEBSOCKET_OPEN = 1;
-const DISCOVERY_PUBLISHABLE_OBJECT_TYPES = new Set(['mycelium.post']);
+const DISCOVERY_PUBLISHABLE_OBJECT_TYPES = new Set(['mycelium.post', 'mycelium.recommendation']);
 
 // Pending DISCOVERY_GET responses keyed by outgoing packet id.
 const pendingDiscoveryRequests = new Map<string, (objects: DistributedObject[]) => void>();
+
+export interface ValidatedDiscoveryObjects {
+  readonly posts: PostObject[];
+  readonly replies: PostObject[];
+  readonly recommendations: RecommendationObject[];
+  readonly invalidCount: number;
+  readonly unsupportedCount: number;
+}
+
+export async function validateDiscoveryObjects(objects: readonly unknown[]): Promise<ValidatedDiscoveryObjects> {
+  const posts: PostObject[] = [];
+  const replies: PostObject[] = [];
+  const recommendations: RecommendationObject[] = [];
+  const seenObjectIds = new Set<string>();
+  let invalidCount = 0;
+  let unsupportedCount = 0;
+
+  for (const value of objects) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      invalidCount += 1;
+      continue;
+    }
+    const object = value as DistributedObject;
+    if (object.object_type !== 'mycelium.post' && object.object_type !== 'mycelium.recommendation') {
+      unsupportedCount += 1;
+      continue;
+    }
+    if (!(await validateObject(object)) || isObjectExpired(object)) {
+      invalidCount += 1;
+      continue;
+    }
+    if (seenObjectIds.has(object.object_id)) continue;
+
+    if (object.object_type === 'mycelium.recommendation') {
+      if (!isRecommendationObject(object)) {
+        invalidCount += 1;
+        continue;
+      }
+      recommendations.push(object);
+    } else {
+      const payload = object.payload;
+      const replyTo = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).reply_to
+        : undefined;
+      if (replyTo === undefined) {
+        posts.push(object as PostObject);
+      } else if (typeof replyTo === 'string' && /^[0-9a-f]{64}$/.test(replyTo)) {
+        replies.push(object as PostObject);
+      } else {
+        invalidCount += 1;
+        continue;
+      }
+    }
+    seenObjectIds.add(object.object_id);
+  }
+
+  return { posts, replies, recommendations, invalidCount, unsupportedCount };
+}
 
 /**
  * Called by the signalling message handler whenever a DISCOVERY_RESULT packet

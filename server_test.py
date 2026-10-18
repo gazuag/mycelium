@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 
 class FakeWebSocket:
@@ -143,6 +144,7 @@ class DiscoveryObjectServerTests(unittest.TestCase):
 
     def test_popular_peer_tally_groups_reply_authors(self):
         self.store_object('reply-1', 'mycelium.post', 'author-a', {'reply_to_author': 'peer-a', 'reply_to': 'post-1'})
+        self.store_object('duplicate-reply-1', 'mycelium.post', 'author-b', {'reply_to_author': 'peer-a', 'reply_to': 'post-1'})
         self.store_object('reply-2', 'mycelium.post', 'author-b', {'reply_to_author': 'peer-a', 'reply_to': 'post-2'})
         self.store_object('reply-3', 'mycelium.post', 'author-c', {'reply_to_author': 'peer-b', 'reply_to': 'post-3'})
         self.store_object('reply-object', 'mycelium.reply', 'author-d', {'reply_to_author': 'peer-c', 'reply_to': 'post-4'})
@@ -151,26 +153,107 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         old_received_at = (datetime.utcnow() - timedelta(days=self.server.PEER_DISCOVERY_WINDOW_DAYS + 1)).isoformat() + 'Z'
         self.store_object('old-reply', 'mycelium.post', 'author-f', {'reply_to_author': 'peer-old'}, old_received_at)
 
-        self.assertEqual(self.server.load_popular_peers(), [
-            {'peer_id': 'peer-a', 'reply_count': 2},
-            {'peer_id': 'peer-b', 'reply_count': 1},
-            {'peer_id': 'peer-c', 'reply_count': 1}
-        ])
+        peers = self.server.load_popular_peers()
+        self.assertEqual(peers[0], {'peer_id': 'peer-a', 'activity_score': 2})
+        self.assertEqual({peer['peer_id'] for peer in peers[1:]}, {'peer-b', 'peer-c'})
+        self.assertEqual({peer['activity_score'] for peer in peers}, {1, 2})
 
-    def test_popular_peers_returns_only_top_ten(self):
+    def test_popular_peer_activity_score_is_capped_and_peer_order_varies_on_ties(self):
         for peer_number in range(12):
             for reply_number in range(peer_number + 1):
                 self.store_object(
                     f'reply-{peer_number}-{reply_number}',
                     'mycelium.post',
                     f'author-{peer_number}-{reply_number}',
-                    {'reply_to_author': f'peer-{peer_number:02d}'}
+                    {'reply_to_author': f'peer-{peer_number:02d}', 'reply_to': f'post-{peer_number}-{reply_number}'}
                 )
 
-        peers = self.server.load_popular_peers()
+        with patch.object(self.server.random, 'shuffle', side_effect=lambda values: values.reverse()):
+            peers = self.server.load_popular_peers()
         self.assertEqual(len(peers), 10)
-        self.assertEqual(peers[0], {'peer_id': 'peer-11', 'reply_count': 12})
-        self.assertNotIn('peer-00', [peer['peer_id'] for peer in peers])
+        self.assertEqual(peers[0], {'peer_id': 'peer-11', 'activity_score': 3})
+        self.assertEqual({peer['activity_score'] for peer in peers}, {3})
+        self.assertEqual(len({peer['peer_id'] for peer in peers}), 10)
+
+    def test_discovery_sampling_uses_reply_activity_with_a_per_post_cap(self):
+        active_post_id = 'a' * 64
+        quiet_post_id = 'b' * 64
+        self.store_object(active_post_id, 'mycelium.post', 'author-active', {'content': 'active'})
+        self.store_object(quiet_post_id, 'mycelium.post', 'author-quiet', {'content': 'quiet'})
+        for number in range(5):
+            self.store_object(
+                f'reply-{number}',
+                'mycelium.post',
+                f'replier-{number}',
+                {'content': 'reply', 'reply_to': active_post_id}
+            )
+
+        with patch.object(self.server.random, 'random', return_value=0.75):
+            selected = self.server.load_discovery_posts(1, None)
+
+        self.assertEqual([post['object_id'] for post in selected], [active_post_id])
+
+    def test_reply_activity_bonus_cannot_overwhelm_baseline_selection(self):
+        active_post_id = 'c' * 64
+        quiet_post_id = 'd' * 64
+        self.store_object(active_post_id, 'mycelium.post', 'author-active', {'content': 'active'})
+        self.store_object(quiet_post_id, 'mycelium.post', 'author-quiet', {'content': 'quiet'})
+        for number in range(100):
+            self.store_object(
+                f'reply-{number}',
+                'mycelium.post',
+                f'replier-{number}',
+                {'content': 'reply', 'reply_to': active_post_id}
+            )
+
+        with patch.object(self.server.random, 'random', return_value=0.85):
+            selected = self.server.load_discovery_posts(1, None)
+
+        self.assertEqual([post['object_id'] for post in selected], [quiet_post_id])
+
+    def test_discovery_returns_stored_recommendations_and_canonical_replies_for_client_validation(self):
+        post_id = 'e' * 64
+        root = self.store_object(post_id, 'mycelium.post', 'author', {'content': 'root'})
+        reply = self.store_object(
+            'reply-object',
+            'mycelium.post',
+            'replier',
+            {'content': 'reply', 'reply_to': post_id}
+        )
+        recommendation = self.store_object(
+            'recommendation-object',
+            'mycelium.recommendation',
+            'liker',
+            {'post_id': post_id, 'action': 'recommend', 'sequence': 1}
+        )
+
+        objects = self.server.load_discovery_posts(4, None)
+
+        self.assertEqual({obj['object_id'] for obj in objects}, {
+            root['object_id'],
+            reply['object_id'],
+            recommendation['object_id']
+        })
+
+    def test_discovery_post_sampling_limits_repeated_authors_and_handles_incomplete_activity(self):
+        self.store_object('post-author-a-1', 'mycelium.post', 'author-a', {'content': 'first'})
+        self.store_object('post-author-a-2', 'mycelium.post', 'author-a', {'content': 'second'})
+        self.store_object('post-author-a-3', 'mycelium.post', 'author-a', {'content': 'third'})
+        self.store_object('post-author-b', 'mycelium.post', 'author-b', {'content': 'other'})
+        self.store_object(
+            'malformed-reply',
+            'mycelium.post',
+            'author-c',
+            {'content': 'incomplete reply', 'reply_to': 'z' * 64}
+        )
+
+        with patch.object(self.server.random, 'random', return_value=0):
+            selected = self.server.load_discovery_posts(3, None)
+
+        authors = [post['author'] for post in selected]
+        self.assertEqual(authors.count('author-a'), 2)
+        self.assertIn('author-b', authors)
+        self.assertNotIn('malformed-reply', [post['object_id'] for post in selected])
 
     def test_peer_pool_request_returns_protocol_response_over_websocket(self):
         post = self.store_object('pool-post', 'mycelium.post', 'author-key', {'content': 'hello'})
@@ -188,7 +271,7 @@ class DiscoveryObjectServerTests(unittest.TestCase):
 
         self.assertEqual(websocket.messages[0]['type'], 'POPULAR_PEERS_RESULT')
         self.assertEqual(websocket.messages[0]['payload']['requestId'], 'popular-request')
-        self.assertEqual(websocket.messages[0]['payload']['peers'], [{'peer_id': 'popular-peer', 'reply_count': 1}])
+        self.assertEqual(websocket.messages[0]['payload']['peers'], [{'peer_id': 'popular-peer', 'activity_score': 1}])
 
 
 if __name__ == '__main__':

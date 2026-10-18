@@ -155,10 +155,12 @@ export function ProfilePage({
               const authorContact = isProfileAuthor
                 ? contact
                 : postAuthorContact;
+              const recommendationSummary = getRecommendationSummary(post.object.object_id);
               return <PostCard
                 key={post.object.object_id}
                 post={post}
                 replyCount={replyCounts?.get(post.object.object_id) ?? 0}
+                likeCount={recommendationSummary.active_recommender_count}
                 authorName={displayNameOrFallback(
                   authorContact?.displayName,
                   post.authorFingerprint
@@ -174,7 +176,7 @@ export function ProfilePage({
                 onDislike={() => onDislike(post.object.object_id)}
                 onHide={onHide}
                 onReply={() => {} }
-                isLiked={getRecommendationSummary(post.object.object_id).recommended_by_me}
+                isLiked={recommendationSummary.recommended_by_me}
                 isOwnPost={isOwnProfile}
               />;
             })}

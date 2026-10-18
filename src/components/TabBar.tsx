@@ -38,6 +38,8 @@ export function TabBar({ active, onChange, replyUnreadCount = 0 }: TabBarProps) 
                   ? '/mycelium-discovery.svg'
                   : tab.key === 'settings'
                     ? '/mycelium-settings.svg'
+                    : tab.key === 'myProfile'
+                      ? '/mycelium-profile.svg'
                     : '/mycelium-home-icon-organic.svg'
             }
             alt=""

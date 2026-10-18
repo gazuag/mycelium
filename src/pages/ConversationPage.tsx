@@ -197,6 +197,7 @@ export function ConversationPage({
 
   const renderPost = (currentPost: LocalPostView, isRoot = false, isFocused = false, isAncestor = false) => {
     const objectId = currentPost.object.object_id;
+    const recommendationSummary = getRecommendationSummary(objectId);
     const matchingContact = contacts.find((contact) =>
       contact.fingerprint === currentPost.authorFingerprint || contact.publicKey === currentPost.object.author
     );
@@ -214,6 +215,7 @@ export function ConversationPage({
         <PostCard
           post={currentPost}
           replyCount={replyCounts?.get(objectId) ?? 0}
+          likeCount={recommendationSummary.active_recommender_count}
           authorName={authorName}
           authorId={matchingContact?.fingerprint ?? currentPost.authorFingerprint}
           authorOnline={
@@ -226,7 +228,7 @@ export function ConversationPage({
           onDislike={() => onDislike(objectId)}
           onHide={onHide}
           onReply={() => toggleReplyComposer(objectId)}
-          isLiked={getRecommendationSummary(objectId).recommended_by_me}
+          isLiked={recommendationSummary.recommended_by_me}
           isOwnPost={currentPost.authorFingerprint === myPeerId || currentPost.object.author === myPublicKey}
           replyComposer={!isRoot && isReplying ? renderReplyComposer(currentPost, authorName) : null}
         />

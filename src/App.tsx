@@ -18,7 +18,7 @@ import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptio
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
 import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor, loadFeedCursor, saveFeedCursor } from './storage/idb';
-import { fetchDiscovery, handleDiscoveryResult, publishObject } from './services/discovery';
+import { fetchDiscovery, handleDiscoveryResult, publishObject, validateDiscoveryObjects } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
@@ -200,6 +200,7 @@ function App() {
     settings: 0
   });
   const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
+  const [discoveryReplyPosts, setDiscoveryReplyPosts] = useState<LocalPostView[]>([]);
   const [possiblePeerIds, setPossiblePeerIds] = useState<string[]>([]);
   const [popularPeers, setPopularPeers] = useState<PopularPeer[]>([]);
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -2001,6 +2002,17 @@ function App() {
       setPostViews((prev) => upsertLocalPostView(prev, target));
       setDiscoveryPosts((prev) => upsertLocalPostView(prev, target));
       await localPostMetadataStoreRef.current?.put(localPostMetadata(target));
+      const socket = signallingSocketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          await publishObject(recommendation, socket);
+          addLog(`Published ${isLiked ? 'recommendation withdrawal' : 'recommendation'} to discovery`);
+        } catch (error) {
+          addLog(`Discovery recommendation publish failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        addLog('Discovery recommendation publish skipped: not connected to signalling server');
+      }
       addLog(`Liked post ${objectId}`);
     }
   };
@@ -2152,10 +2164,10 @@ function App() {
   const allCachedPosts = mergeLocalPostViews(postViews, discoveryPosts);
   const visibleConversationPosts = allCachedPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
   const locallyKnownReplyCounts = useMemo(() => {
-    const cachedPosts = mergeLocalPostViews(postViews, discoveryPosts);
+    const cachedPosts = mergeLocalPostViews(mergeLocalPostViews(postViews, discoveryPosts), discoveryReplyPosts);
     const visiblePosts = cachedPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
     return buildLocalDirectReplyCounts(visiblePosts);
-  }, [postViews, discoveryPosts, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds]);
+  }, [postViews, discoveryPosts, discoveryReplyPosts, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds]);
   const activeConversationPost = conversationPostId
     ? allCachedPosts.find((post) => post.object.object_id === conversationPostId)
     : undefined;
@@ -2260,7 +2272,7 @@ function App() {
     }
     addLog(`Home feed selector: total posts=${postViews.length} followed=${followedPostCount} after-filter=${afterFilterCount} final=${computedHomePosts.length}`);
     return computedHomePosts;
-  }, [postViews, discoveryPosts, contacts, identity, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision]);
+  }, [postViews, discoveryPosts, contacts, identity, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision, locallyKnownReplyCounts]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
@@ -2535,28 +2547,31 @@ function App() {
     addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(socket, 20);
-      let unsupportedObjectCount = 0;
-      let invalidObjectCount = 0;
-      const verificationResults = await Promise.all(items.map(async (object) => {
-          if (object.object_type !== 'mycelium.post') {
-            unsupportedObjectCount += 1;
-            return null;
-          }
-          if (!(await validateObject(object))) {
-            invalidObjectCount += 1;
-            return null;
-          }
-          const knownContact = contactsRef.current.find((contact) =>
-            contact.fingerprint === object.author || contact.publicKey === object.author
-          );
-          const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
-          return createLocalPostView(object as PostObject, authorFingerprint, {
-            source: 'discovery'
-          });
-          }));
-          const verifiedPosts = verificationResults.filter((view): view is LocalPostView => view !== null);
+      const validated = await validateDiscoveryObjects(items);
+      const createView = async (object: PostObject): Promise<LocalPostView> => {
+        const knownContact = contactsRef.current.find((contact) =>
+          contact.fingerprint === object.author || contact.publicKey === object.author
+        );
+        const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
+        return createLocalPostView(object, authorFingerprint, {
+          source: 'discovery'
+        });
+      };
+      const [verifiedPosts, verifiedReplies] = await Promise.all([
+        Promise.all(validated.posts.map(createView)),
+        Promise.all(validated.replies.map(createView))
+      ]);
+      const recommendationChanges = recommendationIndexRef.current.addAll(validated.recommendations);
+      if (recommendationChanges > 0) setRecommendationRevision((revision) => revision + 1);
       const discoveryStore = objectStoreRef.current;
       if (discoveryStore) {
+        for (const recommendation of validated.recommendations) {
+          try {
+            await discoveryStore.put(recommendation);
+          } catch (error) {
+            addLog(`Discovery recommendation storage failed for ${recommendation.object_id}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         const expanded = await expandObjectsWithPostChains(
           verifiedPosts.map((view) => view.object),
           discoveryStore,
@@ -2568,12 +2583,13 @@ function App() {
           }
         });
       }
-      void replyUnread.discover(verifiedPosts.map((post) => post.object));
+      void replyUnread.discover([...verifiedPosts, ...verifiedReplies].map((post) => post.object));
+      setDiscoveryReplyPosts((previous) => mergeLocalPostViews(previous, verifiedReplies));
       setDiscoveryPosts((prev) => {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
         return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
       });
-      addLog(`Discovery result: received=${items.length} accepted=${verifiedPosts.length} unsupported=${unsupportedObjectCount} invalid=${invalidObjectCount}`);
+      addLog(`Discovery result: received=${items.length} posts=${verifiedPosts.length} replies=${verifiedReplies.length} recommendations=${validated.recommendations.length} unsupported=${validated.unsupportedCount} invalid=${validated.invalidCount}`);
     } catch (err: any) {
       const message = err?.message || String(err);
       addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);

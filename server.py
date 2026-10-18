@@ -4,13 +4,14 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sqlite3
 import ssl
 import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -34,6 +35,10 @@ SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8443'))
 TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 PEER_DISCOVERY_WINDOW_DAYS = int(os.environ.get('PEER_DISCOVERY_WINDOW_DAYS', '30'))
+MAX_REPLY_ACTIVITY_BONUS = 3
+MAX_POSTS_PER_AUTHOR_PER_DISCOVERY_BATCH = 2
+DISCOVERY_INTERACTION_SHARE = 0.25
+MAX_PEER_REPLY_ACTIVITY_SCORE = 3
 
 clients: Dict[str, WebSocketServerProtocol] = {}
 pending_signals: Dict[str, List[Tuple[float, str]]] = {}
@@ -166,18 +171,96 @@ def build_discovery_result_packet(posts, request_id: Optional[str] = None, recip
 
 
 def load_discovery_posts(limit: int, tag: Optional[str]):
-    if tag:
-        cursor = DB_CONN.execute(
-            'SELECT object_json FROM discovery_posts WHERE tags LIKE ? ORDER BY RANDOM() LIMIT ?',
-            (f'%{tag}%', limit)
-        )
-    else:
-        cursor = DB_CONN.execute(
-            'SELECT object_json FROM discovery_posts ORDER BY RANDOM() LIMIT ?',
-            (limit,)
-        )
-    rows = cursor.fetchall()
-    return [json.loads(row[0]) for row in rows]
+    if limit <= 0:
+        return []
+
+    rows = DB_CONN.execute(
+        'SELECT object_json, tags FROM discovery_posts'
+    ).fetchall()
+    objects = []
+    replies_by_post: Dict[str, int] = {}
+    for object_json, tags in rows:
+        try:
+            obj = json.loads(object_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        objects.append((obj, tags if isinstance(tags, str) else ''))
+        payload = obj.get('payload')
+        reply_to = payload.get('reply_to') if isinstance(payload, dict) else None
+        if obj.get('object_type') == 'mycelium.post' and isinstance(reply_to, str) \
+                and len(reply_to) == 64 and all(character in '0123456789abcdef' for character in reply_to):
+            replies_by_post[reply_to] = replies_by_post.get(reply_to, 0) + 1
+
+    feed_posts = []
+    interaction_objects = []
+    for obj, object_tags in objects:
+        if tag and tag not in object_tags:
+            continue
+        payload = obj.get('payload')
+        reply_to = payload.get('reply_to') if isinstance(payload, dict) else None
+        if obj.get('object_type') == 'mycelium.post' and reply_to is None:
+            feed_posts.append(obj)
+        else:
+            interaction_objects.append(obj)
+
+    interaction_limit = min(len(interaction_objects), int(limit * DISCOVERY_INTERACTION_SHARE))
+    feed_limit = min(len(feed_posts), limit - interaction_limit)
+    ranked_posts = _sample_reply_active_posts(feed_posts, replies_by_post, feed_limit)
+    if len(ranked_posts) + interaction_limit < limit:
+        remaining_posts = [post for post in feed_posts if post not in ranked_posts]
+        ranked_posts.extend(_sample_reply_active_posts(
+            remaining_posts,
+            replies_by_post,
+            limit - len(ranked_posts) - interaction_limit
+        ))
+    sampled_interactions = random.sample(interaction_objects, interaction_limit)
+    selected = ranked_posts + sampled_interactions
+    if len(selected) < limit:
+        selected_ids = {obj.get('object_id') for obj in selected}
+        remaining_objects = [
+            obj for obj, object_tags in objects
+            if (not tag or tag in object_tags)
+            and obj.get('object_id') not in selected_ids
+        ]
+        selected.extend(random.sample(remaining_objects, min(limit - len(selected), len(remaining_objects))))
+    return selected
+
+
+def _sample_reply_active_posts(posts: List[dict], replies_by_post: Dict[str, int], limit: int) -> List[dict]:
+    remaining = list(posts)
+    selected: List[dict] = []
+    author_counts: Dict[str, int] = {}
+    while remaining and len(selected) < limit:
+        diverse = [
+            post for post in remaining
+            if author_counts.get(post.get('author', ''), 0) < MAX_POSTS_PER_AUTHOR_PER_DISCOVERY_BATCH
+        ]
+        candidates = diverse or remaining
+        weights = [
+            1 + min(
+                replies_by_post.get(post.get('object_id', ''), 0)
+                if isinstance(post.get('object_id'), str) else 0,
+                MAX_REPLY_ACTIVITY_BONUS
+            )
+            for post in candidates
+        ]
+        choice = random.random() * sum(weights)
+        selected_index = len(candidates) - 1
+        for index, weight in enumerate(weights):
+            choice -= weight
+            if choice < 0:
+                selected_index = index
+                break
+        selected_post = candidates[selected_index]
+        selected.append(selected_post)
+        author = selected_post.get('author', '')
+        if not isinstance(author, str):
+            author = ''
+        author_counts[author] = author_counts.get(author, 0) + 1
+        remaining.remove(selected_post)
+    return selected
 
 
 def _recent_cutoff() -> str:
@@ -219,7 +302,7 @@ def load_popular_peers(limit: int = 10) -> List[dict]:
         'SELECT object_json FROM discovery_posts WHERE received_at >= ?',
         (_recent_cutoff(),)
     ).fetchall()
-    reply_counts: Dict[str, int] = {}
+    replies_by_peer: Dict[str, Set[str]] = {}
     for (object_json,) in rows:
         try:
             obj = json.loads(object_json)
@@ -233,9 +316,17 @@ def load_popular_peers(limit: int = 10) -> List[dict]:
         peer_id = payload.get('reply_to_author')
         if isinstance(peer_id, str) and peer_id.strip():
             peer_id = peer_id.strip()
-            reply_counts[peer_id] = reply_counts.get(peer_id, 0) + 1
-    ranked = sorted(reply_counts.items(), key=lambda item: (-item[1], item[0]))
-    return [{'peer_id': peer_id, 'reply_count': count} for peer_id, count in ranked[:max(0, limit)]]
+            reply_to = payload.get('reply_to')
+            activity_key = reply_to if isinstance(reply_to, str) and reply_to.strip() else obj.get('object_id')
+            if isinstance(activity_key, str) and activity_key:
+                replies_by_peer.setdefault(peer_id, set()).add(activity_key)
+    ranked = [
+        (peer_id, min(len(reply_ids), MAX_PEER_REPLY_ACTIVITY_SCORE))
+        for peer_id, reply_ids in replies_by_peer.items()
+    ]
+    random.shuffle(ranked)
+    ranked.sort(key=lambda item: -item[1])
+    return [{'peer_id': peer_id, 'activity_score': score} for peer_id, score in ranked[:max(0, limit)]]
 
 
 def build_peer_discovery_result_packet(response_type: str, peers, request_id: Optional[str], recipient: Optional[str]):

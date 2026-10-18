@@ -61,7 +61,11 @@ export function composeHomeFeed({
       const id = post.object.object_id;
       if (selectedIds.has(id)) return [];
       selectedIds.add(id);
-      return [{ ...post, homeFeedSource: 'discovery' as const }];
+      return [{
+        ...post,
+        homeFeedSource: 'discovery' as const,
+        recommendationSummary: getRecommendationSummary(id)
+      }];
     });
 
   const recommendationSpacing = recommendationPosts.length > 0

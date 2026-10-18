@@ -152,6 +152,15 @@ describe('LocalPostView UI migration', () => {
     expect(oneReply).toContain('>Reply</button>');
   });
 
+  it('renders the aggregated active-like count accessibly', () => {
+    const markup = renderToStaticMarkup(
+      <PostCard post={makeView()} {...commonPostProps} likeCount={4} />
+    );
+
+    expect(markup).toContain('aria-label="4 people like this"');
+    expect(markup).toContain('4 likes');
+  });
+
   it('shows the shared online indicator for an explicitly online post author only', () => {
     const view = makeView();
     const online = renderToStaticMarkup(<PostCard post={view} {...commonPostProps} authorOnline />);
@@ -635,7 +644,7 @@ describe('relationship and discovery people UI', () => {
       suggestedPeerIds: ['online-id', 'pool-id'],
       popularPeers: Array.from({ length: 12 }, (_, index) => ({
         peer_id: `popular-${String(index + 1).padStart(2, '0')}`,
-        reply_count: 12 - index
+        activity_score: 3
       })),
       myPeerId: 'local-id',
       myPublicKey: 'local-key',
@@ -672,7 +681,7 @@ describe('relationship and discovery people UI', () => {
       <HomePage
         posts={[]}
         contacts={[followedPeer]}
-        popularPeers={[{ peer_id: followedPeer.fingerprint, reply_count: 4 }]}
+        popularPeers={[{ peer_id: followedPeer.fingerprint, activity_score: 3 }]}
         onFollowPeer={noop}
         postText=""
         onPostTextChange={noop}
@@ -698,7 +707,7 @@ describe('relationship and discovery people UI', () => {
       <HomePage
         posts={[]}
         contacts={[]}
-        popularPeers={[{ peer_id: 'aa:bb:cc:dd:ee:ff:00:22', reply_count: 4 }]}
+        popularPeers={[{ peer_id: 'aa:bb:cc:dd:ee:ff:00:22', activity_score: 3 }]}
         onFollowPeer={noop}
         postText=""
         onPostTextChange={noop}
@@ -713,7 +722,7 @@ describe('relationship and discovery people UI', () => {
     );
 
     expect(markup).toContain('Popular posters right now.');
-    expect(markup).toContain('4 replies');
+    expect(markup).toContain('Reply activity');
     expect(markup).toContain('Follow');
   });
 });

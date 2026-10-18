@@ -19,8 +19,9 @@ describe('TabBar', () => {
     expect(labels).toEqual(['Home', 'Messages', 'Discover', 'Profile', 'Settings']);
     expect(markup).toContain('src="/mycelium-messages-envelope.svg"');
     expect(markup).toContain('src="/mycelium-discovery.svg"');
+    expect(markup).toContain('src="/mycelium-profile.svg"');
     expect(markup).toContain('src="/mycelium-settings.svg"');
-    expect(markup.match(/src="\/mycelium-home-icon-organic.svg"/g)).toHaveLength(2);
+    expect(markup.match(/src="\/mycelium-home-icon-organic.svg"/g)).toHaveLength(1);
     expect(markup).toMatch(/class="tab-item tab-item-settings active"[^>]*><img class="tab-item-icon"[^>]*><span class="tab-item-label">Settings<\/span><\/button>/);
   });
 
