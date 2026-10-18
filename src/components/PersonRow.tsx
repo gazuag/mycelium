@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 
@@ -37,9 +37,6 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
               onProfileClick={onViewProfile}
             />
           </strong>
-          <span className="note person-row-identifier" title={contact.fingerprint || contact.publicKey}>
-            {shortPeerId(contact.fingerprint || contact.publicKey)}
-          </span>
           {contact.profile?.bio ? <span className="person-row-bio">{contact.profile.bio}</span> : null}
           {mutualLabel ? <span className="person-row-mutual">{mutualLabel}</span> : null}
           {metric ? <span className="person-row-metric">{metric}</span> : null}

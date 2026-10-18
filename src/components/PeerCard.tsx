@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
@@ -40,7 +40,6 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
                 onProfileClick={onViewProfile}
               />
             </strong>
-            <span className="note" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
           </div>
         </div>
         <div className="peer-badges">

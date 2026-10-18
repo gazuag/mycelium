@@ -1,7 +1,6 @@
 import type { LocalPostView } from '../object-layer';
 import { postContent, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
-import { shortPeerId } from '../utils/fingerprintNames';
 import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
@@ -49,8 +48,6 @@ export function PostCard({
   isOwnPost = false,
   authorOnline = false
 }: PostCardProps) {
-  const fingerprintLike = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(authorId);
-  const keyLabel = fingerprintLike ? shortPeerId(authorId) : undefined;
   const isLiked = isLikedOverride ?? false;
   const content = postContent(post);
 
@@ -70,7 +67,6 @@ export function PostCard({
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
             <strong><PeerName peerId={authorId} displayName={authorName} /></strong>
-            {keyLabel ? <span className="note" title={authorId}>{keyLabel}</span> : null}
           </button>
         </div>
         <span className="note">{new Date(post.object.created_at).toLocaleString()}</span>

@@ -433,7 +433,7 @@ describe('LocalPostView UI migration', () => {
     );
 
     expect(oneMarkup).toContain('Author recommends this');
-    expect(severalMarkup).toContain('Author, peer-2 and 3 more recommend this');
+    expect(severalMarkup).toContain('Author, Peer and 3 more recommend this');
   });
 
   it('uses canonical own-recommendation state for the like indicator and omits empty attribution', () => {
@@ -502,6 +502,25 @@ describe('LocalPostView UI migration', () => {
     expect(profileMarkup).toContain('aria-pressed="true"');
     expect(discoverMarkup).toContain('aria-pressed="true"');
   });
+
+  it('renders the current profile display name instead of a legacy post snapshot', () => {
+    const view = makeView({ authorDisplayName: 'Old Author Name' });
+    const markup = renderToStaticMarkup(
+      <ProfilePage
+        contact={{ ...contact, displayName: 'Current Author Name' }}
+        posts={[view]}
+        likedPosts={[]}
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+
+    expect(markup).toContain('Current Author Name');
+    expect(markup).not.toContain('Old Author Name');
+    expect(markup).not.toContain('aa:bb:');
+  });
 });
 
 describe('relationship and discovery people UI', () => {
@@ -523,8 +542,7 @@ describe('relationship and discovery people UI', () => {
     const offline = renderToStaticMarkup(<PersonRow contact={offlineContact} onViewProfile={noop} />);
     expect(online).toContain('class="identity-avatar-online"');
     expect(offline).not.toContain('identity-avatar-online');
-    expect(online).toContain('aa:bb:…:00:11');
-    expect(online).not.toContain('@aa:bb:cc:dd:ee:ff:00:11');
+    expect(online).not.toContain('aa:bb:');
     expect(online).toContain('Author');
   });
 
@@ -634,9 +652,8 @@ describe('relationship and discovery people UI', () => {
     expect(postsTab).toContain('aria-selected="true" class="active">Posts</button>');
     expect(postsTab).not.toContain('Popular right now');
     expect(peopleTab).toContain('Popular right now');
-    expect(peopleTab).toContain('popular-01');
-    expect(peopleTab).not.toContain('@popular-');
-    expect(peopleTab).toContain('pool-id');
+    expect(peopleTab).not.toContain('popular-01');
+    expect(peopleTab).not.toContain('pool-id');
     expect(peopleTab.match(/class="peer-name-primary">Online Person<\/span>/g)).toHaveLength(1);
     expect(peopleTab).not.toContain('@online-id');
     expect(peopleTab).toContain('class="identity-avatar-online"');

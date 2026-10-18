@@ -169,7 +169,7 @@ export function shortPeerId(peerId: string): string {
 export function fingerprintToHumanName(fingerprint: string): string {
   const normalized = fingerprint.replace(/[^0-9a-f]/gi, '').toLowerCase();
   if (!normalized || normalized.length !== 16) {
-    return shortPeerId(fingerprint);
+    return 'Peer';
   }
 
   return keyToUsername(BigInt(`0x${normalized}`));

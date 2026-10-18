@@ -19,7 +19,8 @@ describe('TabBar', () => {
     expect(labels).toEqual(['Home', 'Messages', 'Discover', 'Profile', 'Settings']);
     expect(markup).toContain('src="/mycelium-messages-envelope.svg"');
     expect(markup).toContain('src="/mycelium-discovery.svg"');
-    expect(markup.match(/src="\/mycelium-home-icon-organic.svg"/g)).toHaveLength(3);
+    expect(markup).toContain('src="/mycelium-settings.svg"');
+    expect(markup.match(/src="\/mycelium-home-icon-organic.svg"/g)).toHaveLength(2);
     expect(markup).toMatch(/class="tab-item tab-item-settings active"[^>]*><img class="tab-item-icon"[^>]*><span class="tab-item-label">Settings<\/span><\/button>/);
   });
 
@@ -28,7 +29,7 @@ describe('TabBar', () => {
     const unreadMarkup = renderToStaticMarkup(
       <TabBar active="messages" onChange={() => {}} />
     );
-    expect(unreadMarkup).toContain('aria-label="Messages, unread messages"');
+    expect(unreadMarkup).toContain('aria-label="Messages, unread items"');
     expect(unreadMarkup.match(/class="tab-unread-dot"/g)).toHaveLength(1);
 
     unreadState.total = 0;
@@ -37,5 +38,14 @@ describe('TabBar', () => {
     );
     expect(readMarkup).toContain('aria-label="Messages"');
     expect(readMarkup).not.toContain('tab-unread-dot');
+  });
+
+  it('includes reply unread state in the main Messages indicator', () => {
+    unreadState.total = 0;
+    const markup = renderToStaticMarkup(
+      <TabBar active="messages" onChange={() => {}} replyUnreadCount={3} />
+    );
+    expect(markup).toContain('aria-label="Messages, unread items"');
+    expect(markup.match(/class="tab-unread-dot"/g)).toHaveLength(1);
   });
 });

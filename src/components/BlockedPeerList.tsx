@@ -26,7 +26,6 @@ export function BlockedPeerList({ peerIds, onUnblock, onViewProfile }: BlockedPe
                   onProfileClick={onViewProfile}
                 />
               </strong>
-              <span className="note monospace">{peerId}</span>
             </div>
           </div>
           <button className="chip secondary" type="button" onClick={() => onUnblock(peerId)}>Unblock</button>

@@ -3,8 +3,9 @@ import type { ConversationSummary } from '../object-layer/conversations';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { useDmUnread } from '../hooks/useDmUnread';
+import type { ReplyNotification } from '../hooks/useReplyUnread';
 import type { Contact } from '../types';
-import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 interface MessagesPageProps {
   contacts: Contact[];
@@ -17,6 +18,10 @@ interface MessagesPageProps {
   previewError: string | null;
   onOpenChat: (peerId: string) => void;
   onViewProfile: (peerId: string) => void;
+  replies?: readonly ReplyNotification[];
+  onOpenReply?: (parentPostId: string, replyPostId?: string) => void;
+  onMarkReplyRead?: (replyId: string) => void;
+  onMarkAllRepliesRead?: () => void;
 }
 
 export function relationshipContacts(
@@ -73,11 +78,17 @@ export function MessagesPage({
   error,
   previewError,
   onOpenChat,
-  onViewProfile
+  onViewProfile,
+  replies = [],
+  onOpenReply,
+  onMarkReplyRead,
+  onMarkAllRepliesRead
 }: MessagesPageProps) {
-  const { byContact } = useDmUnread();
+  const { byContact, markRead } = useDmUnread();
   const [selectingPeer, setSelectingPeer] = useState(false);
+  const [activeTab, setActiveTab] = useState<'messages' | 'replies'>('messages');
   const [search, setSearch] = useState('');
+  const [readError, setReadError] = useState<string | null>(null);
   const searchablePeers = useMemo(
     () => relationshipContacts(contacts, myPublicKey, myPeerId),
     [contacts, myPeerId, myPublicKey]
@@ -101,6 +112,33 @@ export function MessagesPage({
     lastDirection: 'in',
     count: 0
   }, contact, search));
+  const visibleReplies = replies.filter((reply) => {
+    const contact = contacts.find((candidate) => (
+      candidate.publicKey === reply.authorPublicKey || candidate.fingerprint === reply.authorFingerprint
+    ));
+    const normalizedSearch = search.trim().toLocaleLowerCase();
+    if (!normalizedSearch) return true;
+    return [
+      contact?.displayName,
+      reply.authorFingerprint,
+      reply.parentContent,
+      'replied to your post'
+    ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
+  });
+  const dmUnreadCount = Object.values(byContact).reduce((total, count) => total + count, 0);
+
+  const markAllMessagesRead = async () => {
+    setReadError(null);
+    try {
+      await Promise.all(
+        Object.entries(byContact)
+          .filter(([, count]) => count > 0)
+          .map(([counterparty]) => markRead(counterparty))
+      );
+    } catch (error) {
+      setReadError(`Could not mark messages as read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
 
   const switchToPeerSelection = () => {
     setSearch('');
@@ -110,6 +148,7 @@ export function MessagesPage({
   const switchToConversations = () => {
     setSearch('');
     setSelectingPeer(false);
+    setActiveTab('messages');
   };
 
   return (
@@ -132,15 +171,40 @@ export function MessagesPage({
         )}
       </div>
 
+      {!selectingPeer ? (
+        <div className="messages-section-tabs" role="tablist" aria-label="Message types">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'messages'}
+            className={activeTab === 'messages' ? 'active' : ''}
+            onClick={() => setActiveTab('messages')}
+          >
+            Messages{dmUnreadCount > 0 ? <span className="messages-tab-count">{dmUnreadCount}</span> : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'replies'}
+            className={activeTab === 'replies' ? 'active' : ''}
+            onClick={() => setActiveTab('replies')}
+          >
+            Replies{replies.length > 0 && replies.some((reply) => !reply.read)
+              ? <span className="messages-tab-count">{replies.filter((reply) => !reply.read).length}</span>
+              : null}
+          </button>
+        </div>
+      ) : null}
+
       <label className="messages-search">
         <span className="visually-hidden">
-          {selectingPeer ? 'Search people to message' : 'Search conversations or messages'}
+          {selectingPeer ? 'Search people to message' : activeTab === 'replies' ? 'Search replies' : 'Search conversations or messages'}
         </span>
         <input
           type="search"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder={selectingPeer ? 'Search people' : 'Search conversations or messages'}
+          placeholder={selectingPeer ? 'Search people' : activeTab === 'replies' ? 'Search replies' : 'Search conversations or messages'}
         />
         {search ? (
           <button
@@ -179,7 +243,6 @@ export function MessagesPage({
                         onProfileClick={onViewProfile}
                       />
                     </strong>
-                    <span className="message-row-identifier" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</span>
                   </span>
                   <span className="message-row-action" aria-hidden="true">›</span>
                 </div>
@@ -193,6 +256,64 @@ export function MessagesPage({
         )
       ) : (
         <>
+          {readError ? <p className="messages-error" role="alert">{readError}</p> : null}
+          {activeTab === 'messages' && dmUnreadCount > 0 ? (
+            <div className="messages-list-toolbar">
+              <button className="btn secondary" type="button" onClick={() => void markAllMessagesRead()}>
+                Mark all as read
+              </button>
+            </div>
+          ) : null}
+          {activeTab === 'replies' && replies.some((reply) => !reply.read) ? (
+            <div className="messages-list-toolbar">
+              <button className="btn secondary" type="button" onClick={onMarkAllRepliesRead}>
+                Mark all as read
+              </button>
+            </div>
+          ) : null}
+          {activeTab === 'replies' ? (
+            visibleReplies.length > 0 ? (
+              <div className="messages-list" aria-label="Replies">
+                {visibleReplies.map((reply) => {
+                  const contact = contacts.find((candidate) => (
+                    candidate.publicKey === reply.authorPublicKey || candidate.fingerprint === reply.authorFingerprint
+                  ));
+                  const name = displayNameOrFallback(contact?.displayName, reply.authorFingerprint);
+                  const time = formatActivityTime(reply.createdAt);
+                  return (
+                    <div className={`message-list-row reply-list-row${reply.read ? '' : ' unread'}`} key={reply.id}>
+                      <button
+                        className="message-list-row-open"
+                        type="button"
+                        onClick={() => {
+                          onMarkReplyRead?.(reply.id);
+                          onOpenReply?.(reply.parentPostId, reply.replyPostId);
+                        }}
+                        aria-label={`Open reply from ${name} to your post${reply.read ? '' : ', unread'}`}
+                      />
+                      <IdentityAvatar seed={reply.authorFingerprint} size={42} alt={name} online={contact?.online === true} />
+                      <span className="message-row-content">
+                        <strong className="reply-row-author">{name}</strong>
+                        <span className="reply-row-body">{reply.replyContent || 'Replied to your post'}</span>
+                        {reply.parentContent ? (
+                          <span className="reply-parent-context">Your post: {reply.parentContent}</span>
+                        ) : null}
+                      </span>
+                      <span className="message-row-trailing">
+                        {time ? <time dateTime={reply.createdAt}>{time}</time> : null}
+                        {!reply.read ? <span className="message-unread-dot" aria-label="Unread reply" /> : null}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="note messages-empty">
+                {search ? 'No replies match your search.' : 'Replies to your posts will appear here.'}
+              </p>
+            )
+          ) : (
+          <>
           {error ? <p className="messages-error" role="alert">Could not load conversations: {error}</p> : null}
           {previewError ? <p className="messages-error" role="status">{previewError}</p> : null}
           {visibleConversations.length > 0 ? (
@@ -230,9 +351,6 @@ export function MessagesPage({
                           onProfileClick={onViewProfile}
                         />
                       </strong>
-                      <span className="message-row-identifier" title={contact?.fingerprint ?? conversation.counterparty}>
-                        {shortPeerId(contact?.fingerprint ?? conversation.counterparty)}
-                      </span>
                       <span className="message-row-activity">{activity}</span>
                     </span>
                     <span className="message-row-trailing">
@@ -251,6 +369,8 @@ export function MessagesPage({
             <p className="note messages-empty">
               {search ? 'No conversations match your search.' : 'Your conversations will appear here.'}
             </p>
+          )}
+          </>
           )}
         </>
       )}

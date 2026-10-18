@@ -152,12 +152,15 @@ export function ProfilePage({
               ));
               const isProfileAuthor = post.authorFingerprint === contact.fingerprint
                 || post.object.author === contact.publicKey;
+              const authorContact = isProfileAuthor
+                ? contact
+                : postAuthorContact;
               return <PostCard
                 key={post.object.object_id}
                 post={post}
                 replyCount={replyCounts?.get(post.object.object_id) ?? 0}
                 authorName={displayNameOrFallback(
-                  post.authorDisplayName || (post.authorFingerprint === contact.fingerprint ? contact.displayName : undefined),
+                  authorContact?.displayName,
                   post.authorFingerprint
                 )}
                 authorId={post.authorFingerprint}

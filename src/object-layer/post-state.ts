@@ -53,7 +53,6 @@ export function localPostMetadata(view: LocalPostView): LocalPostMetadata {
   return {
     object_id: view.object.object_id,
     authorFingerprint: view.authorFingerprint,
-    ...(view.authorDisplayName ? { authorDisplayName: view.authorDisplayName } : {}),
     ...(view.source ? { source: view.source } : {}),
     ...(view.notInterested === undefined ? {} : { notInterested: view.notInterested }),
     ...(view.hidden === undefined ? {} : { hidden: view.hidden })
@@ -79,7 +78,6 @@ export async function hydratePostViews(
         object as PostObject,
         authorFingerprint,
         item ? {
-          authorDisplayName: item.authorDisplayName,
           source: item.source ?? 'peer',
           notInterested: item.notInterested,
           hidden: item.hidden
@@ -108,6 +106,16 @@ export function mergeLocalPostViews(views: LocalPostView[], incoming: LocalPostV
   return incoming.reduce(upsertLocalPostView, views);
 }
 
-export function createReplyObjectPayload(replyTo: string, replyToAuthor?: string): { reply_to: string; reply_to_author?: string } {
-  return { reply_to: replyTo, ...(replyToAuthor ? { reply_to_author: replyToAuthor } : {}) };
+export function createReplyObjectPayload(
+  replyTo: string,
+  replyToAuthor?: string,
+  replyPostId?: string,
+  content?: string
+): { reply_to: string; reply_to_author?: string; reply_post_id?: string; content?: string } {
+  return {
+    reply_to: replyTo,
+    ...(replyToAuthor ? { reply_to_author: replyToAuthor } : {}),
+    ...(replyPostId ? { reply_post_id: replyPostId } : {}),
+    ...(content ? { content } : {})
+  };
 }

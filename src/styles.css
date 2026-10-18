@@ -963,6 +963,59 @@ body, html, #root {
   flex: 0 0 auto;
 }
 
+.messages-section-tabs {
+  display: flex;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.messages-section-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height-small);
+  padding: 0.45rem 0.75rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.messages-section-tabs button:hover {
+  color: var(--color-text);
+  background: var(--color-surface-hover);
+}
+
+.messages-section-tabs button.active {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.messages-section-tabs button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.messages-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.messages-list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .messages-back {
   padding: 0;
   border: 0;
@@ -1063,14 +1116,12 @@ body, html, #root {
 }
 
 .message-row-content > strong,
-.message-row-identifier,
 .message-row-activity {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.message-row-identifier,
 .message-row-activity {
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
@@ -1078,6 +1129,27 @@ body, html, #root {
 
 .message-row-activity {
   margin-top: 0.15rem;
+}
+
+.reply-row-author {
+  min-width: 0;
+}
+
+.reply-row-body {
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-parent-context {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .message-row-trailing {

@@ -656,6 +656,28 @@ describe('distributed object foundation', () => {
     expect(hydrated[0]).toMatchObject({ notInterested: true });
   });
 
+  it('does not persist or hydrate legacy author display-name snapshots', async () => {
+    const object = await createFixtureObject({ object_type: 'mycelium.post', author: '', created_at: '2026-08-25T00:00:00.000Z', payload: { content: 'renamed author' }, replication_policy: {} });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const staleMetadata = {
+      ...localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11')),
+      authorDisplayName: 'Old Name'
+    };
+    const metadataStore = {
+      put: async () => undefined,
+      get: async () => staleMetadata,
+      delete: async () => undefined,
+      query: async () => [staleMetadata]
+    };
+
+    const hydrated = await hydratePostViews(objectStore, metadataStore);
+    expect(hydrated[0].authorDisplayName).toBeUndefined();
+    expect(localPostMetadata(createLocalPostView(object as PostObject, 'aa:bb:cc:dd:ee:ff:00:11', {
+      authorDisplayName: 'New Snapshot'
+    }))).not.toHaveProperty('authorDisplayName');
+  });
+
   it('reports hydration failures instead of silently returning an unexplained empty result', async () => {
     const error = new Error('metadata unavailable');
     const objectStore = { put: async () => true, get: async () => null, delete: async () => undefined, query: async () => { throw error; } };
@@ -676,6 +698,15 @@ describe('distributed object foundation', () => {
     expect(createReplyObjectPayload('parent-object-id', 'parent-peer-id')).toEqual({
       reply_to: 'parent-object-id',
       reply_to_author: 'parent-peer-id'
+    });
+  });
+
+  it('can attach the canonical reply post and content to its notification payload', () => {
+    expect(createReplyObjectPayload('parent-object-id', 'parent-peer-id', 'reply-post-id', 'A response')).toEqual({
+      reply_to: 'parent-object-id',
+      reply_to_author: 'parent-peer-id',
+      reply_post_id: 'reply-post-id',
+      content: 'A response'
     });
   });
 

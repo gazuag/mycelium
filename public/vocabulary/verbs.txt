@@ -7,9 +7,9 @@ aims at
 answered
 answering
 answers
-appeared
-appearing
-appears
+appeared to
+appearing to
+appears to
 argued with
 argues with
 arguing with
@@ -41,9 +41,9 @@ becoming
 began
 beginning
 begins
-believed
-believes
-believing
+believed in
+believes in
+believing in
 belonged to
 belonging to
 belongs to
@@ -390,9 +390,9 @@ drew
 drew on
 dried
 dries
-drifted
-drifting
-drifts
+drifted to
+drifting to
+drifts to
 drilled
 drilling
 drills
@@ -507,11 +507,11 @@ firing at
 fished
 fishes
 fishing
-fits
+fits with
 fits into
-fitted
+fitted with
 fitted into
-fitting
+fitting with
 fitting into
 fixed
 fixes
@@ -530,9 +530,9 @@ flies
 flies over
 flies through
 flies towards
-floated
-floating
-floats
+floated to
+floating to
+floats to
 flowed
 flowing
 flows
@@ -561,21 +561,21 @@ gathering
 gathers
 gave away
 gave back
-gave into
+gave up to 
 gave over
 gets
 getting
 gives away
 gives back
-gives into
+gives up to
 gives over
 giving away
 giving back
-giving into
+giving up to
 giving over
-glowed
-glowing
-glows
+glowed as
+glowing as
+glows as
 goes through
 going through
 got
@@ -776,7 +776,7 @@ lands
 laughed at
 laughing at
 laughs at
-lay
+lay upon
 lay on
 leading
 leads
@@ -802,7 +802,7 @@ left
 licked
 licking
 licks
-lies
+lies upon
 lies on
 lifted
 lifting
@@ -903,7 +903,7 @@ lost
 loved
 loves
 loving
-lying
+lying upon
 lying on
 made
 makes
@@ -980,9 +980,9 @@ moving under
 needed
 needing
 needs
-nodded
-nodding
-nods
+nodded at
+nodding at
+nods at
 noticed
 notices
 noticing
@@ -1244,9 +1244,9 @@ receiving
 recognized
 recognizes
 recognizing
-remained
-remaining
-remains
+remained by
+remaining by
+remains by
 remembered
 remembering
 remembers
@@ -1300,11 +1300,11 @@ riding towards
 riding under
 ringing
 rings
-rises
-rising
-roamed
-roaming
-roams
+rises like
+rising like
+roamed like
+roaming like
+roams like
 rode
 rode across
 rode along
@@ -1320,7 +1320,7 @@ rode past
 rode through
 rode towards
 rode under
-rolled
+rolled like
 rolled across
 rolled along
 rolled around
@@ -1335,7 +1335,7 @@ rolled past
 rolled through
 rolled towards
 rolled under
-rolling
+rolling like
 rolling across
 rolling along
 rolling around
@@ -1350,7 +1350,7 @@ rolling past
 rolling through
 rolling towards
 rolling under
-rolls
+rolls like
 rolls across
 rolls along
 rolls around
@@ -1365,7 +1365,7 @@ rolls past
 rolls through
 rolls towards
 rolls under
-rose
+rose like
 rowed
 rowing
 rows
@@ -1416,7 +1416,7 @@ sails towards
 sang
 sang along
 sang to
-sat
+sat with
 sat beside
 sat on
 saw
@@ -1443,9 +1443,9 @@ searching for
 seeing
 seeking
 seeks
-seemed
-seeming
-seems
+seemed like
+seeming like
+seems like
 sees
 selected
 selecting
@@ -1514,9 +1514,9 @@ shaking hands with
 shared
 shares
 sharing
-shines
-shining
-shone
+shines like
+shining like
+shone like
 shook
 shook hands with
 shooting at
@@ -1531,22 +1531,22 @@ singing to
 sings
 sings along
 sings to
-sits
+sits with
 sits beside
 sits on
-sitting
+sitting with
 sitting beside
 sitting on
 skipped across
 skipping across
 skips across
-sleeping
+sleeping like
 sleeping beside
 sleeping on
-sleeps
+sleeps like
 sleeps beside
 sleeps on
-slept
+slept like
 slept beside
 slept on
 sliced
@@ -1558,15 +1558,15 @@ smells
 smiled at
 smiles at
 smiling at
-sneaking
-sneaks
+sneaking by
+sneaks by
 sniffed
 sniffing
 sniffs
 snowed
 snowing
 snows
-snuck
+snuck by
 solved
 solves
 solving
@@ -1577,9 +1577,9 @@ sought
 sounded
 sounding
 sounds
-sparkled
-sparkles
-sparkling
+sparkled as
+sparkles as
+sparkling as
 speaking to
 speaks to
 spinning
@@ -1607,10 +1607,10 @@ squeezing through
 stacked
 stacking
 stacks
-standing
+standing by
 standing beside
 standing on
-stands
+stands by
 stands beside
 stands on
 stared at
@@ -1622,9 +1622,9 @@ staring into
 started
 starting
 starts
-stayed
-staying
-stays
+stayed by
+staying by
+stays by
 steered
 steering
 steers
@@ -1634,7 +1634,7 @@ stirs
 stitched
 stitches
 stitching
-stood
+stood by
 stood beside
 stood on
 stopped
@@ -1958,7 +1958,7 @@ walks past
 walks through
 walks towards
 walks under
-wandered
+wandered by
 wandered into
 wandered through
 wandering into

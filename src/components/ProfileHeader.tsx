@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback, shortPeerId } from '../utils/fingerprintNames';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
@@ -47,7 +47,6 @@ export function ProfileHeader({
                 onProfileClick={onAvatarClick ? () => onAvatarClick() : undefined}
               />
             </strong>
-            <p className="note" title={contact.fingerprint}>{shortPeerId(contact.fingerprint)}</p>
           </div>
         </div>
         {showOnlineIndicator ? (

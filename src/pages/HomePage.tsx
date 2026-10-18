@@ -197,7 +197,7 @@ export function HomePage({
             );
             const authorName = matchingContact
               ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.object.author)
-              : displayNameOrFallback(post.authorDisplayName, authorFingerprint);
+              : displayNameOrFallback(undefined, authorFingerprint);
             const recommendationSummary = post.recommendationSummary;
             const recommenders = recommendationSummary?.followed_recommenders ?? [];
             const recommenderNames = recommenders.slice(0, 2).map((recommender) =>

@@ -21,8 +21,7 @@ export function HiddenPostList({ posts, contacts, onUnhide }: HiddenPostListProp
           <div className="peer-label-block">
             <strong>{postContent(post) || 'Untitled post'}</strong>
             <span className="note">By {displayNameOrFallback(
-              contacts.find((contact) => contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author)?.displayName
-                ?? post.authorDisplayName,
+              contacts.find((contact) => contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author)?.displayName,
               post.authorFingerprint
             )}</span>
             <span className="note">{new Date(post.object.created_at).toLocaleString()}</span>

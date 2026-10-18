@@ -186,7 +186,7 @@ export function DiscoverPage({
               const authorFingerprint = post.authorFingerprint || matchedContact?.fingerprint || post.object.author;
               const authorName = matchedContact
                 ? displayNameOrFallback(matchedContact.displayName, authorFingerprint)
-                : post.authorDisplayName?.trim() || displayNameOrFallback(undefined, authorFingerprint);
+                : displayNameOrFallback(undefined, authorFingerprint);
               const recommendationSummary = getRecommendationSummary(post.object.object_id);
 
               return (

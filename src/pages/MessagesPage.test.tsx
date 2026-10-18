@@ -3,9 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary } from '../object-layer/conversations';
 import type { Contact } from '../types';
 
-const unreadState = vi.hoisted(() => ({ byContact: {} as Record<string, number> }));
+const unreadState = vi.hoisted(() => ({
+  byContact: {} as Record<string, number>,
+  markRead: vi.fn(async () => {})
+}));
 vi.mock('../hooks/useDmUnread', () => ({
-  useDmUnread: () => ({ total: 0, byContact: unreadState.byContact, markRead: async () => {} })
+  useDmUnread: () => ({ total: 0, byContact: unreadState.byContact, markRead: unreadState.markRead })
 }));
 
 import {
@@ -112,5 +115,28 @@ describe('MessagesPage', () => {
     );
     expect(markup).toContain('Search conversations or messages');
     expect(markup).toContain('Your conversations will appear here.');
+  });
+
+  it('shows parallel Messages and Replies tabs and offers bulk-read for unread DMs', () => {
+    unreadState.byContact = { [alice.publicKey]: 2 };
+    const markup = renderToStaticMarkup(
+      <MessagesPage
+        contacts={[alice]}
+        myPublicKey="my-public-key"
+        myPeerId="my-peer-id"
+        conversations={[summary(alice.publicKey, '2026-10-14T12:00:00.000Z')]}
+        previews={{}}
+        loading={false}
+        error={null}
+        previewError={null}
+        onOpenChat={() => {}}
+        onViewProfile={() => {}}
+      />
+    );
+
+    expect(markup).toContain('role="tab" aria-selected="true" class="active">Messages');
+    expect(markup).toContain('aria-selected="false" class="">Replies');
+    expect(markup).toContain('Mark all as read');
+    unreadState.byContact = {};
   });
 });

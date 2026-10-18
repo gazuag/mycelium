@@ -5,6 +5,7 @@ type PageKey = 'home' | 'messages' | 'discover' | 'myProfile' | 'settings';
 interface TabBarProps {
   active: PageKey;
   onChange: (page: PageKey) => void;
+  replyUnreadCount?: number;
 }
 
 const tabs: Array<{ key: PageKey; label: string }> = [
@@ -15,8 +16,9 @@ const tabs: Array<{ key: PageKey; label: string }> = [
   { key: 'settings', label: 'Settings' }
 ];
 
-export function TabBar({ active, onChange }: TabBarProps) {
-  const { total: unreadCount } = useDmUnread();
+export function TabBar({ active, onChange, replyUnreadCount = 0 }: TabBarProps) {
+  const { total: messageUnreadCount } = useDmUnread();
+  const unreadCount = messageUnreadCount + replyUnreadCount;
   return (
     <nav className="tab-bar">
       {tabs.map((tab) => (
@@ -25,7 +27,7 @@ export function TabBar({ active, onChange }: TabBarProps) {
           className={['tab-item', `tab-item-${tab.key}`, active === tab.key ? 'active' : ''].join(' ')}
           onClick={() => onChange(tab.key)}
           type="button"
-          aria-label={tab.key === 'messages' && unreadCount > 0 ? 'Messages, unread messages' : tab.label}
+          aria-label={tab.key === 'messages' && unreadCount > 0 ? 'Messages, unread items' : tab.label}
         >
           <img
             className="tab-item-icon"
@@ -34,7 +36,9 @@ export function TabBar({ active, onChange }: TabBarProps) {
                 ? '/mycelium-messages-envelope.svg'
                 : tab.key === 'discover'
                   ? '/mycelium-discovery.svg'
-                  : '/mycelium-home-icon-organic.svg'
+                  : tab.key === 'settings'
+                    ? '/mycelium-settings.svg'
+                    : '/mycelium-home-icon-organic.svg'
             }
             alt=""
             aria-hidden="true"

@@ -12,6 +12,7 @@ import { createOutboxService } from './object-layer/outbox-service';
 import { createFeedRequestAdapter, type ProcessedFeedBatchHandler } from './object-layer/feed-request-adapter';
 import { dedupeContactsByFingerprint } from './contact-utils';
 import { DmUnreadProvider } from './hooks/useDmUnread';
+import { useReplyUnreadController } from './hooks/useReplyUnread';
 import { listConversations, previewConversation, type ConversationSummary } from './object-layer/conversations';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
@@ -341,7 +342,7 @@ function App() {
     void hydratePostViews(objectStore, metadataStore, (error) => {
       addLog(`Post hydration failed: ${error instanceof Error ? error.message : String(error)}`);
     }, resolvePostAuthorFingerprint).then((hydratedViews) => {
-      const hydratedWithMetadata = hydratedViews.filter((view) => view.authorDisplayName !== undefined || view.notInterested !== undefined || view.hidden !== undefined).length;
+      const hydratedWithMetadata = hydratedViews.filter((view) => view.notInterested !== undefined || view.hidden !== undefined).length;
       addLog(`Hydrated ${hydratedViews.length} posts from storage (${hydratedWithMetadata} with metadata)`);
       setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
     });
@@ -902,6 +903,9 @@ function App() {
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
     if (stored && packet.type === 'OBJECT_STORE') {
       inboxServiceRef.current?.notifyObjectStored(packet.payload.object);
+      if (packet.payload.object.object_type === 'mycelium.reply' || packet.payload.object.object_type === 'mycelium.post') {
+        void replyUnread.discover([packet.payload.object]);
+      }
       setObjectTestStatus(`Received and stored ${packet.payload.object.object_id} from ${peerId}`);
       void refreshObjectStore();
     }
@@ -935,6 +939,14 @@ function App() {
     }
   };
 
+  const replyUnread = useReplyUnreadController({
+    store: objectStoreRef.current,
+    identityId: identity?.id ?? null,
+    myPublicKey: identity?.publicKey ?? null,
+    resolveAuthorFingerprint: resolvePostAuthorFingerprint,
+    onError: (error) => addLog(error instanceof Error ? error.message : String(error))
+  });
+
   const logPostChainResult = (postId: string, result: PostChainResult) => {
     if (result.complete && result.storageFailures.length === 0) {
       addLog(`POST ancestry complete for ${postId}: ${result.objects.length} canonical posts cached`);
@@ -956,7 +968,6 @@ function App() {
       const metadata = await metadataStore?.get(object.object_id);
       const fingerprint = metadata?.authorFingerprint ?? await resolvePostAuthorFingerprint(object.author);
       const view = createLocalPostView(object as PostObject, fingerprint, {
-        ...(metadata?.authorDisplayName ? { authorDisplayName: metadata.authorDisplayName } : {}),
         source: metadata?.source ?? source,
         ...(metadata?.notInterested === undefined ? {} : { notInterested: metadata.notInterested }),
         ...(metadata?.hidden === undefined ? {} : { hidden: metadata.hidden })
@@ -1240,6 +1251,7 @@ function App() {
           return;
         }
         inboxServiceRef.current?.notifyObjectStored(object);
+        if (object.object_type === 'mycelium.reply') void replyUnread.discover([object]);
         recommendationIndexRef.current.add(object);
         setRecommendationRevision((revision) => revision + 1);
         const authorFingerprint = await resolvePostAuthorFingerprint(object.author);
@@ -1249,6 +1261,7 @@ function App() {
         if (view) {
           setPostViews((prev) => upsertLocalPostView(prev, view));
           await cachePostChain(object);
+          void replyUnread.discover([object]);
         }
         addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
@@ -1337,6 +1350,10 @@ function App() {
               throw error;
             }
             const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+            const newlyDiscoveredReplies = newlyStoredObjects.filter((object) => (
+              object.object_type === 'mycelium.reply' || object.object_type === 'mycelium.post'
+            ));
+            if (newlyDiscoveredReplies.length > 0) void replyUnread.discover(newlyDiscoveredReplies);
             for (let index = 0; index < objects.length; index += 1) {
               const object = objects[index];
               if (!storedFlags[index] && object?.object_type === 'mycelium.post' && await validateObject(object)) {
@@ -2070,7 +2087,7 @@ function App() {
         const replyObject = await createSignedObject({
           object_type: 'mycelium.reply',
           created_at: new Date().toISOString(),
-          payload: createReplyObjectPayload(replyTo, targetPeer),
+          payload: createReplyObjectPayload(replyTo, targetPeer, postObject.object_id, content),
           replication_policy: {}
         }, replyIdentity);
         const replyResult = await sendReplyToAuthor(identity.id, replyObject, objectTransportRef.current!, targetPeer, (packet) => signString(identity.privateKey, canonicalize(packet)));
@@ -2177,7 +2194,6 @@ function App() {
       const metadata = await metadataStore?.get(parentId);
       const authorFingerprint = metadata?.authorFingerprint ?? await resolvePostAuthorFingerprint(object.author);
       const parentView = createLocalPostView(object as PostObject, authorFingerprint, {
-        ...(metadata?.authorDisplayName ? { authorDisplayName: metadata.authorDisplayName } : {}),
         ...(metadata?.source ? { source: metadata.source } : { source: 'peer' as const }),
         ...(metadata?.notInterested === undefined ? {} : { notInterested: metadata.notInterested }),
         ...(metadata?.hidden === undefined ? {} : { hidden: metadata.hidden })
@@ -2472,19 +2488,6 @@ function App() {
     pendingScrollRestoreRef.current = null;
   }, [identity, page, conversationPostId, conversationFocusPostId, navigationRevision, pageScrollPositions]);
 
-  const resolveAuthorDisplayName = (authorId: string, fallbackContact?: Contact) => {
-    const trimmedName = fallbackContact?.displayName?.trim();
-    if (trimmedName) {
-      return trimmedName;
-    }
-
-    if (isValidPeerFingerprint(authorId)) {
-      return fingerprintToHumanName(authorId);
-    }
-
-    return undefined;
-  };
-
   async function handleRefreshHomeFeed() {
     if (!identity) return;
 
@@ -2543,16 +2546,12 @@ function App() {
             invalidObjectCount += 1;
             return null;
           }
-          const cachedPost = discoveryPosts.find((cached) => cached.object.object_id === object.object_id)
-            ?? postViews.find((cached) => cached.object.object_id === object.object_id);
           const knownContact = contactsRef.current.find((contact) =>
             contact.fingerprint === object.author || contact.publicKey === object.author
           );
           const authorFingerprint = knownContact?.fingerprint || (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author).catch(() => object.author));
-          const authorDisplayName = resolveAuthorDisplayName(authorFingerprint, knownContact);
-            return createLocalPostView(object as PostObject, authorFingerprint, {
-              source: 'discovery',
-              authorDisplayName: authorDisplayName || cachedPost?.authorDisplayName
+          return createLocalPostView(object as PostObject, authorFingerprint, {
+            source: 'discovery'
           });
           }));
           const verifiedPosts = verificationResults.filter((view): view is LocalPostView => view !== null);
@@ -2569,6 +2568,7 @@ function App() {
           }
         });
       }
+      void replyUnread.discover(verifiedPosts.map((post) => post.object));
       setDiscoveryPosts((prev) => {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
         return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
@@ -3438,6 +3438,7 @@ function App() {
               : 'home'
           }
           onChange={handlePageChange}
+          replyUnreadCount={replyUnread.unreadCount}
         />
       </aside>
 
@@ -3534,6 +3535,15 @@ function App() {
             previewError={conversationPreviewError}
             onOpenChat={handleSelectContact}
             onViewProfile={handleOpenPeerProfile}
+            replies={replyUnread.replies}
+            onOpenReply={(parentPostId, replyPostId) => handleOpenConversation(
+              parentPostId,
+              replyPostId && allCachedPosts.some((post) => post.object.object_id === replyPostId)
+                ? replyPostId
+                : undefined
+            )}
+            onMarkReplyRead={replyUnread.markRead}
+            onMarkAllRepliesRead={replyUnread.markAllRead}
           />
         )}
 

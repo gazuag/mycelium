@@ -74,7 +74,7 @@ export function ConversationPage({
     contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author
   );
   const selectedAuthorName = displayNameOrFallback(
-    selectedContact?.displayName ?? post.authorDisplayName,
+    selectedContact?.displayName,
     selectedContact?.fingerprint ?? post.authorFingerprint
   );
 
@@ -95,7 +95,7 @@ export function ConversationPage({
       contact.fingerprint === currentPost.authorFingerprint || contact.publicKey === currentPost.object.author
     );
     return displayNameOrFallback(
-      matchingContact?.displayName ?? currentPost.authorDisplayName,
+      matchingContact?.displayName,
       matchingContact?.fingerprint ?? currentPost.authorFingerprint
     );
   };
