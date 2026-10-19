@@ -12,6 +12,7 @@ interface PostCardProps {
   onAuthorClick: (peerId: string) => void;
   onLike: () => void;
   onDislike: () => void;
+  onDelete?: (objectId: string) => void;
   onHide?: (objectId: string) => void;
   onReply: (content?: string, publishToDiscovery?: boolean) => void;
   onOpenPost?: () => void;
@@ -35,6 +36,7 @@ export function PostCard({
   onAuthorClick,
   onLike,
   onDislike,
+  onDelete,
   onHide,
   onReply,
   onOpenPost,
@@ -146,6 +148,16 @@ export function PostCard({
           ) : null}
           {showDislikeButton && !isLiked ? (
             <HideButton postId={post.object.object_id} onHide={onHide ?? (() => onDislike())} />
+          ) : null}
+          {isOwnPost && onDelete ? (
+            <button
+              className="post-delete-action"
+              onClick={() => onDelete(post.object.object_id)}
+              type="button"
+              aria-label="Delete your post"
+            >
+              Delete
+            </button>
           ) : null}
         </div>
         {footerActions ? <div className="post-footer-actions">{footerActions}</div> : null}

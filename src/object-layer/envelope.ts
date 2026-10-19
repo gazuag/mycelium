@@ -38,13 +38,58 @@ export async function createSignedObject(content: ObjectContent, identity: Objec
   }
 
   const canonicalContent = canonicalizeObjectContent(unsigned);
-  const objectId = await sha256(canonicalContent);
+  const contentHash = await sha256(canonicalContent);
+  const authorProof = await identity.sign(canonicalize({
+    domain: 'mycelium.object-author-proof.v2',
+    author: identity.publicKey,
+    content_hash: contentHash
+  }));
+  const objectId = await calculateAuthorBoundObjectId(identity.publicKey, contentHash);
   const signature = await identity.sign(canonicalContent);
   return {
     ...unsigned,
     object_id: objectId,
-    signature
+    signature,
+    object_id_version: 2,
+    content_hash: contentHash,
+    author_proof: authorProof
   };
+}
+
+export async function calculateAuthorBoundObjectId(
+  author: string,
+  contentHash: string
+): Promise<string> {
+  return sha256(canonicalize({
+    domain: 'mycelium.object-id.v2',
+    author,
+    content_hash: contentHash
+  }));
+}
+
+export async function verifyAuthorBoundObjectId(
+  author: string,
+  contentHash: string,
+  authorProof: string,
+  objectId: string,
+  verifySignature: ObjectSignatureVerifier = verifySignedString
+): Promise<boolean> {
+  if (!isHexSha256(objectId) || !isHexSha256(contentHash) || !author || !authorProof) return false;
+  const expectedId = await calculateAuthorBoundObjectId(author, contentHash);
+  if (expectedId !== objectId) return false;
+  try {
+    return await verifySignature(
+      author,
+      canonicalize({
+        domain: 'mycelium.object-author-proof.v2',
+        author,
+        content_hash: contentHash
+      }),
+      authorProof
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function createSignedRecommendationObject(
@@ -98,8 +143,26 @@ export async function validateDistributedObject(
   }
   const validatedObject = object as DistributedObject;
 
-  const expectedId = await calculateObjectId(validatedObject);
-  if (expectedId !== validatedObject.object_id) return false;
+  if (validatedObject.object_id_version === undefined) {
+    if (validatedObject.content_hash !== undefined || validatedObject.author_proof !== undefined) return false;
+    if (await calculateObjectId(validatedObject) !== validatedObject.object_id) return false;
+  } else if (validatedObject.object_id_version === 2) {
+    if (!isHexSha256(validatedObject.content_hash)
+      || typeof validatedObject.author_proof !== 'string'
+      || !validatedObject.author_proof) return false;
+    const canonicalContent = canonicalizeObjectContent(validatedObject);
+    const contentHash = await sha256(canonicalContent);
+    if (contentHash !== validatedObject.content_hash
+      || !(await verifyAuthorBoundObjectId(
+        validatedObject.author,
+        validatedObject.content_hash,
+        validatedObject.author_proof,
+        validatedObject.object_id,
+        verifySignature
+      ))) return false;
+  } else {
+    return false;
+  }
 
   try {
     return await verifySignature(validatedObject.author, canonicalizeObjectContent(validatedObject), validatedObject.signature);

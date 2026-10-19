@@ -26,6 +26,7 @@ export interface DmChatPageProps {
   myPeerId: string;
   onViewProfile: (peerId: string) => void;
   onBackToMessages?: () => void;
+  onDeleteMessage?: (objectId: string) => void;
 }
 
 export function shouldSendOnEnter(key: string, shiftKey: boolean): boolean {
@@ -55,7 +56,8 @@ export function DmChatPage({
   connectionText,
   myPeerId,
   onViewProfile,
-  onBackToMessages
+  onBackToMessages,
+  onDeleteMessage
 }: DmChatPageProps) {
   const { messages, loading, send, sending, canSend, noKey } = useDmConversation({
     counterparty,
@@ -126,24 +128,28 @@ export function DmChatPage({
         {!loading && messages.length === 0 && <p className="chat-empty">No messages yet.</p>}
         {messages.map((message) => (
           <div
-            className={`chat-message-row ${message.direction === 'out' ? 'mine' : 'theirs'}`}
+            className={`chat-message-row ${message.deleted ? 'deleted' : message.direction === 'out' ? 'mine' : 'theirs'}`}
             key={message.objectId}
           >
-            <button
-              className="chat-message-avatar"
-              type="button"
-              onClick={() => onViewProfile(message.direction === 'out' ? myPeerId : contact.fingerprint)}
-              aria-label={message.direction === 'out' ? 'View your profile' : `View ${displayName}'s profile`}
-            >
-              <IdentityAvatar
-                seed={message.direction === 'out' ? myPeerId : contact.fingerprint}
-                size={21}
-                alt=""
-                online={message.direction === 'in' && contact.online === true}
-              />
-            </button>
-            <div className={`chat-bubble ${message.direction === 'out' ? 'mine' : 'theirs'}`}>
-              {message.status === 'ok' && message.text !== null
+            {message.deleted ? null : (
+              <button
+                className="chat-message-avatar"
+                type="button"
+                onClick={() => onViewProfile(message.direction === 'out' ? myPeerId : contact.fingerprint)}
+                aria-label={message.direction === 'out' ? 'View your profile' : `View ${displayName}'s profile`}
+              >
+                <IdentityAvatar
+                  seed={message.direction === 'out' ? myPeerId : contact.fingerprint}
+                  size={21}
+                  alt=""
+                  online={message.direction === 'in' && contact.online === true}
+                />
+              </button>
+            )}
+            <div className={`chat-bubble ${message.deleted ? 'deleted' : message.direction === 'out' ? 'mine' : 'theirs'}`}>
+              {message.deleted
+                ? <p className="dm-message-deleted">[Deleted message]</p>
+                : message.status === 'ok' && message.text !== null
                 ? <p>{message.text}</p>
                 : <p className={`dm-message-placeholder ${message.status}`}>
                     {message.status === 'unverified'
@@ -158,6 +164,16 @@ export function DmChatPage({
                   <> · {message.delivery === 'pending' ? 'Waiting to send' : 'Attempted'}</>
                 )}
               </span>
+              {!message.deleted && message.direction === 'out' && onDeleteMessage ? (
+                <button
+                  className="chat-delete-message"
+                  type="button"
+                  onClick={() => onDeleteMessage(message.objectId)}
+                  aria-label="Delete your message"
+                >
+                  Delete
+                </button>
+              ) : null}
             </div>
           </div>
         ))}

@@ -942,19 +942,6 @@ body, html, #root {
   min-width: 0;
 }
 
-.follow-confirmation {
-  position: fixed;
-  z-index: 1000;
-  right: var(--space-4);
-  bottom: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-success-border);
-  border-radius: var(--radius-md);
-  background: var(--color-success-surface);
-  color: var(--color-success);
-  box-shadow: var(--shadow-card);
-}
-
 .messages-page {
   gap: var(--space-3);
 }
@@ -1688,6 +1675,15 @@ button.post-reply-count:focus-visible {
   padding: 0.85rem 0.25rem;
 }
 
+.conversation-deleted-post {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.25rem 0.65rem 3.15rem;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
 .conversation-posts .post-card-header,
 .conversation-posts .post-author-line {
   display: contents;
@@ -2252,6 +2248,10 @@ button.post-reply-count:focus-visible {
   flex-direction: row;
 }
 
+.chat-message-row.deleted {
+  justify-content: center;
+}
+
 .chat-message-row .chat-bubble {
   max-width: min(85%, calc(100% - 1.75rem));
   min-width: 0;
@@ -2270,11 +2270,32 @@ button.post-reply-count:focus-visible {
   background: var(--color-surface-muted);
 }
 
+.chat-bubble.deleted {
+  padding: 0.65rem 0.9rem;
+  background: var(--color-surface-subtle);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.dm-message-deleted {
+  margin: 0;
+}
+
 .chat-timestamp {
   display: block;
   margin-top: 0.5rem;
   font-size: 0.8rem;
   opacity: 0.75;
+}
+
+.chat-delete-message {
+  display: block;
+  margin-top: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
 }
 
 /* Chat page — fills page-content and manages its own scroll */

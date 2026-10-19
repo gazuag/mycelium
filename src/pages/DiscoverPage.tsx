@@ -24,6 +24,7 @@ interface DiscoverPageProps {
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
   onHide?: (objectId: string) => void;
+  onDelete?: (objectId: string) => void;
   onBlock: (peerId: string) => void;
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
@@ -56,6 +57,7 @@ export function DiscoverPage({
   onLike,
   onDislike,
   onHide,
+  onDelete,
   onBlock,
   getRecommendationSummary
 }: DiscoverPageProps) {
@@ -202,6 +204,7 @@ export function DiscoverPage({
                   onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                   onLike={() => onLike(post.object.object_id)}
                   onDislike={() => onDislike(post.object.object_id)}
+                  onDelete={onDelete}
                   onReply={() => {} }
                   isLiked={recommendationSummary.recommended_by_me}
                   isOwnPost={authorFingerprint === myPeerId || post.object.author === myPublicKey}

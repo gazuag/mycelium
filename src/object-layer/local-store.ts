@@ -1,14 +1,16 @@
-import type { DistributedObject, LocalPostMetadata, LocalPostMetadataStore, ObjectCriteria, ObjectStore, RecommendationSequenceStore } from './types';
+import type { DeletionAwareObjectStore, DeletionTombstone, DistributedObject, LocalPostMetadata, LocalPostMetadataStore, ObjectCriteria, ObjectStore, RecommendationSequenceStore } from './types';
 import { isObjectExpired, validateDistributedObject } from './envelope';
 
 const DATABASE_NAME = 'mycelium_objects';
-const DATABASE_VERSION = 5;
+const DATABASE_VERSION = 6;
 const OBJECT_STORE_NAME = 'objects';
+const DELETION_TOMBSTONE_STORE_NAME = 'deletion_tombstones';
 const RECIPIENT_CREATED_AT_INDEX = 'recipient_created_at';
 const LOCAL_POST_METADATA_STORE_NAME = 'local_post_metadata';
 const RECOMMENDATION_SEQUENCE_STORE_NAME = 'recommendation_sequences';
 const OUTBOX_STORE_NAME = 'outbox';
 const DEFAULT_OUTBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DELETION_TOMBSTONE_GC_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface OutboxEntry {
   readonly object_id: string;
@@ -31,7 +33,7 @@ export interface OutboxStore {
   pruneExpired(now: Date): Promise<number>;
 }
 
-export class IndexedDbObjectStore implements ObjectStore {
+export class IndexedDbObjectStore implements DeletionAwareObjectStore {
   private readonly getDatabase = createObjectDatabaseAccessor();
   private get databasePromise(): Promise<IDBDatabase> {
     return this.getDatabase();
@@ -43,24 +45,64 @@ export class IndexedDbObjectStore implements ObjectStore {
     }
     const database = await this.getDatabase();
     return new Promise((resolve, reject) => {
-      const transaction = database.transaction(OBJECT_STORE_NAME, 'readwrite');
+      const transaction = database.transaction(
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        'readwrite'
+      );
       const store = transaction.objectStore(OBJECT_STORE_NAME);
-      const request = store.get(object.object_id);
-      let existed = false;
-      request.onsuccess = () => {
-        existed = request.result !== undefined;
-        store.put(object);
+      const tombstones = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      let admitted = false;
+      const targetTombstone = tombstones.get(object.object_id);
+      targetTombstone.onsuccess = () => {
+        if (targetTombstone.result !== undefined) return;
+        const replyPostId = getReplyPostId(object);
+        if (replyPostId) {
+          const replyTombstone = tombstones.get(replyPostId);
+          replyTombstone.onsuccess = () => {
+            if (replyTombstone.result !== undefined) return;
+            putIfNotPresent();
+          };
+          replyTombstone.onerror = () => reject(replyTombstone.error);
+          return;
+        }
+        putIfNotPresent();
       };
-      request.onerror = () => reject(request.error);
-      transaction.oncomplete = () => resolve(!existed);
+      targetTombstone.onerror = () => reject(targetTombstone.error);
+      transaction.oncomplete = () => resolve(admitted);
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+
+      function putIfNotPresent() {
+        const existing = store.get(object.object_id);
+        existing.onsuccess = () => {
+          if (existing.result !== undefined) return;
+          admitted = true;
+          store.put(object);
+        };
+        existing.onerror = () => reject(existing.error);
+      }
     });
   }
 
   async get(objectId: string): Promise<DistributedObject | null> {
     const database = await this.getDatabase();
-    const object = await runRequest<DistributedObject | undefined>(database, 'readonly', (store) => store.get(objectId));
+    const object = await new Promise<DistributedObject | undefined>((resolve, reject) => {
+      const transaction = database.transaction(
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        'readonly'
+      );
+      const objectRequest = transaction.objectStore(OBJECT_STORE_NAME).get(objectId);
+      const tombstoneRequest = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME).get(objectId);
+      let objectResult: DistributedObject | undefined;
+      let isDeleted = false;
+      objectRequest.onsuccess = () => { objectResult = objectRequest.result as DistributedObject | undefined; };
+      tombstoneRequest.onsuccess = () => { isDeleted = tombstoneRequest.result !== undefined; };
+      objectRequest.onerror = () => reject(objectRequest.error);
+      tombstoneRequest.onerror = () => reject(tombstoneRequest.error);
+      transaction.oncomplete = () => resolve(isDeleted ? undefined : objectResult);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+    });
     if (object && isObjectExpired(object)) {
       await this.delete(objectId);
       return null;
@@ -75,13 +117,39 @@ export class IndexedDbObjectStore implements ObjectStore {
 
   async query(criteria: ObjectCriteria = {}): Promise<DistributedObject[]> {
     const database = await this.getDatabase();
-    const objects = await runRequest<DistributedObject[]>(database, 'readonly', (store) => {
-      if (criteria.recipient === undefined) return store.getAll();
-      const range = IDBKeyRange.bound([criteria.recipient, ''], [criteria.recipient, '\uffff']);
-      return store.index(RECIPIENT_CREATED_AT_INDEX).getAll(range);
+    const { objects, tombstones } = await new Promise<{
+      objects: DistributedObject[];
+      tombstones: DeletionTombstone[];
+    }>((resolve, reject) => {
+      const transaction = database.transaction(
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        'readonly'
+      );
+      const objectStore = transaction.objectStore(OBJECT_STORE_NAME);
+      const objectRequest = criteria.recipient === undefined
+        ? objectStore.getAll()
+        : objectStore.index(RECIPIENT_CREATED_AT_INDEX).getAll(
+          IDBKeyRange.bound([criteria.recipient, ''], [criteria.recipient, '\uffff'])
+        );
+      const tombstoneRequest = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME).getAll();
+      let resultObjects: DistributedObject[] = [];
+      let resultTombstones: DeletionTombstone[] = [];
+      objectRequest.onsuccess = () => {
+        resultObjects = objectRequest.result as DistributedObject[];
+      };
+      tombstoneRequest.onsuccess = () => {
+        resultTombstones = tombstoneRequest.result as DeletionTombstone[];
+      };
+      objectRequest.onerror = () => reject(objectRequest.error);
+      tombstoneRequest.onerror = () => reject(tombstoneRequest.error);
+      transaction.oncomplete = () => resolve({ objects: resultObjects, tombstones: resultTombstones });
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
     });
+    const deletedIds = new Set(tombstones.map((tombstone) => tombstone.target_object_id));
     const { recipient, created_after, created_before, since, order, limit, ...exactCriteria } = criteria;
     const matching = objects.filter((object) => {
+      if (deletedIds.has(object.object_id) || (getReplyPostId(object) && deletedIds.has(getReplyPostId(object)!))) return false;
       if (!Object.entries(exactCriteria).every(([key, expected]) => object[key as keyof DistributedObject] === expected)) return false;
       const createdAt = new Date(object.created_at).getTime();
       if (created_after && createdAt < new Date(created_after).getTime()) return false;
@@ -101,6 +169,84 @@ export class IndexedDbObjectStore implements ObjectStore {
       results.sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
     }
     return limit === undefined ? results : results.slice(0, limit);
+  }
+
+  async getDeletionTombstone(targetObjectId: string): Promise<DeletionTombstone | null> {
+    const database = await this.getDatabase();
+    const tombstone = await runRequest<DeletionTombstone | undefined>(
+      database,
+      'readonly',
+      (store) => store.get(targetObjectId),
+      DELETION_TOMBSTONE_STORE_NAME
+    );
+    return tombstone ?? null;
+  }
+
+  async queryDeletionTombstones(): Promise<DeletionTombstone[]> {
+    const database = await this.getDatabase();
+    return runRequest<DeletionTombstone[]>(
+      database,
+      'readonly',
+      (store) => store.getAll(),
+      DELETION_TOMBSTONE_STORE_NAME
+    );
+  }
+
+  async applyDeletionTombstone(tombstone: DeletionTombstone): Promise<boolean> {
+    if (!isValidDeletionTombstone(tombstone)) throw new Error('Invalid deletion tombstone');
+    const database = await this.getDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        'readwrite'
+      );
+      const objectStore = transaction.objectStore(OBJECT_STORE_NAME);
+      const tombstoneStore = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      const existing = tombstoneStore.get(tombstone.target_object_id);
+      let applied = false;
+      existing.onsuccess = () => {
+        if (existing.result !== undefined) return;
+        applied = true;
+        tombstoneStore.put(tombstone);
+        objectStore.delete(tombstone.target_object_id);
+        const relatedReplies = objectStore.getAll();
+        relatedReplies.onsuccess = () => {
+          for (const object of relatedReplies.result as DistributedObject[]) {
+            if (getReplyPostId(object) === tombstone.target_object_id) {
+              objectStore.delete(object.object_id);
+            }
+          }
+        };
+        relatedReplies.onerror = () => reject(relatedReplies.error);
+      };
+      existing.onerror = () => reject(existing.error);
+      transaction.oncomplete = () => resolve(applied);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+    });
+  }
+
+  async collectDeletionTombstones(now: Date): Promise<number> {
+    const database = await this.getDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(DELETION_TOMBSTONE_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      const request = store.getAll();
+      let removed = 0;
+      request.onsuccess = () => {
+        for (const tombstone of request.result as DeletionTombstone[]) {
+          const reclaimAfter = Date.parse(tombstone.propagation_expires_at) + DELETION_TOMBSTONE_GC_GRACE_MS;
+          if (reclaimAfter <= now.getTime()) {
+            store.delete(tombstone.target_object_id);
+            removed += 1;
+          }
+        }
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve(removed);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+    });
   }
 }
 
@@ -254,6 +400,9 @@ function openObjectDatabase(onConnectionClosed: () => void): Promise<IDBDatabase
       if (!request.result.objectStoreNames.contains(OUTBOX_STORE_NAME)) {
         request.result.createObjectStore(OUTBOX_STORE_NAME, { keyPath: 'object_id' });
       }
+      if (!request.result.objectStoreNames.contains(DELETION_TOMBSTONE_STORE_NAME)) {
+        request.result.createObjectStore(DELETION_TOMBSTONE_STORE_NAME, { keyPath: 'target_object_id' });
+      }
     };
     request.onblocked = () => {
       console.warn('IndexedDB upgrade is blocked by another open connection.');
@@ -271,6 +420,25 @@ function openObjectDatabase(onConnectionClosed: () => void): Promise<IDBDatabase
       reject(request.error);
     };
   });
+}
+
+function getReplyPostId(object: DistributedObject): string | null {
+  if (object.object_type !== 'mycelium.reply'
+    || !object.payload || typeof object.payload !== 'object' || Array.isArray(object.payload)) return null;
+  const postId = object.payload.reply_post_id;
+  return typeof postId === 'string' && /^[0-9a-f]{64}$/.test(postId) ? postId : null;
+}
+
+function isValidDeletionTombstone(value: DeletionTombstone): boolean {
+  return /^[0-9a-f]{64}$/.test(value.target_object_id)
+    && /^[0-9a-f]{64}$/.test(value.delete_request_id)
+    && (value.target_object_type === 'mycelium.post' || value.target_object_type === 'mycelium.dm')
+    && typeof value.target_author === 'string' && value.target_author.length > 0
+    && Number.isFinite(Date.parse(value.target_created_at))
+    && Number.isFinite(Date.parse(value.propagation_expires_at))
+    && Number.isFinite(Date.parse(value.deleted_at))
+    && (value.target_recipient === undefined
+      || (typeof value.target_recipient === 'string' && value.target_recipient.length > 0));
 }
 
 function runRequest<T = unknown>(database: IDBDatabase, mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest, storeName = OBJECT_STORE_NAME): Promise<T> {

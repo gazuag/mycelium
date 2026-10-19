@@ -1,5 +1,6 @@
 import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from '../p2p/protocol';
 import { isObjectExpired, validateDistributedObject, validateObject } from './envelope';
+import { acceptDeleteRequest, isDeleteRequest, isDeletionAwareObjectStore } from './deletion';
 import { ensurePostChainCached, type PostParentResolver } from './post-ancestry';
 import type { DistributedObject, FindPacket, FindQueryCriteria, FindResponsePacket, FeedPageMetadata, ObjectBatchPacket, ObjectPacket, ObjectStore, ObjectStorePacket, ObjectTransport } from './types';
 
@@ -202,7 +203,7 @@ export async function receiveObjectPacket(
   if (!(await validateObject(object))) return false;
 
   const distributedObject = object as DistributedObject;
-  const stored = await store.put(distributedObject);
+  const stored = await storeReceivedObject(distributedObject, store);
   if (distributedObject.object_type === 'mycelium.post' && resolvePostParent) {
     const chain = await ensurePostChainCached(distributedObject, store, resolvePostParent);
     if (!chain.complete || chain.storageFailures.length > 0) {
@@ -227,7 +228,7 @@ export async function receiveObjectBatchPacket(
       continue;
     }
     const distributedObject = object as DistributedObject;
-    const stored = await store.put(distributedObject);
+    const stored = await storeReceivedObject(distributedObject, store);
     if (distributedObject.object_type === 'mycelium.post' && resolvePostParent) {
       const chain = await ensurePostChainCached(distributedObject, store, resolvePostParent);
       if (!chain.complete || chain.storageFailures.length > 0) {
@@ -253,7 +254,7 @@ export async function receiveAndReplicate(
   if (!value || typeof value !== 'object' || Array.isArray(value) || !(await validateObject(value))) return false;
 
   const object = value as DistributedObject;
-  const stored = await store.put(object);
+  const stored = await storeReceivedObject(object, store);
   if (!stored && object.object_type !== 'mycelium.post') return false;
 
   let objectsToReplicate = [object];
@@ -310,14 +311,23 @@ export async function receiveBatchAndReplicate(
   return storedFlags;
 }
 
-export async function receiveFindResponsePacket(packet: unknown, store: ObjectStore, expectedRequestId?: string): Promise<DistributedObject | null> {
+export async function receiveFindResponsePacket(
+  packet: unknown,
+  store: ObjectStore,
+  expectedRequestId?: string,
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
+): Promise<DistributedObject | null> {
   if (!isMyceliumPacket(packet) || packet.type !== 'FIND_RESPONSE') return null;
   if (typeof packet.payload?.requestId !== 'string' || (expectedRequestId && packet.payload.requestId !== expectedRequestId)) return null;
   const object = packet.payload?.object;
   if (!object || typeof object !== 'object' || Array.isArray(object)) return null;
   if (typeof packet.payload?.object_id !== 'string' || packet.payload.object_id !== (object as DistributedObject).object_id) return null;
   if (!(await validateObject(object))) return null;
-  await store.put(object as DistributedObject);
+  const distributedObject = object as DistributedObject;
+  if (isDeletionAwareObjectStore(store)
+    && await store.getDeletionTombstone(distributedObject.object_id)) return null;
+  if (!(await storeReceivedObject(distributedObject, store))) return null;
+  if (isDeleteRequest(distributedObject)) await onAcceptedDeleteRequest?.(distributedObject);
   return object as DistributedObject;
 }
 
@@ -773,9 +783,10 @@ export function findObject(
   objectId: string,
   transport: ObjectTransport,
   store: ObjectStore,
-  ttl = 2
+  ttl = 2,
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
 ): Promise<DistributedObject | null> {
-  return resolveFindRequest(sender, peerId, objectId, ttl, transport, store);
+  return resolveFindRequest(sender, peerId, objectId, ttl, transport, store, onAcceptedDeleteRequest);
 }
 
 // Target number of useful live replicas to aim for when an object's replication_policy omits an explicit budget.
@@ -894,7 +905,8 @@ export async function findObjects(
   transport: ObjectTransport,
   store: ObjectStore,
   ttl = 1,
-  gracePeriodMs = FIND_GRACE_PERIOD_MS
+  gracePeriodMs = FIND_GRACE_PERIOD_MS,
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
 ): Promise<DistributedObject[]> {
   const requestedObjectIds = [...new Set(objectIds)];
   if (requestedObjectIds.length > MAX_FIND_REQUEST_OBJECT_IDS) {
@@ -905,14 +917,21 @@ export async function findObjects(
     throw new Error('Invalid FIND object IDs');
   }
   if (!Number.isSafeInteger(ttl) || ttl < 0) throw new Error('Invalid FIND TTL');
-  const requestPacket = await buildFindPacket(sender, peerId, requestedObjectIds, undefined, undefined, ttl, sender);
-  const deadlineMs = Date.parse(requestPacket.payload.expiresAt);
   const results = new Map<string, DistributedObject>();
   for (const objectId of requestedObjectIds) {
+    if (isDeletionAwareObjectStore(store) && await store.getDeletionTombstone(objectId)) continue;
     const object = await store.get(objectId);
     if (object && await validateObject(object)) results.set(objectId, object);
   }
-  if (results.size === requestedObjectIds.length) return [...results.values()];
+  const requestableIds: string[] = [];
+  for (const objectId of requestedObjectIds) {
+    if (!isDeletionAwareObjectStore(store) || !(await store.getDeletionTombstone(objectId))) {
+      requestableIds.push(objectId);
+    }
+  }
+  if (results.size === requestedObjectIds.length || requestableIds.length === 0) return [...results.values()];
+  const requestPacket = await buildFindPacket(sender, peerId, requestableIds, undefined, undefined, ttl, sender);
+  const deadlineMs = Date.parse(requestPacket.payload.expiresAt);
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -922,15 +941,31 @@ export async function findObjects(
       clearTimeout(graceTimer);
       clearTimeout(deadlineTimer);
       unsubscribe();
-      for (const object of results.values()) await store.put(object);
+      for (const object of results.values()) {
+        if (isDeleteRequest(object)) {
+          const stored = await storeReceivedObject(object, store);
+          if (stored && isDeletionAwareObjectStore(store)) {
+            await replicateObject(sender, object, transport, undefined, new Set([peerId]));
+            await onAcceptedDeleteRequest?.(object);
+          }
+        } else if (!isDeletionAwareObjectStore(store)
+          || !(await store.getDeletionTombstone(object.object_id))) {
+          await store.put(object);
+        }
+      }
       resolve([...results.values()]);
     };
     const unsubscribe = transport.onPacket((responsePeerId, packet) => {
       if (settled || responsePeerId !== peerId || packet.type !== 'FIND_RESPONSE') return;
-      void validateFindResponseObjects(packet, requestPacket.payload.requestId, new Set(requestedObjectIds)).then(async (objects) => {
+      void validateFindResponseObjects(packet, requestPacket.payload.requestId, new Set(requestableIds)).then(async (objects) => {
+        const nonDeleted = [];
+        for (const object of objects) {
+          if (!isDeletionAwareObjectStore(store)
+            || !(await store.getDeletionTombstone(object.object_id))) nonDeleted.push(object);
+        }
         console.debug(`PHASE6 ORIGIN RESPONSE RX local=${sender} from=${responsePeerId} requestId=${requestPacket.payload.requestId} objects=${objects.length} objectIds=${objects.map((object) => object.object_id).join(',') || 'none'}`);
-        for (const object of objects) results.set(object.object_id, object);
-        if (results.size === requestedObjectIds.length || Date.now() >= deadlineMs) {
+        for (const object of nonDeleted) results.set(object.object_id, object);
+        if (results.size === requestableIds.length || Date.now() >= deadlineMs) {
           console.debug(`PHASE6 ORIGIN COMPLETE local=${sender} requestId=${requestPacket.payload.requestId} results=${results.size} objectIds=${[...results.values()].map((object) => object.object_id).join(',') || 'none'}`);
           await finish();
         }
@@ -955,11 +990,13 @@ async function resolveFindRequest(
   objectId: string,
   ttl: number,
   transport: ObjectTransport,
-  store: ObjectStore
+  store: ObjectStore,
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
 ): Promise<DistributedObject | null> {
   if (!Number.isSafeInteger(ttl) || ttl < 0) {
     throw new Error('Invalid FIND TTL');
   }
+  if (isDeletionAwareObjectStore(store) && await store.getDeletionTombstone(objectId)) return null;
   const requestPacket = await buildFindPacket(sender, peerId, objectId, undefined, undefined, ttl, sender);
   const requestDeadlineMs = Date.parse(requestPacket.payload.expiresAt);
   const requestWithTtl = { ...requestPacket, payload: { ...requestPacket.payload, ttl } };
@@ -991,11 +1028,21 @@ async function resolveFindRequest(
       clearTimeout(expirationTimer);
       unsubscribe();
       void validateObject(object).then(async (valid) => {
-        if (!valid) {
+        if (!valid || (isDeletionAwareObjectStore(store)
+          && await store.getDeletionTombstone(objectId))) {
           resolve(null);
           return;
         }
-        await store.put(object);
+        if (isDeleteRequest(object)) {
+          if (!(await storeReceivedObject(object, store))) {
+            resolve(null);
+            return;
+          }
+          await replicateObject(sender, object, transport, undefined, new Set([peerId]));
+          await onAcceptedDeleteRequest?.(object);
+        } else {
+          await store.put(object);
+        }
         resolve(object);
       }).catch(reject);
     });
@@ -1011,6 +1058,7 @@ async function resolveFindRequest(
       resolve(null);
       return;
     }
+
     void transport.send(peerId, requestWithTtl).catch((error) => {
       if (settled) return;
       settled = true;
@@ -1019,4 +1067,11 @@ async function resolveFindRequest(
       reject(error);
     });
   });
+}
+
+async function storeReceivedObject(object: DistributedObject, store: ObjectStore): Promise<boolean> {
+  if (isDeleteRequest(object)) {
+    return isDeletionAwareObjectStore(store) && await acceptDeleteRequest(object, store);
+  }
+  return store.put(object);
 }

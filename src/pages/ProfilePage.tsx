@@ -28,6 +28,7 @@ interface ProfilePageProps {
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
   onHide?: (objectId: string) => void;
+  onDelete?: (objectId: string) => void;
   notice?: string | null;
   isOwnProfile?: boolean;
   profileSettings?: React.ReactNode;
@@ -54,6 +55,7 @@ export function ProfilePage({
   onLike,
   onDislike,
   onHide,
+  onDelete,
   notice,
   isOwnProfile = false,
   profileSettings,
@@ -175,9 +177,12 @@ export function ProfilePage({
                 onLike={() => onLike(post.object.object_id)}
                 onDislike={() => onDislike(post.object.object_id)}
                 onHide={onHide}
+                onDelete={onDelete}
                 onReply={() => {} }
                 isLiked={recommendationSummary.recommended_by_me}
-                isOwnPost={isOwnProfile}
+                isOwnPost={isOwnProfile && (
+                  post.authorFingerprint === myPeerId || post.object.author === contact.publicKey
+                )}
               />;
             })}
           </div>

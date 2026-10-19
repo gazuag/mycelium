@@ -80,7 +80,9 @@ The object ID and signature use the same canonical immutable content, excluding 
         -> canonical serialization
         -> author signature -> signature
 
-The signature is envelope metadata and is not part of the object ID. The object ID is not part of the signed content. Consequently, changing only the signature does not change the object ID, while changing any immutable content requires both a new object ID and a new valid signature.
+Legacy objects use the content hash directly as their object ID. New objects use object-ID version 2: `content_hash` is the hash of the canonical immutable content, and `object_id` is the hash of a domain-separated record containing the author public key and `content_hash`. The author also signs a domain-separated author proof over that same author and content hash. Receivers validate the proof, ID, content hash, and normal object signature. The proof is carried in the envelope as `author_proof`, but is not part of the ID, so signatures with randomized encodings do not make identical authored content acquire different IDs.
+
+Legacy IDs do not independently prove authorship when the target content is unavailable. A legacy object can be deleted only when the receiver has the target locally and can validate its author and signature. Version-2 objects can be authorized for deletion before the target arrives by verifying the author proof included in the Delete Request.
 
 ## Object Transport (Initial)
 
@@ -142,6 +144,20 @@ A peer may store an object as a replica and/or relay it to other peers.
 Objects should be treated as immutable. If an application needs to change information, it should normally create a new object referencing the previous object.
 
 This makes deduplication and caching straightforward.
+
+## Delete Requests and tombstones
+
+`mycelium.delete-request` is a signed generic object with the command `delete`. Its payload identifies the target ID, object type, author, creation time, and (for direct messages) recipient. For version-2 targets it also carries the target content hash and author proof. The Delete Request itself has a three-day expiry and a high replication budget; it uses the existing object transport, replication, object store, and outbox paths rather than a separate deletion network.
+
+A receiver validates the Delete Request signature and expiry, then verifies that its signer is the target author. For version-2 targets, the author proof must validate the target ID; for legacy targets, the stored target object must be present and independently validate. Requests that fail any of these checks are not authoritative.
+
+On first acceptance, a peer stores a minimal local tombstone keyed by the target object ID and removes the target from ordinary object storage. Admission checks tombstones before storing an object, so a later copy cannot resurrect it. FIND and local object queries also suppress tombstoned targets. A repeated copy of the same request is deduplicated by its object ID and existing tombstone; it does not trigger repeated deletion or forwarding.
+
+The tombstone is local deletion state, not the Delete Request's propagation lease. Expiry of the request stops active replication and removes the request through ordinary lazy object expiry, but does not remove the tombstone. Tombstones contain only the target ID, type, author, timestamp, optional recipient, and deletion-request metadata; they do not retain the deleted payload. The UI may derive a subdued post or chat placeholder from a tombstone and surviving reply/conversation references, without creating another replicated placeholder object.
+
+There is no capacity-based object garbage collector in the current implementation. Tombstones remain during normal operation and are eligible for local collection only after the request's propagation expiry plus a 30-day safety grace. The application runs this collection at startup and daily. Collection may allow old circulating copies to reappear afterward; deletion is not globally guaranteed, and peers that never receive or honor a request are unaffected.
+
+Once a tombstone is collected, the local system no longer has authoritative evidence to render a deletion placeholder or reject a later copy. A missing parent then appears as unavailable rather than deleted, and an old target copy may be admitted again.
 
 ## 6. Replication
 

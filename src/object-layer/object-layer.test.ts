@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString } from '../crypto/identity';
-import { canonicalizeObjectContent, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
+import { canonicalizeObjectContent, calculateAuthorBoundObjectId, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
 import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
@@ -63,7 +63,8 @@ describe('distributed object foundation', () => {
 
     const object = await createSignedObject(content, identity);
     expect(object.author).toBe(publicKey);
-    expect(object.object_id).toBe(await calculateObjectId({ ...content, author: publicKey }));
+    expect(object.content_hash).toBe(await calculateObjectId({ ...content, author: publicKey }));
+    expect(object.object_id).toBe(await calculateAuthorBoundObjectId(publicKey, object.content_hash ?? ''));
     expect(await validateObject(object, identity)).toBe(true);
     expect(await validateObject({ ...object, payload: { value: 'changed' } }, identity)).toBe(false);
     expect(await validateObject({ ...object, object_id: '0'.repeat(64) }, identity)).toBe(false);

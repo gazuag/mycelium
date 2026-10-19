@@ -431,6 +431,60 @@ describe('conversation read model', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps a deleted message in its original chronological position without restoring its content', async () => {
+    const identity = identityForKeys('me-key');
+    const tombstone = {
+      target_object_id: 'deleted-message',
+      target_object_type: 'mycelium.dm' as const,
+      target_author: 'alice-key',
+      target_created_at: '2026-10-01T12:00:00.000Z',
+      target_recipient: 'me-key',
+      delete_request_id: 'delete-request',
+      propagation_expires_at: '2026-10-04T12:00:00.000Z',
+      deleted_at: '2026-10-01T13:00:00.000Z'
+    };
+    const baseStore = createMemoryStore([
+      stubDm('before', 'alice-key', 'me-key', '2026-10-01T11:00:00.000Z'),
+      stubDm('after', 'alice-key', 'me-key', '2026-10-01T14:00:00.000Z')
+    ]);
+    const store = Object.assign(baseStore, {
+      getDeletionTombstone: async () => tombstone,
+      queryDeletionTombstones: async () => [tombstone],
+      applyDeletionTombstone: async () => true,
+      collectDeletionTombstones: async () => 0
+    });
+    const messages = await loadConversation({
+      store,
+      identity,
+      counterparty: 'alice-key',
+      resolveSenderEncryptionKey: () => null,
+      getOutboxEntry: async () => null
+    });
+
+    expect(messages.map(({ objectId }) => objectId)).toEqual([
+      'before',
+      'deleted-message',
+      'after'
+    ]);
+    expect(messages[1]).toMatchObject({
+      deleted: true,
+      status: 'ok',
+      text: null,
+      createdAt: tombstone.target_created_at
+    });
+    expect(JSON.stringify(messages[1])).not.toContain('ciphertext-deleted-message');
+    expect(new Set(Object.keys(tombstone))).toEqual(new Set([
+      'deleted_at',
+      'delete_request_id',
+      'propagation_expires_at',
+      'target_author',
+      'target_created_at',
+      'target_object_id',
+      'target_object_type',
+      'target_recipient'
+    ]));
+  });
+
   it('does not log or persist plaintext, key material, or ciphertext during a real open', async () => {
     const author = await createIdentity('hygiene-author');
     const recipient = await createIdentity('hygiene-recipient');

@@ -112,7 +112,7 @@ afterEach(() => {
 });
 
 describe('IndexedDbOutboxStore and outbox service', () => {
-  it('upgrades mycelium_objects v4 to v5 while preserving existing stores, indexes, and data', async () => {
+  it('upgrades mycelium_objects v4 to v6 while preserving existing stores, indexes, and data', async () => {
     const request = indexedDB.open('mycelium_objects', 4);
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       request.onupgradeneeded = () => {
@@ -138,7 +138,7 @@ describe('IndexedDbOutboxStore and outbox service', () => {
 
     const outbox = new IndexedDbOutboxStore();
     await outbox.add(makeEntry('upgrade-check', NOW));
-    const upgradedRequest = indexedDB.open('mycelium_objects', 5);
+    const upgradedRequest = indexedDB.open('mycelium_objects', 6);
     const upgraded = await new Promise<IDBDatabase>((resolve, reject) => {
       upgradedRequest.onsuccess = () => resolve(upgradedRequest.result);
       upgradedRequest.onerror = () => reject(upgradedRequest.error);
@@ -147,6 +147,7 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     expect(upgraded.objectStoreNames.contains('local_post_metadata')).toBe(true);
     expect(upgraded.objectStoreNames.contains('recommendation_sequences')).toBe(true);
     expect(upgraded.objectStoreNames.contains('outbox')).toBe(true);
+    expect(upgraded.objectStoreNames.contains('deletion_tombstones')).toBe(true);
     const indexNames = [...upgraded.transaction('objects').objectStore('objects').indexNames];
     expect(indexNames).toContain('recipient_created_at');
     const preserved = await new Promise<Record<string, unknown>>((resolve, reject) => {

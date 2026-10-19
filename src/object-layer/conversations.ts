@@ -1,8 +1,9 @@
 import { isObjectExpired } from './envelope';
+import { isDeletionAwareObjectStore } from './deletion';
 import * as dmInbox from './dm-inbox';
 import type { DmObjectIdentity } from './dm-object';
 import type { SenderEncryptionKeyResolver } from './dm-inbox';
-import type { DistributedObject, ObjectStore } from './types';
+import type { DeletionTombstone, DistributedObject, ObjectStore } from './types';
 
 export type ConversationDirection = 'in' | 'out';
 export type ConversationMessageStatus = 'ok' | 'unverified' | 'key_changed' | 'invalid';
@@ -21,6 +22,7 @@ export interface ConversationMessage {
   readonly createdAt: string;
   readonly status: ConversationMessageStatus;
   readonly text: string | null;
+  readonly deleted?: true;
   readonly delivery?: 'pending' | 'attempted';
 }
 
@@ -49,6 +51,9 @@ export async function listConversations({
 }): Promise<ConversationSummary[]> {
   const objects = await dmInbox.listDmsForIdentity({ store, myPublicKey });
   const groups = new Map<string, DistributedObject[]>();
+  const tombstones = isDeletionAwareObjectStore(store)
+    ? (await store.queryDeletionTombstones()).filter((item) => item.target_object_type === 'mycelium.dm')
+    : [];
 
   for (const object of objects) {
     const counterparty = object.author === myPublicKey ? object.recipient : object.author;
@@ -58,7 +63,7 @@ export async function listConversations({
     groups.set(counterparty, group);
   }
 
-  return [...groups.entries()]
+  const summaries = [...groups.entries()]
     .map(([counterparty, messages]) => {
       const newest = [...messages].sort(compareNewestFirst)[0];
       return {
@@ -68,7 +73,30 @@ export async function listConversations({
         lastDirection: directionFor(newest, myPublicKey),
         count: messages.length
       };
-    })
+    });
+  const summaryByPeer = new Map(summaries.map((summary) => [summary.counterparty, summary]));
+  for (const tombstone of tombstones) {
+    const counterparty = tombstone.target_author === myPublicKey
+      ? tombstone.target_recipient
+      : tombstone.target_author;
+    if (!counterparty || counterparty === myPublicKey) continue;
+    const previous = summaryByPeer.get(counterparty);
+    const isNewer = !previous
+      || Date.parse(tombstone.target_created_at) > Date.parse(previous.lastAt)
+      || (tombstone.target_created_at === previous.lastAt
+        && tombstone.target_object_id.localeCompare(previous.lastObjectId) > 0);
+    summaryByPeer.set(counterparty, {
+      counterparty,
+      lastAt: isNewer ? tombstone.target_created_at : previous.lastAt,
+      lastObjectId: isNewer ? tombstone.target_object_id : previous.lastObjectId,
+      lastDirection: isNewer
+        ? tombstone.target_author === myPublicKey ? 'out' : 'in'
+        : previous.lastDirection,
+      count: (previous?.count ?? 0) + 1
+    });
+  }
+
+  return [...summaryByPeer.values()]
     .sort((left, right) => (
       Date.parse(right.lastAt) - Date.parse(left.lastAt)
       || right.lastObjectId.localeCompare(left.lastObjectId)
@@ -163,12 +191,23 @@ export async function loadConversation({
   const ordered = objects.sort(compareOldestFirst);
   const startIndex = Math.max(0, ordered.length - Math.max(0, Math.trunc(limit)));
   const newest = ordered.slice(startIndex);
-  return await Promise.all(newest.map((object) => buildMessage({
+  const messages = await Promise.all(newest.map((object) => buildMessage({
     object,
     identity,
     resolveSenderEncryptionKey,
     getOutboxEntry
   })));
+  messages.push(...(await conversationTombstones(store, identity.publicKey, counterparty)).map((item) => ({
+    objectId: item.target_object_id,
+    direction: item.target_author === identity.publicKey ? 'out' as const : 'in' as const,
+    createdAt: item.target_created_at,
+    status: 'ok' as const,
+    text: null,
+    deleted: true as const
+  })));
+  return messages
+    .sort(compareMessagesOldestFirst)
+    .slice(-Math.max(0, Math.trunc(limit)));
 }
 
 export async function previewConversation(
@@ -177,8 +216,39 @@ export async function previewConversation(
   const { store, identity, counterparty, resolveSenderEncryptionKey, getOutboxEntry } = options;
   const objects = await getConversationObjects(store, identity.publicKey, counterparty);
   const newest = objects.sort(compareNewestFirst)[0];
+  const newestTombstone = (await conversationTombstones(store, identity.publicKey, counterparty))
+    .sort((left, right) => Date.parse(right.target_created_at) - Date.parse(left.target_created_at)
+      || right.target_object_id.localeCompare(left.target_object_id))[0];
+  if (newestTombstone && (!newest
+    || Date.parse(newestTombstone.target_created_at) > Date.parse(newest.created_at)
+    || (newestTombstone.target_created_at === newest.created_at
+      && newestTombstone.target_object_id.localeCompare(newest.object_id) > 0))) {
+    return {
+      objectId: newestTombstone.target_object_id,
+      direction: newestTombstone.target_author === identity.publicKey ? 'out' : 'in',
+      createdAt: newestTombstone.target_created_at,
+      status: 'ok',
+      text: null,
+      deleted: true
+    };
+  }
   if (!newest) return null;
   return await buildMessage({ object: newest, identity, resolveSenderEncryptionKey, getOutboxEntry });
+}
+
+async function conversationTombstones(
+  store: ObjectStore,
+  myPublicKey: string,
+  counterparty: string
+): Promise<DeletionTombstone[]> {
+  if (!isDeletionAwareObjectStore(store)) return [];
+  return (await store.queryDeletionTombstones()).filter((item) => (
+    item.target_object_type === 'mycelium.dm'
+    && (
+      (item.target_author === myPublicKey && item.target_recipient === counterparty)
+      || (item.target_author === counterparty && item.target_recipient === myPublicKey)
+    )
+  ));
 }
 
 async function getConversationObjects(
@@ -245,4 +315,9 @@ function compareOldestFirst(left: DistributedObject, right: DistributedObject): 
 function compareNewestFirst(left: DistributedObject, right: DistributedObject): number {
   return Date.parse(right.created_at) - Date.parse(left.created_at)
     || right.object_id.localeCompare(left.object_id);
+}
+
+function compareMessagesOldestFirst(left: ConversationMessage, right: ConversationMessage): number {
+  return Date.parse(left.createdAt) - Date.parse(right.createdAt)
+    || left.objectId.localeCompare(right.objectId);
 }

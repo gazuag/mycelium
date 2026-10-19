@@ -9,8 +9,9 @@ import { ProfilePage } from './ProfilePage';
 import { RelationshipsPage } from './RelationshipsPage';
 import { PersonRow } from '../components/PersonRow';
 import { ProfileHeader } from '../components/ProfileHeader';
-import { createLocalPostView, upsertLocalPostView, type LocalPostView, type PostObject } from '../object-layer';
+import { createLocalPostView, upsertLocalPostView, type DeletionTombstone, type LocalPostView, type PostObject } from '../object-layer';
 import type { Contact } from '../types';
+import { ConversationPage } from './ConversationPage';
 
 const contact: Contact = {
   publicKey: 'author-key',
@@ -54,6 +55,88 @@ const emptyRecommendationSummary = (postId: string) => ({
 });
 
 describe('LocalPostView UI migration', () => {
+  it('represents a deleted parent at its thread position without exposing its content or author', () => {
+    const parentId = 'd'.repeat(64);
+    const deletedParent = createLocalPostView({
+      ...makeView().object,
+      object_id: parentId,
+      payload: { content: 'secret parent payload' }
+    }, contact.fingerprint);
+    const reply = createLocalPostView({
+      ...makeView().object,
+      object_id: 'e'.repeat(64),
+      author: 'reply-author-key',
+      created_at: '2026-08-25T00:01:00.000Z',
+      payload: { content: 'reply content', reply_to: parentId }
+    }, 'reply-author-fingerprint');
+    const tombstone: DeletionTombstone = {
+      target_object_id: parentId,
+      target_object_type: 'mycelium.post',
+      target_author: contact.publicKey,
+      target_created_at: '2026-08-25T00:00:00.000Z',
+      delete_request_id: 'f'.repeat(64),
+      propagation_expires_at: '2026-08-28T00:00:00.000Z',
+      deleted_at: '2026-08-25T00:02:00.000Z'
+    };
+    const markup = renderToStaticMarkup(
+      <ConversationPage
+        post={reply}
+        posts={[deletedParent, reply]}
+        contacts={[]}
+        deletionTombstones={[tombstone]}
+        ancestry={{ loading: false, result: { ancestors: [], stopReason: 'missing' } }}
+        onLeave={noop}
+        onOpenPost={noop}
+        onOpenParent={noop}
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onHide={noop}
+        onReply={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+    const placeholder = markup.match(/<div class="conversation-ancestor conversation-deleted-post".*?<\/div>/)?.[0];
+
+    expect(markup.indexOf('[Deleted post]')).toBeLessThan(markup.indexOf('reply content'));
+    expect(markup).toContain('aria-label="Parent post deleted"');
+    expect(markup).not.toContain('Earlier post is unavailable on this device.');
+    expect(markup).not.toContain('canonical post content');
+    expect(markup).not.toContain('secret parent payload');
+    expect(placeholder).toContain('[Deleted post]');
+    expect(placeholder).not.toContain(contact.publicKey);
+    expect(placeholder).not.toContain('Author');
+    expect(placeholder).not.toContain('identity-avatar');
+  });
+
+  it('does not label a missing parent as deleted without an authoritative tombstone', () => {
+    const reply = createLocalPostView({
+      ...makeView().object,
+      object_id: 'c'.repeat(64),
+      payload: { content: 'reply content', reply_to: 'b'.repeat(64) }
+    }, contact.fingerprint);
+    const markup = renderToStaticMarkup(
+      <ConversationPage
+        post={reply}
+        posts={[reply]}
+        contacts={[]}
+        ancestry={{ loading: false, result: { ancestors: [], stopReason: 'missing' } }}
+        onLeave={noop}
+        onOpenPost={noop}
+        onOpenParent={noop}
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onHide={noop}
+        onReply={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+
+    expect(markup).toContain('Earlier post is unavailable on this device.');
+    expect(markup).not.toContain('[Deleted post]');
+  });
+
   it('keeps the Home composer open at the top without redundant headings or toggle controls', () => {
     const markup = renderToStaticMarkup(
       <HomePage
@@ -539,6 +622,25 @@ describe('LocalPostView UI migration', () => {
 
     expect(profileMarkup).toContain('aria-pressed="true"');
     expect(discoverMarkup).toContain('aria-pressed="true"');
+  });
+
+  it('shows the profile follow button for an unfollowed peer', () => {
+    const markup = renderToStaticMarkup(
+      <ProfilePage
+        contact={{ ...contact, followed: false }}
+        posts={[]}
+        likedPosts={[]}
+        onFollowToggle={noop}
+        onBlock={noop}
+        onMessage={noop}
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+
+    expect(markup).toContain('>Follow</button>');
   });
 
   it('renders the current profile display name instead of a legacy post snapshot', () => {

@@ -3,7 +3,7 @@ import { webcrypto } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair } from '../crypto/identity';
 import { createObjectIdentity } from './identity';
-import { canonicalizeObjectContent, calculateObjectId, createSignedObject, validateDistributedObject, validateObject } from './envelope';
+import { canonicalizeObjectContent, calculateAuthorBoundObjectId, calculateObjectId, createSignedObject, validateDistributedObject, validateObject } from './envelope';
 import { IndexedDbObjectStore } from './local-store';
 import type { DistributedObject, ObjectContent } from './types';
 
@@ -43,7 +43,10 @@ describe('signed DistributedObject recipient field', () => {
 
     expect(canonicalizeObjectContent(withRecipient)).not.toBe(canonicalizeObjectContent(withoutRecipient));
     expect(withRecipient.object_id).not.toBe(withoutRecipient.object_id);
-    expect(await calculateObjectId(withRecipient)).toBe(withRecipient.object_id);
+    expect(withRecipient.content_hash).toBe(await calculateObjectId(withRecipient));
+    expect(withRecipient.object_id).toBe(
+      await calculateAuthorBoundObjectId(publicKey, withRecipient.content_hash ?? '')
+    );
   });
 
   it('accepts a valid recipient-bearing object', async () => {

@@ -17,6 +17,9 @@ export interface DistributedObject {
   readonly payload: JsonValue;
   readonly signature: string;
   readonly replication_policy: ReplicationPolicy;
+  readonly object_id_version?: 2;
+  readonly content_hash?: string;
+  readonly author_proof?: string;
 }
 
 export type PostObject = DistributedObject & { readonly object_type: 'mycelium.post' };
@@ -33,6 +36,17 @@ export interface LocalPostView {
   readonly notInterested?: boolean;
   readonly hidden?: boolean;
   readonly injectedAt?: number;
+}
+
+export interface DeletionTombstone {
+  readonly target_object_id: string;
+  readonly target_object_type: 'mycelium.post' | 'mycelium.dm';
+  readonly target_author: string;
+  readonly target_created_at: string;
+  readonly target_recipient?: string;
+  readonly delete_request_id: string;
+  readonly propagation_expires_at: string;
+  readonly deleted_at: string;
 }
 
 export type LocalPostMetadata = Omit<LocalPostView, 'object' | 'authorFingerprint'> & {
@@ -163,7 +177,10 @@ export interface ObjectTransport {
   onPacket(handler: (peerId: string, packet: ObjectPacket) => void): () => void;
 }
 
-export type ObjectContent = Omit<DistributedObject, 'object_id' | 'author' | 'signature'>;
+export type ObjectContent = Omit<
+  DistributedObject,
+  'object_id' | 'author' | 'signature' | 'object_id_version' | 'content_hash' | 'author_proof'
+>;
 
 export type ObjectCriteria = Partial<Pick<DistributedObject, 'object_id' | 'object_type' | 'author' | 'created_at' | 'expires_at' | 'sequence'>> & {
   readonly recipient?: string;
@@ -179,6 +196,13 @@ export interface ObjectStore {
   get(objectId: string): Promise<DistributedObject | null>;
   delete(objectId: string): Promise<void>;
   query(criteria?: ObjectCriteria): Promise<DistributedObject[]>;
+}
+
+export interface DeletionAwareObjectStore extends ObjectStore {
+  getDeletionTombstone(targetObjectId: string): Promise<DeletionTombstone | null>;
+  queryDeletionTombstones(): Promise<DeletionTombstone[]>;
+  applyDeletionTombstone(tombstone: DeletionTombstone): Promise<boolean>;
+  collectDeletionTombstones(now: Date): Promise<number>;
 }
 
 export type ObjectSignatureVerifier = (author: string, content: string, signature: string) => Promise<boolean>;

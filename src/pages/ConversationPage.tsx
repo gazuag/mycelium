@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Contact } from '../types';
-import { postReplyTo, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
+import { postReplyTo, type DeletionTombstone, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
@@ -13,6 +13,7 @@ interface ConversationPageProps {
   myPeerId?: string;
   myPublicKey?: string;
   focusedPostId?: string | null;
+  deletionTombstones?: readonly DeletionTombstone[];
   ancestry?: {
     loading: boolean;
     result?: PostAncestryResult;
@@ -25,6 +26,7 @@ interface ConversationPageProps {
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
   onHide: (objectId: string) => void;
+  onDelete?: (objectId: string) => void;
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
@@ -37,6 +39,7 @@ export function ConversationPage({
   myPeerId,
   myPublicKey,
   focusedPostId,
+  deletionTombstones = [],
   ancestry,
   onLeave,
   onOpenPost,
@@ -45,6 +48,7 @@ export function ConversationPage({
   onLike,
   onDislike,
   onHide,
+  onDelete,
   onReply,
   getRecommendationSummary
 }: ConversationPageProps) {
@@ -66,17 +70,24 @@ export function ConversationPage({
     .sort((left, right) => new Date(left.object.created_at).getTime() - new Date(right.object.created_at).getTime());
   const parentId = postReplyTo(post);
   const ancestors = ancestry?.result?.ancestors ?? [];
+  const threadAncestors = collectThreadAncestors(post, ancestors, posts, deletionTombstones);
+  const postTombstones = new Map(deletionTombstones
+    .filter((item) => item.target_object_type === 'mycelium.post')
+    .map((item) => [item.target_object_id, item]));
   const parentPost = parentId
     ? ancestors.find((candidate) => candidate.object.object_id === parentId)
       ?? posts.find((candidate) => candidate.object.object_id === parentId)
     : undefined;
+  const parentTombstone = parentId ? postTombstones.get(parentId) : undefined;
   const selectedContact = contacts.find((contact) =>
     contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author
   );
-  const selectedAuthorName = displayNameOrFallback(
-    selectedContact?.displayName,
-    selectedContact?.fingerprint ?? post.authorFingerprint
-  );
+  const selectedAuthorName = postTombstones.has(post.object.object_id)
+    ? 'deleted post'
+    : displayNameOrFallback(
+      selectedContact?.displayName,
+      selectedContact?.fingerprint ?? post.authorFingerprint
+    );
 
   useEffect(() => {
     if (replyingToPostId !== post.object.object_id) return;
@@ -197,6 +208,19 @@ export function ConversationPage({
 
   const renderPost = (currentPost: LocalPostView, isRoot = false, isFocused = false, isAncestor = false) => {
     const objectId = currentPost.object.object_id;
+    if (postTombstones.has(objectId)) {
+      return (
+        <div
+          className={`${isRoot ? 'conversation-current' : isAncestor ? 'conversation-ancestor' : 'conversation-reply'} conversation-deleted-post`}
+          data-conversation-post-id={objectId}
+          key={objectId}
+          role="status"
+          aria-label="Deleted post"
+        >
+          <span>[Deleted post]</span>
+        </div>
+      );
+    }
     const recommendationSummary = getRecommendationSummary(objectId);
     const matchingContact = contacts.find((contact) =>
       contact.fingerprint === currentPost.authorFingerprint || contact.publicKey === currentPost.object.author
@@ -227,6 +251,7 @@ export function ConversationPage({
           onLike={() => onLike(objectId)}
           onDislike={() => onDislike(objectId)}
           onHide={onHide}
+          onDelete={onDelete}
           onReply={() => toggleReplyComposer(objectId)}
           isLiked={recommendationSummary.recommended_by_me}
           isOwnPost={currentPost.authorFingerprint === myPeerId || currentPost.object.author === myPublicKey}
@@ -240,7 +265,12 @@ export function ConversationPage({
     <section className="page-view conversation-page">
       <header className="conversation-header">
         {parentId ? (
-          parentPost ? (
+          parentTombstone ? (
+            <button className="btn secondary conversation-back" type="button" disabled aria-label="Parent post deleted">
+              <span aria-hidden="true">←</span>
+              <span>Parent [Deleted post]</span>
+            </button>
+          ) : parentPost ? (
             <button className="btn secondary conversation-back" type="button" onClick={() => onOpenParent(parentId, post.object.object_id)} aria-label="View parent post">
               <span aria-hidden="true">←</span>
               <span>Parent</span>
@@ -274,7 +304,8 @@ export function ConversationPage({
               <span className="note">Earlier context could not be loaded.</span>
             </div>
           ) : null}
-          {ancestry?.result?.stopReason === 'missing' ? (
+          {ancestry?.result?.stopReason === 'missing'
+            && !threadAncestors.some((item) => 'target_object_id' in item) ? (
             <div className="conversation-unavailable-ancestor" role="status">
               <span className="conversation-context-avatar" aria-hidden="true">?</span>
               <span className="note">Earlier post is unavailable on this device.</span>
@@ -283,7 +314,17 @@ export function ConversationPage({
           {ancestry?.result?.stopReason === 'depth-limit' ? (
             <p className="conversation-ancestry-note note">Earlier context is incomplete; the ancestry depth limit was reached.</p>
           ) : null}
-          {ancestors.map((ancestor) => renderPost(ancestor, false, false, true))}
+          {threadAncestors.map((ancestor) => 'target_object_id' in ancestor ? (
+            <div
+              className="conversation-ancestor conversation-deleted-post"
+              data-conversation-post-id={ancestor.target_object_id}
+              key={ancestor.target_object_id}
+              role="status"
+              aria-label="Deleted post"
+            >
+              <span>[Deleted post]</span>
+            </div>
+          ) : renderPost(ancestor, false, false, true))}
           {renderPost(post, true)}
         </div>
         <div className="conversation-reply-boundary">
@@ -314,4 +355,56 @@ export function ConversationPage({
       </div>
     </section>
   );
+}
+
+function collectThreadAncestors(
+  post: LocalPostView,
+  resolvedAncestors: readonly LocalPostView[],
+  posts: readonly LocalPostView[],
+  tombstones: readonly DeletionTombstone[]
+): Array<LocalPostView | DeletionTombstone> {
+  const descendantIds = new Set([post.object.object_id]);
+  let foundDescendant = true;
+  while (foundDescendant) {
+    foundDescendant = false;
+    for (const candidate of posts) {
+      const candidateId = candidate.object.object_id;
+      const parentId = postReplyTo(candidate);
+      if (parentId && descendantIds.has(parentId) && !descendantIds.has(candidateId)) {
+        descendantIds.add(candidateId);
+        foundDescendant = true;
+      }
+    }
+  }
+  const objectsById = new Map(
+    [...resolvedAncestors, ...posts]
+      .filter((candidate) => !descendantIds.has(candidate.object.object_id))
+      .map((candidate) => [candidate.object.object_id, candidate])
+  );
+  const tombstonesById = new Map(tombstones
+    .filter((item) => item.target_object_type === 'mycelium.post')
+    .map((item) => [item.target_object_id, item]));
+  const visited = new Set([post.object.object_id]);
+  const newestFirst: Array<LocalPostView | DeletionTombstone> = [];
+  let current = post;
+
+  while (newestFirst.length < 32) {
+    const parentId = postReplyTo(current);
+    if (!parentId || visited.has(parentId)) break;
+    visited.add(parentId);
+    const tombstone = tombstonesById.get(parentId);
+    if (tombstone) {
+      newestFirst.push(tombstone);
+      break;
+    }
+    const parent = objectsById.get(parentId);
+    if (parent) {
+      newestFirst.push(parent);
+      current = parent;
+      continue;
+    }
+    break;
+  }
+
+  return newestFirst.reverse();
 }

@@ -32,6 +32,7 @@ interface HomePageProps {
   onDislike: (objectId: string) => void;
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   onHide: (objectId: string) => void;
+  onDelete?: (objectId: string) => void;
   popularPeers?: PopularPeer[];
   onFollowPeer?: (peerId: string) => void;
 }
@@ -53,6 +54,7 @@ export function HomePage({
   onDislike,
   onReply,
   onHide,
+  onDelete,
   popularPeers = [],
   onFollowPeer
 }: HomePageProps) {
@@ -274,6 +276,7 @@ export function HomePage({
                 onLike={() => onLike(objectId)}
                 onDislike={() => { onDislike(objectId); onHide(objectId); }}
                 onHide={onHide}
+                onDelete={onDelete}
                 onReply={() => {
                   setReplyingToPostId((prev) => (prev === objectId ? null : objectId));
                   if (replyingToPostId !== objectId) {
@@ -284,6 +287,7 @@ export function HomePage({
                 recommendationLabel={recommendationLabel}
                 discoveryLabel={post.homeFeedSource === 'discovery' ? 'You might like this' : undefined}
                 feedSource={post.homeFeedSource}
+                isOwnPost={post.authorFingerprint === myPeerId}
                 replyComposer={isReplying ? (
                   <>
                     <textarea

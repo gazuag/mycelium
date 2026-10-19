@@ -150,6 +150,28 @@ describe('DmChatPage', () => {
     expect(markup).toContain('Attempted');
   });
 
+  it('keeps a deleted message in chronological context without revealing its content or sender identity', () => {
+    hookState.result.messages = [
+      message('before', 'ok', { createdAt: '2026-10-05T11:00:00.000Z', text: 'before message' }),
+      message('deleted', 'ok', {
+        createdAt: '2026-10-05T12:00:00.000Z',
+        direction: 'in',
+        deleted: true,
+        text: null
+      }),
+      message('after', 'ok', { createdAt: '2026-10-05T13:00:00.000Z', text: 'after message' })
+    ];
+    const markup = renderPage();
+    const deletedRow = markup.match(/<div class="chat-message-row deleted".*?<\/div><\/div>/)?.[0];
+
+    expect(markup.indexOf('before message')).toBeLessThan(markup.indexOf('[Deleted message]'));
+    expect(markup.indexOf('[Deleted message]')).toBeLessThan(markup.indexOf('after message'));
+    expect(deletedRow).toContain('[Deleted message]');
+    expect(deletedRow).not.toContain('View Peer');
+    expect(deletedRow).not.toContain('identity-avatar');
+    expect(markup).not.toContain('message text');
+  });
+
   it('renders small profile links for both incoming and outgoing messages', () => {
     hookState.result.messages = [
       message('incoming', 'ok'),

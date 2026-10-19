@@ -35,9 +35,10 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
+import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { parsePeerId } from './utils/peerId';
+import { parseAddPeerInvitePath } from './utils/addPeerInvite';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
 import {
@@ -71,6 +72,8 @@ export interface LogEntry {
   text: string;
   category: LogCategory;
 }
+
+const DELETION_TOMBSTONE_GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function classifyLogEntry(entry: string): LogCategory {
   if (/\b(PING|PONG|ping loop|keep.?alive)\b/i.test(entry)) return 'pingPong';
@@ -173,6 +176,7 @@ function App() {
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
+  const [deletionTombstones, setDeletionTombstones] = useState<DeletionTombstone[]>([]);
   const initialNavigation = readAppNavigationState(window.history.state);
   const [page, setPage] = useState<PageKey>(initialNavigation.page);
   const [conversationPostId, setConversationPostId] = useState<string | null>(initialNavigation.conversationPostId);
@@ -195,6 +199,7 @@ function App() {
   const [blockedPeersOpen, setBlockedPeersOpen] = useState(false);
   const [hiddenPostsOpen, setHiddenPostsOpen] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
+  const addPeerInviteHandledRef = useRef(false);
   const blockedPeersRef = useRef<Set<string>>(new Set());
   const [myProfile, setMyProfile] = useState({
     displayName: '',
@@ -257,6 +262,7 @@ function App() {
   const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
+  const outboxServiceRef = useRef<ReturnType<typeof createOutboxService> | null>(null);
   const outboxStoreRef = useRef<IndexedDbOutboxStore | null>(null);
   const localPostMetadataStoreRef = useRef<LocalPostMetadataStore | null>(null);
   const recommendationSequenceStoreRef = useRef<IndexedDbRecommendationSequenceStore | null>(null);
@@ -374,6 +380,20 @@ function App() {
       addLog(`Hydrated ${hydratedViews.length} posts from storage (${hydratedWithMetadata} with metadata)`);
       setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
     });
+    if (isDeletionAwareObjectStore(objectStore)) {
+      const collectAndHydrateTombstones = async () => {
+        await objectStore.collectDeletionTombstones(new Date());
+        setDeletionTombstones(await objectStore.queryDeletionTombstones());
+      };
+      const refreshTombstones = () => {
+        void collectAndHydrateTombstones().catch((error) => {
+          addLog(`Deletion tombstone collection failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      };
+      refreshTombstones();
+      const interval = window.setInterval(refreshTombstones, DELETION_TOMBSTONE_GC_INTERVAL_MS);
+      return () => window.clearInterval(interval);
+    }
   }, []);
 
   useEffect(() => {
@@ -487,6 +507,13 @@ function App() {
       ),
       connectedPeers: () => objectTransport.connectedPeers()
     });
+    outboxServiceRef.current = outboxService;
+    void store.query({ object_type: DELETE_REQUEST_OBJECT_TYPE }).then(async (requests) => {
+      for (const request of requests) await outboxService.enqueue(request);
+      await outboxService.flush();
+    }).catch((error: unknown) => {
+      addLog(`Delete Request outbox recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const dmService = createDmService({
       getIdentity: () => ({
         id: identity.id,
@@ -512,6 +539,7 @@ function App() {
     return () => {
       service.stop();
       if (inboxServiceRef.current === service) inboxServiceRef.current = null;
+      if (outboxServiceRef.current === outboxService) outboxServiceRef.current = null;
       window.clearInterval(outboxInterval);
       if (dmOutboxIntervalRef.current === outboxInterval) dmOutboxIntervalRef.current = null;
       if (dmServiceRef.current === dmService) dmServiceRef.current = null;
@@ -723,6 +751,7 @@ function App() {
   const resolvePostParentFromPeers: PostParentResolver = async (objectId) => {
     const store = objectStoreRef.current;
     if (!store) throw new Error('Object store is unavailable');
+    if (isDeletionAwareObjectStore(store) && await store.getDeletionTombstone(objectId)) return null;
     const cached = await store.get(objectId);
     if (cached && cached.object_type === 'mycelium.post' && await validateObject(cached)) return cached;
 
@@ -740,7 +769,15 @@ function App() {
       let lastError: unknown;
       for (const peerId of peers) {
         try {
-          const object = await findObject(localIdentity.id, peerId, objectId, transport, store, 2);
+          const object = await findObject(
+            localIdentity.id,
+            peerId,
+            objectId,
+            transport,
+            store,
+            2,
+            (request) => handleAcceptedDeleteRequest(request, false)
+          );
           if (object) return object;
         } catch (error) {
           lastError = error;
@@ -759,6 +796,36 @@ function App() {
       postParentLookupRef.current.delete(oldestObjectId);
     }
     return lookup;
+  };
+
+  const handleAcceptedDeleteRequest = async (request: DistributedObject, propagateNow = true) => {
+    const store = objectStoreRef.current;
+    if (!store || !isDeletionAwareObjectStore(store)) {
+      throw new Error('Deletion-aware object storage is unavailable');
+    }
+    const payload = request.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || typeof payload.target_object_id !== 'string') {
+      throw new Error('Accepted Delete Request has no target object ID');
+    }
+    const targetObjectId = payload.target_object_id;
+    setDeletionTombstones(await store.queryDeletionTombstones());
+    setPostViews((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
+    setDiscoveryPosts((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
+    setDiscoveryReplyPosts((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
+    homeFeedInjectionCandidatesRef.current = {
+      recommendations: homeFeedInjectionCandidatesRef.current.recommendations
+        .filter((view) => view.object.object_id !== targetObjectId),
+      discovery: homeFeedInjectionCandidatesRef.current.discovery
+        .filter((view) => view.object.object_id !== targetObjectId)
+    };
+    await localPostMetadataStoreRef.current?.delete(targetObjectId);
+    const outboxService = outboxServiceRef.current;
+    if (outboxService) {
+      await outboxService.enqueue(request);
+      if (propagateNow) await outboxService.flush();
+    }
+    await refreshObjectStore();
   };
 
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
@@ -1076,6 +1143,9 @@ function App() {
       : null;
     const validIncomingPost = incomingPost ? await validateObject(incomingPost) : false;
     const stored = await receiveObjectPacket(packet, store);
+    if (stored && packet.type === 'OBJECT_STORE' && isDeleteRequest(packet.payload.object)) {
+      await handleAcceptedDeleteRequest(packet.payload.object);
+    }
     if (stored && validIncomingPost && incomingPost) {
       const authorFingerprint = await resolvePostAuthorFingerprint(incomingPost.author);
       recordNewEligibleHomePosts([
@@ -1436,6 +1506,11 @@ function App() {
           return;
         }
         inboxServiceRef.current?.notifyObjectStored(object);
+        if (isDeleteRequest(object)) {
+          await handleAcceptedDeleteRequest(object, false);
+          addLog(`Received and accepted Delete Request ${object.object_id} from ${peer}`);
+          return;
+        }
         if (object.object_type === 'mycelium.reply') void replyUnread.discover([object]);
         recommendationIndexRef.current.add(object);
         setRecommendationRevision((revision) => revision + 1);
@@ -1535,7 +1610,20 @@ function App() {
               }
               throw error;
             }
-            const newlyStoredObjects = objects.filter((_, index) => storedFlags[index]);
+            const newlyAcceptedDeleteRequests = objects.filter((object, index) => (
+              storedFlags[index] && isDeleteRequest(object)
+            ));
+            for (const request of newlyAcceptedDeleteRequests) {
+              await handleAcceptedDeleteRequest(request, false);
+            }
+            const newlyStoredObjects: DistributedObject[] = [];
+            for (let index = 0; index < objects.length; index += 1) {
+              const object = objects[index];
+              if (!storedFlags[index] || !object || isDeleteRequest(object)) continue;
+              if (isDeletionAwareObjectStore(store)
+                && await store.getDeletionTombstone(object.object_id)) continue;
+              newlyStoredObjects.push(object);
+            }
             const newlyDiscoveredReplies = newlyStoredObjects.filter((object) => (
               object.object_type === 'mycelium.reply' || object.object_type === 'mycelium.post'
             ));
@@ -2230,6 +2318,49 @@ function App() {
     }
   };
 
+  const submitDeleteRequest = async (target: DistributedObject) => {
+    try {
+      if (!identity) throw new Error('A local identity is required to delete an object');
+      const store = objectStoreRef.current;
+      if (!store || !isDeletionAwareObjectStore(store)) {
+        throw new Error('Deletion-aware object storage is unavailable');
+      }
+      const request = await createDeleteRequest(target, createObjectIdentity(identity));
+      if (!(await acceptDeleteRequest(request, store))) {
+        throw new Error('The Delete Request was not accepted by local storage');
+      }
+      await handleAcceptedDeleteRequest(request);
+      addLog(`Created and applied Delete Request ${request.object_id} for ${target.object_id}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setProfileNotice(`Could not delete this object: ${message}`);
+      addLog(`Delete Request failed for ${target.object_id}: ${message}`);
+    }
+  };
+
+  const handleDeletePost = async (objectId: string) => {
+    const store = objectStoreRef.current;
+    if (!store) return;
+    const target = await store.get(objectId)
+      ?? [...postViews, ...discoveryPosts, ...discoveryReplyPosts]
+        .find((view) => view.object.object_id === objectId)?.object
+      ?? null;
+    if (!target) {
+      setProfileNotice('This post is no longer available to delete.');
+      return;
+    }
+    await submitDeleteRequest(target);
+  };
+
+  const handleDeleteMessage = async (objectId: string) => {
+    const target = await objectStoreRef.current?.get(objectId);
+    if (!target) {
+      setProfileNotice('This message is no longer available to delete.');
+      return;
+    }
+    await submitDeleteRequest(target);
+  };
+
   async function handleCreatePost(publishToDiscovery = false, replyTo?: string, replyContent?: string) {
     if (!identity) return;
     const isReply = Boolean(replyTo);
@@ -2394,7 +2525,15 @@ function App() {
         for (const peerId of peers) {
           if (!transport) break;
           try {
-            object = await findObject(identity.id, peerId, parentId, transport, store, 2);
+            object = await findObject(
+              identity.id,
+              peerId,
+              parentId,
+              transport,
+              store,
+              2,
+              (request) => handleAcceptedDeleteRequest(request, false)
+            );
           } catch (error) {
             retrievalError = error;
             addLog(`Parent FIND via ${peerId} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -3143,6 +3282,30 @@ function App() {
   }
 
   useEffect(() => {
+    if (!identity || !contactsLoaded || addPeerInviteHandledRef.current) return;
+    addPeerInviteHandledRef.current = true;
+
+    const invite = parseAddPeerInvitePath(window.location.pathname);
+    if (!invite) return;
+    if (!invite.peerId) {
+      addLog(`Invalid follow link for peer "${invite.handle}".`);
+      window.history.replaceState(window.history.state, '', '/');
+      return;
+    }
+    if (blockedPeersRef.current.has(invite.peerId)) {
+      addLog(`Refusing follow link for blocked peer ${invite.peerId}.`);
+      window.history.replaceState(window.history.state, '', '/');
+      return;
+    }
+
+    void handleOpenPeerProfile(invite.peerId).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      addLog(`Could not open profile from follow link ${invite.handle}: ${message}`);
+      window.history.replaceState(window.history.state, '', '/');
+    });
+  }, [identity, contactsLoaded]);
+
+  useEffect(() => {
     const handleShutdown = () => {
       Object.values(peerManagersRef.current).forEach((manager) => manager.closeConnection());
     };
@@ -3278,7 +3441,15 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
       await refreshObjectStore();
       addLog(`FIND TEST: removed local copy ${objectId}; querying ${peerId}`);
-      const found = await findObject(identity.id, peerId, objectId, transport, store, 2);
+      const found = await findObject(
+        identity.id,
+        peerId,
+        objectId,
+        transport,
+        store,
+        2,
+        (request) => handleAcceptedDeleteRequest(request, false)
+      );
       if (!found) {
         setObjectTestStatus(`FIND TEST: FAIL - peer returned no object for ${objectId}`);
         addLog(`FIND TEST: FAIL - no object returned for ${objectId}`);
@@ -3302,7 +3473,15 @@ function App() {
     if (!identity || !peerId || !store || !transport) return;
     const missingObjectId = await sha256(`mycelium.find-missing-test:${identity.id}:${Date.now()}:${Math.random()}`);
     try {
-      const found = await findObject(identity.id, peerId, missingObjectId, transport, store, 2);
+      const found = await findObject(
+        identity.id,
+        peerId,
+        missingObjectId,
+        transport,
+        store,
+        2,
+        (request) => handleAcceptedDeleteRequest(request, false)
+      );
       const localCopy = await store.get(missingObjectId);
       if (found || localCopy) {
         setObjectTestStatus(`FIND MISSING TEST: FAIL - unexpected object returned for ${missingObjectId}`);
@@ -3433,7 +3612,15 @@ function App() {
       return;
     }
     try {
-      const found = await findObject(identity.id, objectTestPeerId, objectId, transport, store, 2);
+      const found = await findObject(
+        identity.id,
+        objectTestPeerId,
+        objectId,
+        transport,
+        store,
+        2,
+        (request) => handleAcceptedDeleteRequest(request, false)
+      );
       const status = found ? `Single-object FIND returned ${found.object_id}` : `Single-object FIND returned no object for ${objectId}`;
       setPhase7QueryStatus(status);
       addLog(`PHASE7 SINGLE FIND requestId=single-${Date.now()} peer=${objectTestPeerId} object=${objectId} result=${found ? found.object_id : 'none'}`);
@@ -3495,7 +3682,16 @@ function App() {
     if (!store || objectIds.length < 2 || !transport) return;
     try {
       addLog(`PHASE 6 FIND started via ${objectTestPeerId}: requested=${objectIds.join(',')}`);
-      const found = await findObjects(identity.id, objectTestPeerId, objectIds, transport, store, 2, 1000);
+      const found = await findObjects(
+        identity.id,
+        objectTestPeerId,
+        objectIds,
+        transport,
+        store,
+        2,
+        1000,
+        (request) => handleAcceptedDeleteRequest(request, false)
+      );
       await refreshObjectStore();
       setObjectTestStatus(`FIND returned ${found.length}/${objectIds.length} distinct objects`);
       addLog(`PHASE 6 FIND completed via ${objectTestPeerId}: returned=${found.map((object) => object.object_id).join(',')} distinct=${new Set(found.map((object) => object.object_id)).size}`);
@@ -3607,7 +3803,9 @@ function App() {
             });
             return {
               counterparty: summary.counterparty,
-              text: message?.status === 'ok' ? message.text : null,
+              text: message?.deleted
+                ? '[Deleted message]'
+                : message?.status === 'ok' ? message.text : null,
               error: null as string | null
             };
           } catch (error) {
@@ -3713,6 +3911,7 @@ function App() {
               myPeerId={identity.id}
               myPublicKey={identity.publicKey}
               focusedPostId={conversationFocusPostId}
+              deletionTombstones={deletionTombstones}
               ancestry={conversationAncestry?.postId === conversationPostId
                 ? conversationAncestry
                 : { postId: conversationPostId, loading: true }}
@@ -3723,6 +3922,7 @@ function App() {
               onLike={handleLikePost}
               onDislike={handleDislikePost}
               onHide={page === 'discover' ? handleHideDiscoveryPost : handleHidePost}
+              onDelete={handleDeletePost}
               onReply={(postId, content, publishToDiscovery) => {
                 if (content && content.trim()) {
                   void handleCreatePost(Boolean(publishToDiscovery), postId, content);
@@ -3768,6 +3968,7 @@ function App() {
               }
             }}
             onHide={handleHidePost}
+            onDelete={handleDeletePost}
           />
         )}
 
@@ -3822,6 +4023,7 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHideDiscoveryPost}
+            onDelete={handleDeletePost}
             onBlock={handleBlockPeer}
             getRecommendationSummary={getRecommendationSummary}
           />
@@ -3845,6 +4047,7 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            onDelete={handleDeletePost}
             getRecommendationSummary={getRecommendationSummary}
           />
         )}
@@ -3863,6 +4066,7 @@ function App() {
             onLike={handleLikePost}
             onDislike={handleDislikePost}
             onHide={handleHidePost}
+            onDelete={handleDeletePost}
             onOpenPost={handleOpenConversation}
             getRecommendationSummary={getRecommendationSummary}
             isOwnProfile
@@ -3960,6 +4164,7 @@ function App() {
             myPeerId={identity.id}
             onViewProfile={handleOpenPeerProfile}
             onBackToMessages={handleBackToMessages}
+            onDeleteMessage={handleDeleteMessage}
           />
         )}
 

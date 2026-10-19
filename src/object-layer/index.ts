@@ -1,6 +1,7 @@
 export * from './types';
 export * from './recommendations';
 export * from './envelope';
+export * from './deletion';
 export * from './identity';
 export * from './identity-object';
 export * from './local-store';
