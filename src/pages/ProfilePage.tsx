@@ -90,7 +90,6 @@ export function ProfilePage({
     <section className="page-view profile-page">
       <div className="page-header compact-profile-header">
         <h2>
-          Profile of{' '}
           <CompactUsername
             peerId={contact.fingerprint || contact.publicKey}
             displayName={displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey)}

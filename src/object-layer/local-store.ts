@@ -10,7 +10,6 @@ const LOCAL_POST_METADATA_STORE_NAME = 'local_post_metadata';
 const RECOMMENDATION_SEQUENCE_STORE_NAME = 'recommendation_sequences';
 const OUTBOX_STORE_NAME = 'outbox';
 const DEFAULT_OUTBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const DELETION_TOMBSTONE_GC_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface OutboxEntry {
   readonly object_id: string;
@@ -226,28 +225,6 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
     });
   }
 
-  async collectDeletionTombstones(now: Date): Promise<number> {
-    const database = await this.getDatabase();
-    return new Promise((resolve, reject) => {
-      const transaction = database.transaction(DELETION_TOMBSTONE_STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
-      const request = store.getAll();
-      let removed = 0;
-      request.onsuccess = () => {
-        for (const tombstone of request.result as DeletionTombstone[]) {
-          const reclaimAfter = Date.parse(tombstone.propagation_expires_at) + DELETION_TOMBSTONE_GC_GRACE_MS;
-          if (reclaimAfter <= now.getTime()) {
-            store.delete(tombstone.target_object_id);
-            removed += 1;
-          }
-        }
-      };
-      request.onerror = () => reject(request.error);
-      transaction.oncomplete = () => resolve(removed);
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
-    });
-  }
 }
 
 export class IndexedDbLocalPostMetadataStore implements LocalPostMetadataStore {
@@ -435,7 +412,6 @@ function isValidDeletionTombstone(value: DeletionTombstone): boolean {
     && (value.target_object_type === 'mycelium.post' || value.target_object_type === 'mycelium.dm')
     && typeof value.target_author === 'string' && value.target_author.length > 0
     && Number.isFinite(Date.parse(value.target_created_at))
-    && Number.isFinite(Date.parse(value.propagation_expires_at))
     && Number.isFinite(Date.parse(value.deleted_at))
     && (value.target_recipient === undefined
       || (typeof value.target_recipient === 'string' && value.target_recipient.length > 0));

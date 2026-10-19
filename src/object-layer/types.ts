@@ -45,7 +45,6 @@ export interface DeletionTombstone {
   readonly target_created_at: string;
   readonly target_recipient?: string;
   readonly delete_request_id: string;
-  readonly propagation_expires_at: string;
   readonly deleted_at: string;
 }
 
@@ -202,7 +201,6 @@ export interface DeletionAwareObjectStore extends ObjectStore {
   getDeletionTombstone(targetObjectId: string): Promise<DeletionTombstone | null>;
   queryDeletionTombstones(): Promise<DeletionTombstone[]>;
   applyDeletionTombstone(tombstone: DeletionTombstone): Promise<boolean>;
-  collectDeletionTombstones(now: Date): Promise<number>;
 }
 
 export type ObjectSignatureVerifier = (author: string, content: string, signature: string) => Promise<boolean>;

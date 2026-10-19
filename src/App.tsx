@@ -73,8 +73,6 @@ export interface LogEntry {
   category: LogCategory;
 }
 
-const DELETION_TOMBSTONE_GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
 function classifyLogEntry(entry: string): LogCategory {
   if (/\b(PING|PONG|ping loop|keep.?alive)\b/i.test(entry)) return 'pingPong';
   if (/\bDISCOVERY\b|discovery/i.test(entry)) return 'discovery';
@@ -381,18 +379,9 @@ function App() {
       setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
     });
     if (isDeletionAwareObjectStore(objectStore)) {
-      const collectAndHydrateTombstones = async () => {
-        await objectStore.collectDeletionTombstones(new Date());
-        setDeletionTombstones(await objectStore.queryDeletionTombstones());
-      };
-      const refreshTombstones = () => {
-        void collectAndHydrateTombstones().catch((error) => {
-          addLog(`Deletion tombstone collection failed: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      };
-      refreshTombstones();
-      const interval = window.setInterval(refreshTombstones, DELETION_TOMBSTONE_GC_INTERVAL_MS);
-      return () => window.clearInterval(interval);
+      void objectStore.queryDeletionTombstones().then(setDeletionTombstones).catch((error) => {
+        addLog(`Deletion tombstone hydration failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
   }, []);
 
@@ -1248,7 +1237,7 @@ function App() {
       displayName: p.displayName.trim() || fallbackName || 'Me',
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
-      bio: p.bio.trim() || `Peer ${id?.id?.slice(0, 12) ?? 'unknown'}`,
+      bio: p.bio.trim() || `Peer ${id?.id ?? 'unknown'}`,
       tags: []
     };
     return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;

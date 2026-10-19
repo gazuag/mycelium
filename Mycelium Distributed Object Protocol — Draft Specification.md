@@ -147,7 +147,7 @@ This makes deduplication and caching straightforward.
 
 ## Delete Requests and tombstones
 
-`mycelium.delete-request` is a signed generic object with the command `delete`. Its payload identifies the target ID, object type, author, creation time, and (for direct messages) recipient. For version-2 targets it also carries the target content hash and author proof. The Delete Request itself has a three-day expiry and a high replication budget; it uses the existing object transport, replication, object store, and outbox paths rather than a separate deletion network.
+`mycelium.delete-request` is a signed generic object with the command `delete`. Its payload identifies the target ID, object type, author, creation time, and (for direct messages) recipient. For version-2 targets it also carries the target content hash and author proof. The Delete Request itself has an expiry no more than three days after its creation and a high replication budget; receivers reject requests with longer lifetimes. It uses the existing object transport, replication, object store, and outbox paths rather than a separate deletion network.
 
 A receiver validates the Delete Request signature and expiry, then verifies that its signer is the target author. For version-2 targets, the author proof must validate the target ID; for legacy targets, the stored target object must be present and independently validate. Requests that fail any of these checks are not authoritative.
 
@@ -155,9 +155,9 @@ On first acceptance, a peer stores a minimal local tombstone keyed by the target
 
 The tombstone is local deletion state, not the Delete Request's propagation lease. Expiry of the request stops active replication and removes the request through ordinary lazy object expiry, but does not remove the tombstone. Tombstones contain only the target ID, type, author, timestamp, optional recipient, and deletion-request metadata; they do not retain the deleted payload. The UI may derive a subdued post or chat placeholder from a tombstone and surviving reply/conversation references, without creating another replicated placeholder object.
 
-There is no capacity-based object garbage collector in the current implementation. Tombstones remain during normal operation and are eligible for local collection only after the request's propagation expiry plus a 30-day safety grace. The application runs this collection at startup and daily. Collection may allow old circulating copies to reappear afterward; deletion is not globally guaranteed, and peers that never receive or honor a request are unaffected.
+There is no capacity-based object garbage collector or tombstone collection policy in the current implementation. Tombstones therefore remain authoritative indefinitely during normal operation; expiration of the Delete Request does not remove them. No age-based tombstone timer or tombstone collector exists. A future normal garbage collector may explicitly collect tombstones according to its own storage-pressure and safety policy. If a tombstone is eventually collected, old circulating copies may reappear; deletion is not globally guaranteed, and peers that never receive or honor a request are unaffected.
 
-Once a tombstone is collected, the local system no longer has authoritative evidence to render a deletion placeholder or reject a later copy. A missing parent then appears as unavailable rather than deleted, and an old target copy may be admitted again.
+If a tombstone is explicitly collected by a future GC policy, the local system no longer has authoritative evidence to render a deletion placeholder or reject a later copy. A missing parent then appears as unavailable rather than deleted, and an old target copy may be admitted again.
 
 ## 6. Replication
 

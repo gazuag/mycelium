@@ -68,8 +68,12 @@ export async function acceptDeleteRequest(
   store: DeletionAwareObjectStore,
   now: Date = new Date()
 ): Promise<boolean> {
+  const createdAt = Date.parse(request.created_at);
+  const expiresAt = typeof request.expires_at === 'string' ? Date.parse(request.expires_at) : Number.NaN;
   if (request.object_type !== DELETE_REQUEST_OBJECT_TYPE
-    || typeof request.expires_at !== 'string'
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= createdAt
+    || expiresAt > createdAt + DELETE_REQUEST_TTL_MS
     || isObjectExpired(request, now)
     || !(await validateDistributedObject(request))) return false;
 
@@ -94,7 +98,6 @@ export async function acceptDeleteRequest(
     target_created_at: payload.target_created_at,
     ...(payload.target_recipient ? { target_recipient: payload.target_recipient } : {}),
     delete_request_id: request.object_id,
-    propagation_expires_at: request.expires_at,
     deleted_at: now.toISOString()
   };
   await store.applyDeletionTombstone(tombstone);

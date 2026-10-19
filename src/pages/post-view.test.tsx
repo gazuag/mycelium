@@ -75,7 +75,6 @@ describe('LocalPostView UI migration', () => {
       target_author: contact.publicKey,
       target_created_at: '2026-08-25T00:00:00.000Z',
       delete_request_id: 'f'.repeat(64),
-      propagation_expires_at: '2026-08-28T00:00:00.000Z',
       deleted_at: '2026-08-25T00:02:00.000Z'
     };
     const markup = renderToStaticMarkup(
@@ -658,6 +657,7 @@ describe('LocalPostView UI migration', () => {
     );
 
     expect(markup).toContain('Current Author Name');
+    expect(markup).not.toContain('Profile of');
     expect(markup).not.toContain('Old Author Name');
     expect(markup).not.toContain('aa:bb:');
   });

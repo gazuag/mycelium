@@ -440,7 +440,6 @@ describe('conversation read model', () => {
       target_created_at: '2026-10-01T12:00:00.000Z',
       target_recipient: 'me-key',
       delete_request_id: 'delete-request',
-      propagation_expires_at: '2026-10-04T12:00:00.000Z',
       deleted_at: '2026-10-01T13:00:00.000Z'
     };
     const baseStore = createMemoryStore([
@@ -450,8 +449,7 @@ describe('conversation read model', () => {
     const store = Object.assign(baseStore, {
       getDeletionTombstone: async () => tombstone,
       queryDeletionTombstones: async () => [tombstone],
-      applyDeletionTombstone: async () => true,
-      collectDeletionTombstones: async () => 0
+      applyDeletionTombstone: async () => true
     });
     const messages = await loadConversation({
       store,
@@ -476,7 +474,6 @@ describe('conversation read model', () => {
     expect(new Set(Object.keys(tombstone))).toEqual(new Set([
       'deleted_at',
       'delete_request_id',
-      'propagation_expires_at',
       'target_author',
       'target_created_at',
       'target_object_id',
