@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { clearAllLocalData, loadContacts, loadFeedCursor, loadInboxCursor, openDatabase, saveContact, saveFeedCursor, saveInboxCursor } from './idb';
+import { clearAllLocalData, loadContacts, loadFeedCursor, loadInboxBackfillState, loadInboxCursor, openDatabase, saveContact, saveFeedCursor, saveInboxBackfillState, saveInboxCursor } from './idb';
 import type { FeedCursor } from '../object-layer/types';
 
 const DATABASE_NAME = 'mycelium_p2p';
@@ -164,6 +164,24 @@ describe('inbox cursor IndexedDB persistence', () => {
 
     await expect(saveInboxCursor(identity, cursor)).resolves.toBe(cursor);
     await expect(loadInboxCursor(identity)).resolves.toBe(cursor);
+  });
+
+  it('persists backfill state alongside the high-water cursor', async () => {
+    const identity = 'backfill-state-identity';
+    const backfillState = {
+      cursor: '2026-09-20T12:00:00.000Z',
+      end: '2026-10-04T12:00:00.000Z'
+    };
+
+    await saveInboxBackfillState(identity, backfillState);
+    await saveInboxCursor(identity, '2026-10-04T12:00:00.000Z');
+
+    await expect(loadInboxCursor(identity)).resolves.toBe('2026-10-04T12:00:00.000Z');
+    await expect(loadInboxBackfillState(identity)).resolves.toEqual(backfillState);
+
+    await saveInboxBackfillState(identity, null);
+    await expect(loadInboxBackfillState(identity)).resolves.toBeNull();
+    await expect(loadInboxCursor(identity)).resolves.toBe('2026-10-04T12:00:00.000Z');
   });
 
   it('does not move an existing cursor backwards', async () => {

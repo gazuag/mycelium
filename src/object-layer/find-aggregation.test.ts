@@ -131,6 +131,42 @@ describe('FIND aggregation completion', () => {
     expect(forwarded).toBe(false);
     expect(aggregation.isComplete()).toBe(true);
     expect(onComplete).toHaveBeenCalledOnce();
-    expect(onComplete).toHaveBeenCalledWith([], 'all-children-responded-or-failed');
+    expect(onComplete).toHaveBeenCalledWith([], 'all-children-responded-or-failed', false);
+  });
+
+  it('retains partial child objects but marks the aggregate incomplete', async () => {
+    const onComplete = vi.fn(async () => undefined);
+    const aggregation = new FindAggregation([], Date.now() + 5000, onComplete, undefined, true);
+    aggregation.addChild('partial-peer');
+    aggregation.addChild('complete-peer');
+
+    await aggregation.addChildObjects('partial-peer', [object('partial-result')], false);
+    await aggregation.addChildObjects('complete-peer', []);
+
+    expect(onComplete).toHaveBeenCalledWith([object('partial-result')], 'all-children-responded-or-failed', false);
+    expect(aggregation.allChildrenResponded()).toBe(false);
+    expect(aggregation.isComplete()).toBe(true);
+  });
+
+  it('marks a cursor aggregation incomplete when a child does not confirm cursor support', async () => {
+    const aggregation = new FindAggregation([], Date.now() + 5000, async () => undefined, undefined, true, true);
+    aggregation.addChild('legacy-peer');
+
+    await aggregation.addChildObjects('legacy-peer', [], true, false);
+
+    expect(aggregation.allChildrenResponded()).toBe(false);
+    expect(aggregation.allChildrenSupportPagination()).toBe(false);
+  });
+
+  it('preserves child has_more through aggregation completion', async () => {
+    const onComplete = vi.fn(async () => undefined);
+    const result = object('available-on-next-page');
+    const aggregation = new FindAggregation([], Date.now() + 5000, onComplete, undefined, true, true);
+    aggregation.addChild('peer-a');
+
+    await aggregation.addChildObjects('peer-a', [result], true, true, true);
+
+    expect(onComplete).toHaveBeenCalledWith([result], 'all-children-responded-or-failed', true);
+    expect(aggregation.hasMore()).toBe(true);
   });
 });

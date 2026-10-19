@@ -121,7 +121,11 @@ function optionsFor(
   objects: DistributedObject[],
   identity: DmObjectIdentity,
   counterparty: string,
-  getOutboxEntry: (objectId: string) => Promise<{ delivered_direct: boolean; replicated_to: string[] } | null> = async () => null
+  getOutboxEntry: (objectId: string) => Promise<{
+    direct_send_attempted?: boolean;
+    replication_send_attempted?: boolean;
+    replicated_to?: string[];
+  } | null> = async () => null
 ) {
   return {
     store: createMemoryStore(objects),
@@ -342,7 +346,7 @@ describe('conversation read model', () => {
     ]);
   });
 
-  it('marks outgoing delivery pending only while an outbox entry has no direct or replica delivery', async () => {
+  it('distinguishes pending and attempted outgoing messages without claiming delivery', async () => {
     const identity = identityForKeys('me-key');
     const objects = [
       stubDm('pending', 'me-key', 'alice-key', '2026-10-01T00:00:00.000Z'),
@@ -355,10 +359,14 @@ describe('conversation read model', () => {
       plaintext: object.object_id,
       counterparty: 'alice-key'
     }));
-    const entryValues: Record<string, { delivered_direct: boolean; replicated_to: string[] } | null> = {
-      pending: { delivered_direct: false, replicated_to: [] },
-      replicated: { delivered_direct: false, replicated_to: ['peer-a'] },
-      direct: { delivered_direct: true, replicated_to: [] },
+    const entryValues: Record<string, {
+      direct_send_attempted: boolean;
+      replication_send_attempted?: boolean;
+      replicated_to?: string[];
+    } | null> = {
+      pending: { direct_send_attempted: false, replicated_to: [] },
+      replicated: { direct_send_attempted: false, replication_send_attempted: true },
+      direct: { direct_send_attempted: true, replicated_to: [] },
       'no-entry': null
     };
 
@@ -369,9 +377,9 @@ describe('conversation read model', () => {
 
     expect(result.map(({ objectId, delivery }) => ({ objectId, delivery }))).toEqual([
       { objectId: 'pending', delivery: 'pending' },
-      { objectId: 'replicated', delivery: 'sent' },
-      { objectId: 'direct', delivery: 'sent' },
-      { objectId: 'no-entry', delivery: 'sent' }
+      { objectId: 'replicated', delivery: 'attempted' },
+      { objectId: 'direct', delivery: 'attempted' },
+      { objectId: 'no-entry', delivery: undefined }
     ]);
   });
 

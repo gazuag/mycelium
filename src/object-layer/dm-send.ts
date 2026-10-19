@@ -16,8 +16,8 @@ export interface SendDmOptions {
 }
 
 export type SendDmResult =
-  | { status: 'sent'; object: DistributedObject; replicatedTo: string[]; keyChanged: boolean }
-  | { status: 'no_key' | 'invalid' | 'store_failed'; replicatedTo: []; keyChanged: boolean };
+  | { status: 'sent'; object: DistributedObject; attemptedTo: string[]; keyChanged: boolean }
+  | { status: 'no_key' | 'invalid' | 'store_failed'; attemptedTo: []; keyChanged: boolean };
 
 export async function sendDm({
   identity,
@@ -29,12 +29,12 @@ export async function sendDm({
 }: SendDmOptions): Promise<SendDmResult> {
   const keyChanged = recipientContact.encryptionKeyChanged === true;
   if (!plaintext.trim() || plaintext.length > 4000) {
-    return { status: 'invalid', replicatedTo: [], keyChanged };
+    return { status: 'invalid', attemptedTo: [], keyChanged };
   }
 
   const recipientEncryptionKey = getContactEncryptionKey(recipientContact);
   if (recipientEncryptionKey === null) {
-    return { status: 'no_key', replicatedTo: [], keyChanged };
+    return { status: 'no_key', attemptedTo: [], keyChanged };
   }
 
   const object = await createDmObject({
@@ -48,15 +48,15 @@ export async function sendDm({
   try {
     await store.put(object);
   } catch {
-    return { status: 'store_failed', replicatedTo: [], keyChanged };
+    return { status: 'store_failed', attemptedTo: [], keyChanged };
   }
 
-  let replicatedTo: string[];
+  let attemptedTo: string[];
   try {
-    replicatedTo = await replicate(object);
+    attemptedTo = await replicate(object);
   } catch {
-    replicatedTo = [];
+    attemptedTo = [];
   }
 
-  return { status: 'sent', object, replicatedTo, keyChanged };
+  return { status: 'sent', object, attemptedTo, keyChanged };
 }

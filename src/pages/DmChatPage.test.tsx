@@ -80,7 +80,7 @@ function renderPage(): string {
       store={store}
       outbox={outbox}
       resolveSenderEncryptionKey={() => contact.encryptionPublicKey!}
-      dmService={{ sendMessage: async () => ({ status: 'invalid', replicatedTo: [], queued: false, keyChanged: false }) }}
+      dmService={{ sendMessage: async () => ({ status: 'invalid', attemptedTo: [], queued: false, keyChanged: false }) }}
       events={events}
       connectionText="Connected"
       myPeerId="me-id"
@@ -139,21 +139,21 @@ describe('DmChatPage', () => {
     expect(renderPage()).toContain('Hello @alice');
   });
 
-  it('renders outgoing delivery as Waiting to send or Sent', () => {
+  it('renders outgoing delivery as Waiting to send or Attempted', () => {
     hookState.result.messages = [
       message('pending', 'ok', { direction: 'out', delivery: 'pending' }),
-      message('sent', 'ok', { direction: 'out', delivery: 'sent' })
+      message('attempted', 'ok', { direction: 'out', delivery: 'attempted' })
     ];
     const markup = renderPage();
 
     expect(markup).toContain('Waiting to send');
-    expect(markup).toContain('Sent');
+    expect(markup).toContain('Attempted');
   });
 
   it('renders small profile links for both incoming and outgoing messages', () => {
     hookState.result.messages = [
       message('incoming', 'ok'),
-      message('outgoing', 'ok', { direction: 'out', delivery: 'sent' })
+      message('outgoing', 'ok', { direction: 'out', delivery: 'attempted' })
     ];
     const markup = renderPage();
 
@@ -186,9 +186,9 @@ describe('DmChatPage', () => {
     expect(shouldSendOnEnter('a', false)).toBe(false);
   });
 
-  it('shows the offline note only for queued sent results', () => {
+  it('does not claim delivery for a queued message', () => {
     expect(queuedDeliveryNote({ status: 'sent', queued: true }))
-      .toBe('Will be delivered when they come online.');
+      .toBe('Queued for retry; delivery is unconfirmed.');
     expect(queuedDeliveryNote({ status: 'sent', queued: false })).toBe('');
     expect(queuedDeliveryNote({ status: 'invalid', queued: true })).toBe('');
   });

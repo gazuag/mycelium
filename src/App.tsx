@@ -16,8 +16,8 @@ import { useReplyUnreadController } from './hooks/useReplyUnread';
 import { listConversations, previewConversation, type ConversationSummary } from './object-layer/conversations';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
-import { getFindQueryCriteria, prepareFindQueryResponse } from './object-layer/transport';
-import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor, loadFeedCursor, saveFeedCursor } from './storage/idb';
+import { getFindQueryCriteria, prepareFindQueryPage } from './object-layer/transport';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject, validateDiscoveryObjects } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { TabBar } from './components/TabBar';
@@ -35,10 +35,17 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, ensurePostChainCached, expandObjectsWithPostChains, filterObjectsByFindQuery, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
+import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
+import { parsePeerId } from './utils/peerId';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
+import {
+  DEFAULT_HOME_FEED_INJECTION_THRESHOLDS,
+  HomeFeedInjectionScheduler,
+  homeFeedInjectionStorageKey,
+  parseHomeFeedInjectionState
+} from './utils/homeFeedInjection';
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
 import type { ConnectionState, Contact, PeerMetadata } from './types';
@@ -149,6 +156,11 @@ function App() {
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
   const postViewsRef = useRef<LocalPostView[]>([]);
+  const homeFeedInjectionSchedulerRef = useRef<HomeFeedInjectionScheduler | null>(null);
+  const homeFeedInjectionCandidatesRef = useRef<{ recommendations: LocalPostView[]; discovery: LocalPostView[] }>({
+    recommendations: [],
+    discovery: []
+  });
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
   const [connectedPeerIds, setConnectedPeerIds] = useState<string[]>([]);
@@ -177,6 +189,8 @@ function App() {
   const [collapsedHeader, setCollapsedHeader] = useState(true);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
+  const hiddenPostIdsRef = useRef(hiddenPostIds);
+  const hiddenDiscoveryIdsRef = useRef(hiddenDiscoveryIds);
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [blockedPeersOpen, setBlockedPeersOpen] = useState(false);
   const [hiddenPostsOpen, setHiddenPostsOpen] = useState(false);
@@ -209,7 +223,15 @@ function App() {
   const [conversationListError, setConversationListError] = useState<string | null>(null);
   const [conversationPreviewError, setConversationPreviewError] = useState<string | null>(null);
   const [contactsLoaded, setContactsLoaded] = useState(false);
-    const [recommendationRevision, setRecommendationRevision] = useState(0);
+  const [recommendationRevision, setRecommendationRevision] = useState(0);
+  const [homeFeedInjectionRevision, setHomeFeedInjectionRevision] = useState(0);
+  const [homeFeedInjectionFrequencies, setHomeFeedInjectionFrequencies] = useState<{
+    recommendation: number;
+    discovery: number;
+  }>({
+    recommendation: DEFAULT_HOME_FEED_INJECTION_THRESHOLDS.recommendation,
+    discovery: DEFAULT_HOME_FEED_INJECTION_THRESHOLDS.discovery
+  });
   const [newPostContent, setNewPostContent] = useState('');
   const [newPostTags, setNewPostTags] = useState('');
   const [objectTestPeerId, setObjectTestPeerId] = useState('');
@@ -333,6 +355,11 @@ function App() {
   }, [contacts]);
 
   useEffect(() => {
+    hiddenPostIdsRef.current = hiddenPostIds;
+    hiddenDiscoveryIdsRef.current = hiddenDiscoveryIds;
+  }, [hiddenPostIds, hiddenDiscoveryIds]);
+
+  useEffect(() => {
     postViewsRef.current = postViews;
   }, [postViews]);
 
@@ -431,6 +458,8 @@ function App() {
       transport: wrapFindTransport({ objectTransport, signPacket }),
       loadCursor: loadInboxCursor,
       saveCursor: saveInboxCursor,
+      loadBackfillState: loadInboxBackfillState,
+      saveBackfillState: saveInboxBackfillState,
       events: dmEventsRef.current
     });
     const outboxStore = outboxStoreRef.current;
@@ -443,15 +472,15 @@ function App() {
         await objectTransport.send(peerId, packet);
         return true;
       },
-      replicate: async (object, alreadyReplicatedTo) => {
+      replicate: async (object, alreadyAttemptedTo) => {
         const result = await replicateObject(
           identity.id,
           object,
           objectTransport,
           signPacket,
-          alreadyReplicatedTo
+          alreadyAttemptedTo
         );
-        return [...result.stored];
+        return [...result.attempted];
       },
       resolveRecipientPeerId: (recipientPublicKey) => (
         contactsRef.current.find((contact) => contact.publicKey === recipientPublicKey)?.fingerprint ?? null
@@ -513,6 +542,128 @@ function App() {
     const timestampedEntry = `${new Date().toLocaleTimeString()}: ${entry}`;
     setLogs((prev) => appendBoundedLog(prev, { text: timestampedEntry, category: classifyLogEntry(entry) }));
   }, []);
+
+  useEffect(() => {
+    if (!identity) {
+      homeFeedInjectionSchedulerRef.current = null;
+      setHomeFeedInjectionFrequencies({
+        recommendation: DEFAULT_HOME_FEED_INJECTION_THRESHOLDS.recommendation,
+        discovery: DEFAULT_HOME_FEED_INJECTION_THRESHOLDS.discovery
+      });
+      return;
+    }
+
+    try {
+      const storageKey = homeFeedInjectionStorageKey(identity.id);
+      const initialState = parseHomeFeedInjectionState(localStorage.getItem(storageKey));
+      homeFeedInjectionSchedulerRef.current = new HomeFeedInjectionScheduler(initialState, (state) => {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch (error) {
+          addLog(`Home feed injection schedule persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+      setHomeFeedInjectionFrequencies({
+        recommendation: initialState.recommendationThreshold,
+        discovery: initialState.discoveryThreshold
+      });
+      setHomeFeedInjectionRevision((revision) => revision + 1);
+    } catch (error) {
+      homeFeedInjectionSchedulerRef.current = null;
+      addLog(`Home feed injection schedule could not be loaded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [identity?.id, addLog]);
+
+  const handleInjectionFrequencyChange = useCallback((
+    source: 'recommendation' | 'discovery',
+    value: number
+  ) => {
+    const scheduler = homeFeedInjectionSchedulerRef.current;
+    if (!scheduler) {
+      addLog('Home feed injection settings are unavailable until the schedule is loaded.');
+      return;
+    }
+    try {
+      const current = scheduler.getState();
+      const changed = scheduler.setThresholds(
+        source === 'recommendation' ? value : current.recommendationThreshold,
+        source === 'discovery' ? value : current.discoveryThreshold
+      );
+      if (!changed) return;
+      const next = scheduler.getState();
+      setHomeFeedInjectionFrequencies({
+        recommendation: next.recommendationThreshold,
+        discovery: next.discoveryThreshold
+      });
+      setHomeFeedInjectionRevision((revision) => revision + 1);
+    } catch (error) {
+      addLog(`Home feed injection setting update failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [addLog]);
+
+  const recordNewEligibleHomePosts = useCallback((incomingViews: LocalPostView[]) => {
+    const scheduler = homeFeedInjectionSchedulerRef.current;
+    const localIdentity = identityRef.current;
+    if (!scheduler || !localIdentity) return;
+
+    const knownIds = new Set(postViewsRef.current.map((post) => post.object.object_id));
+    const followedKeys = new Set([
+      ...contactsRef.current
+        .filter((contact) => contact.followed)
+        .flatMap((contact) => [contact.fingerprint, contact.publicKey]),
+      localIdentity.id,
+      localIdentity.publicKey
+    ]);
+    const eligibleIds = new Set(selectFollowedPosts(
+      [...postViewsRef.current, ...incomingViews],
+      followedKeys
+    )
+      .filter((post) =>
+        !blockedPeersRef.current.has(post.object.author)
+        && !blockedPeersRef.current.has(post.authorFingerprint)
+        && !hiddenPostIdsRef.current.has(post.object.object_id)
+        && !hiddenDiscoveryIdsRef.current.has(post.object.object_id)
+        && post.hidden !== true
+      )
+      .map((post) => post.object.object_id));
+    const candidates = {
+      recommendations: homeFeedInjectionCandidatesRef.current.recommendations
+        .map((post) => post.object.object_id),
+      discovery: homeFeedInjectionCandidatesRef.current.discovery
+        .map((post) => post.object.object_id)
+    };
+
+    let changed = false;
+    for (const post of incomingViews) {
+      const postId = post.object.object_id;
+      if (knownIds.has(postId) || !eligibleIds.has(postId)) continue;
+      try {
+        changed = scheduler.recordNewEligiblePost(postId, candidates) || changed;
+      } catch (error) {
+        addLog(`Home feed injection scheduling failed for ${postId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    postViewsRef.current = incomingViews.reduce(upsertLocalPostView, postViewsRef.current);
+    if (changed) setHomeFeedInjectionRevision((revision) => revision + 1);
+  }, [addLog]);
+
+  const flushPendingHomeFeedInjections = useCallback(() => {
+    const scheduler = homeFeedInjectionSchedulerRef.current;
+    if (!scheduler) return;
+    const candidates = {
+      recommendations: homeFeedInjectionCandidatesRef.current.recommendations
+        .map((post) => post.object.object_id),
+      discovery: homeFeedInjectionCandidatesRef.current.discovery
+        .map((post) => post.object.object_id)
+    };
+    try {
+      if (scheduler.flushPendingInjections(candidates)) {
+        setHomeFeedInjectionRevision((revision) => revision + 1);
+      }
+    } catch (error) {
+      addLog(`Pending Home feed injection could not be scheduled: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [addLog]);
 
   async function syncFeedPeer(peerId: string): Promise<void> {
     const sync = feedSyncPeerRef.current;
@@ -650,12 +801,13 @@ function App() {
         const expiresAtMs = Date.parse(expiresAt);
         if (!requestId || Number.isNaN(expiresAtMs) || now >= expiresAtMs || findRequestCacheRef.current.has(requestId)) return;
         findRequestCacheRef.current.set(requestId, expiresAtMs);
-        const localObjects = isPhase7Query
-          ? await filterObjectsByFindQuery(store, buildLocalQueryCriteria(queryFields))
-          : (await Promise.all(requestedObjectIds.map(async (objectId) => {
+        const localPage = isPhase7Query
+          ? await findObjectsByFindQueryPage(store, buildLocalQueryCriteria(queryFields))
+          : { objects: (await Promise.all(requestedObjectIds.map(async (objectId) => {
             const object = await store.get(objectId);
             return object && await validateObject(object) ? object : null;
-          }))).filter((object): object is NonNullable<typeof object> => object !== null);
+          }))).filter((object): object is NonNullable<typeof object> => object !== null), hasMore: false };
+        const localObjects = localPage.objects;
         const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
         const nextPeers = selectFindPeers(connectedPeers, peerId, identityRef.current?.id ?? '', 2);
         const aggregationStartedAt = Date.now();
@@ -664,11 +816,14 @@ function App() {
         addLog(`children selected: ${nextPeers.join(', ') || 'none'}`);
         addLog(`upstream recorded: ${peerId}`);
         let aggregation: FindAggregation;
-        aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason) => {
+        aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason, aggregatedHasMore) => {
           try {
             const transport = objectTransportRef.current;
             if (!transport || !transport.connectedPeers().includes(peerId)) return;
-            const responseObjects = await prepareFindQueryResponse(objects, queryFields);
+            const responsePage = await prepareFindQueryPage(objects, queryFields);
+            const responseObjects = responsePage.objects;
+            const responseHasMore = aggregatedHasMore || responsePage.hasMore;
+            const responseComplete = reason === 'all-objects-found' || aggregation.allChildrenResponded();
             addLog('aggregate complete');
             addLog(`reason: ${reason}`);
             addLog(`returning: ${responseObjects.length} objects`);
@@ -681,7 +836,12 @@ function App() {
               responseObjects,
               undefined,
               typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-              expiresAt
+              expiresAt,
+              responseComplete,
+              queryFields.order === 'created_at_desc' && queryFields.limit !== undefined
+                ? aggregation.allChildrenSupportPagination()
+                : undefined,
+              responseHasMore
             );
             if (!await sendFindPacketToConnectedPeer(transport, peerId, response)) return;
             addLog(`aggregate sent upstream to ${peerId}`);
@@ -694,7 +854,7 @@ function App() {
             findRequestCacheRef.current.delete(requestId);
             addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
           }
-        }, undefined, isPhase7Query);
+        }, undefined, isPhase7Query, queryFields.order === 'created_at_desc' && queryFields.limit !== undefined);
         findAggregationRef.current.set(requestId, {
           aggregation,
           requestedObjectIds: new Set(requestedObjectIds),
@@ -707,7 +867,7 @@ function App() {
         addLog(`PHASE6 AGG CREATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} upstream=${peerId} children=${nextPeers.join(',') || 'none'} requested=${requestedObjectIds.length} localHits=${localObjects.length}`);
         addLog(`PHASE6 AGG STORED requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
         for (const nextPeer of nextPeers) aggregation.addChild(nextPeer);
-        aggregation.addLocal(localObjects);
+        aggregation.addLocal(localObjects, localPage.hasMore);
         if (!aggregation.isComplete() && (isPhase7Query || requestedObjectIds.some((objectId) => !localObjects.some((object) => object.object_id === objectId))) && packet.payload.ttl > 0) {
           for (const nextPeer of nextPeers) {
             const origin = typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender;
@@ -772,7 +932,10 @@ function App() {
               response.payload.object,
               undefined,
               response.payload.origin,
-              response.payload.expiresAt
+              response.payload.expiresAt,
+              response.payload.complete === true,
+              response.payload.pagination_supported === true,
+              response.payload.has_more
             );
             if (!shouldRetainFindRequestRoute(peerId, route, aggregationState)) {
               findRequestRouteRef.current.delete(response.payload.requestId);
@@ -800,7 +963,10 @@ function App() {
               undefined,
               undefined,
               origin,
-              expiresAt
+              expiresAt,
+              true,
+              query?.order === 'created_at_desc' && query.limit !== undefined ? true : undefined,
+              query?.order === 'created_at_desc' && query.limit !== undefined ? false : undefined
             );
             findRequestRouteRef.current.delete(requestId);
             await objectTransportRef.current?.send(fromPeer, emptyResponse);
@@ -841,15 +1007,21 @@ function App() {
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
-          const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; since?: string; limit?: number; order?: 'created_at_desc' };
-          const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
+          const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; page_before?: { created_at: string; object_id: string }; since?: string; limit?: number; order?: 'created_at_desc' };
+          const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.page_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
           if (isPhase7Query) {
             addLog(`PHASE7 CHILD RESPONSE requestId=${requestId} from=${peerId} objects=${objects.map((object) => object.object_id).join(', ') || 'none'} aggregate=${aggregationState.aggregation.aggregateSize() + objects.length}`);
           }
           addLog(`child ${peerId} response received`);
           addLog(`objects: ${objects.length}`);
           addLog(`PHASE6 CHILD RESPONSE local=${identityRef.current?.id ?? 'unknown'} from=${peerId} requestId=${requestId} objects=${objects.length} pendingBefore=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
-          await aggregationState.aggregation.addChildObjects(peerId, objects);
+          await aggregationState.aggregation.addChildObjects(
+            peerId,
+            objects,
+            packet.payload.complete === true,
+            packet.payload.pagination_supported === true && typeof packet.payload.has_more === 'boolean',
+            packet.payload.has_more === true
+          );
           aggregationState.aggregation.startGracePeriod();
           addLog(`PHASE6 AGG UPDATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} aggregate=${aggregationState.aggregation.aggregateSize()} pendingAfter=${aggregationState.aggregation.pendingChildren().join(', ') || 'none'}`);
           addLog(`aggregate: ${aggregationState.aggregation.aggregateSize()} unique objects`);
@@ -871,7 +1043,10 @@ function App() {
             [...packet.payload.objects],
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined,
+            packet.payload.complete === true,
+            packet.payload.pagination_supported === true,
+            packet.payload.has_more
           )
           : await buildFindResponsePacket(
             identityRef.current?.id ?? 'unknown',
@@ -881,7 +1056,10 @@ function App() {
             packet.payload.object,
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
-            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined
+            typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined,
+            packet.payload.complete === true,
+            packet.payload.pagination_supported === true,
+            packet.payload.has_more
           );
         if (!shouldRetainRoute) {
           findRequestRouteRef.current.delete(requestId!);
@@ -898,6 +1076,12 @@ function App() {
       : null;
     const validIncomingPost = incomingPost ? await validateObject(incomingPost) : false;
     const stored = await receiveObjectPacket(packet, store);
+    if (stored && validIncomingPost && incomingPost) {
+      const authorFingerprint = await resolvePostAuthorFingerprint(incomingPost.author);
+      recordNewEligibleHomePosts([
+        createLocalPostView(incomingPost as PostObject, authorFingerprint, { source: 'peer' })
+      ]);
+    }
     if (validIncomingPost && incomingPost) {
       await cachePostChain(incomingPost);
     }
@@ -1260,6 +1444,7 @@ function App() {
           ? createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' })
           : null;
         if (view) {
+          recordNewEligibleHomePosts([view]);
           setPostViews((prev) => upsertLocalPostView(prev, view));
           await cachePostChain(object);
           void replyUnread.discover([object]);
@@ -1370,6 +1555,7 @@ function App() {
               if (object.object_type === 'mycelium.post') receivedViews.push(createLocalPostView(object as PostObject, authorFingerprint, { source: 'peer' }));
             }
 
+            recordNewEligibleHomePosts(receivedViews);
             setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
             addLog(`Received ${newlyStoredObjects.length} canonical objects from ${peer}`);
           } catch (error) {
@@ -1842,18 +2028,24 @@ function App() {
   }
 
   async function handleAddPeerByAddress(address: string) {
-    if (!identity) return;
+    if (!identity) return false;
     const normalized = address.trim();
-    if (!normalized) return;
-    if (blockedPeersRef.current.has(normalized)) {
-      addLog(`Refusing to add blocked peer address: ${normalized}`);
-      return;
+    if (!normalized) return false;
+    const peerId = parsePeerId(normalized);
+    if (normalized.startsWith('@') && !peerId) {
+      addLog('Could not add peer: the supplied @handle is invalid.');
+      return false;
+    }
+    const blockedPeerAddress = peerId ?? normalized;
+    if (blockedPeersRef.current.has(blockedPeerAddress)) {
+      addLog(`Refusing to add blocked peer address: ${blockedPeerAddress}`);
+      return false;
     }
 
-    let fingerprint = normalized;
-    let publicKey = normalized;
+    let fingerprint = peerId ?? normalized;
+    let publicKey = peerId ?? normalized;
 
-    if (!normalized.includes(':') && !normalized.startsWith('myc:') && normalized.length > 40) {
+    if (!peerId && !normalized.includes(':') && !normalized.startsWith('myc:') && normalized.length > 40) {
       try {
         fingerprint = await deriveFingerprint(normalized);
       } catch {
@@ -1867,7 +2059,7 @@ function App() {
       fingerprint,
       displayName: existing?.displayName,
       addedAt: existing?.addedAt ?? new Date().toISOString(),
-      followed: existing?.followed ?? false,
+      followed: true,
       follower: existing?.follower,
       online: existing?.online ?? false,
       connected: existing?.connected ?? false,
@@ -1880,19 +2072,29 @@ function App() {
     await saveContact(contact);
     setContacts((prev) => {
       const filtered = prev.filter((entry) => entry.fingerprint !== fingerprint);
-      return dedupeContactsByFingerprint([...filtered, contact]);
+      const next = dedupeContactsByFingerprint([...filtered, contact]);
+      contactsRef.current = next;
+      return next;
     });
 
     addLog(`Added peer address ${fingerprint}`);
+    if (!existing?.followed) {
+      addLog(`Following ${fingerprint}`);
+    }
 
     const socket = signallingSocketRef.current;
     const manager = ensurePeerManager(fingerprint);
     if (socket && socket.readyState === WebSocket.OPEN && manager) {
-      requestPeerOffer(fingerprint, manager, socket);
+      if (manager.isDataChannelOpen()) {
+        await sendPeerMetadata(manager, fingerprint, true);
+      } else {
+        requestPeerOffer(fingerprint, manager, socket);
+      }
       addLog(`Attempting connection to ${fingerprint}`);
     } else {
       addLog('Peer added. Waiting for signalling connection to connect.');
     }
+    return true;
   }
 
   async function handleToggleFollow(peerId: string) {
@@ -2080,6 +2282,7 @@ function App() {
     logPostChainResult(postObject.object_id, postChain);
 
     const localPostView = createLocalPostView(postObject, identity.id, { source: 'local' });
+    recordNewEligibleHomePosts([localPostView]);
     setPostViews((prev) => upsertLocalPostView(prev, localPostView));
     await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
 
@@ -2260,10 +2463,25 @@ function App() {
         isBlocked: isBlockedPost
       }
     );
+    const selectedIds = new Set([
+      ...baseline.map((post) => post.object.object_id),
+      ...recommendationCandidates.map((post) => post.object.object_id)
+    ]);
+    homeFeedInjectionCandidatesRef.current = {
+      recommendations: recommendationCandidates,
+      discovery: [...visibleDiscoveryPosts]
+        .filter((post) => !selectedIds.has(post.object.object_id))
+        .sort((left, right) =>
+          (locallyKnownReplyCounts.get(right.object.object_id) ?? 0) - (locallyKnownReplyCounts.get(left.object.object_id) ?? 0)
+          || Date.parse(right.object.created_at) - Date.parse(left.object.created_at)
+          || left.object.object_id.localeCompare(right.object.object_id)
+        )
+    };
     const computedHomePosts = composeHomeFeed({
       baseline,
       recommendations: recommendationCandidates,
       discovery: visibleDiscoveryPosts,
+      injections: homeFeedInjectionSchedulerRef.current?.getState().injections ?? [],
       getRecommendationSummary,
       replyCounts: locallyKnownReplyCounts
     });
@@ -2272,7 +2490,16 @@ function App() {
     }
     addLog(`Home feed selector: total posts=${postViews.length} followed=${followedPostCount} after-filter=${afterFilterCount} final=${computedHomePosts.length}`);
     return computedHomePosts;
-  }, [postViews, discoveryPosts, contacts, identity, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision, locallyKnownReplyCounts]);
+  }, [postViews, discoveryPosts, contacts, identity, blockedPeerSet, hiddenPostIds, hiddenDiscoveryIds, recommendationRevision, homeFeedInjectionRevision, locallyKnownReplyCounts]);
+
+  const homeFeedInjectionCandidateRevision = [
+    ...homeFeedInjectionCandidatesRef.current.recommendations.map((post) => post.object.object_id),
+    '::',
+    ...homeFeedInjectionCandidatesRef.current.discovery.map((post) => post.object.object_id)
+  ].join('|');
+  useEffect(() => {
+    flushPendingHomeFeedInjections();
+  }, [homeFeedInjectionCandidateRevision, identity?.id, flushPendingHomeFeedInjections]);
 
   const profileContact = profileContactId ? contactsRef.current.find((contact) => contact.fingerprint === profileContactId || contact.publicKey === profileContactId) : undefined;
   const profileAuthorIds = new Set([profileContactId, profileContact?.fingerprint, profileContact?.publicKey].filter((value): value is string => Boolean(value)));
@@ -2565,6 +2792,9 @@ function App() {
       if (recommendationChanges > 0) setRecommendationRevision((revision) => revision + 1);
       const discoveryStore = objectStoreRef.current;
       if (discoveryStore) {
+        const knownPostIds = new Set((await Promise.all(
+          verifiedPosts.map(async (view) => await discoveryStore.get(view.object.object_id) ? view.object.object_id : null)
+        )).filter((postId): postId is string => postId !== null));
         for (const recommendation of validated.recommendations) {
           try {
             await discoveryStore.put(recommendation);
@@ -2582,6 +2812,7 @@ function App() {
             logPostChainResult(chain.objects[chain.objects.length - 1]?.object_id ?? 'unknown', chain);
           }
         });
+        recordNewEligibleHomePosts(verifiedPosts.filter((view) => !knownPostIds.has(view.object.object_id)));
       }
       void replyUnread.discover([...verifiedPosts, ...verifiedReplies].map((post) => post.object));
       setDiscoveryReplyPosts((previous) => mergeLocalPostViews(previous, verifiedReplies));
@@ -3519,6 +3750,7 @@ function App() {
             onDiagnosticLog={addLog}
             replyCounts={locallyKnownReplyCounts}
             contacts={contacts}
+            contactsLoaded={contactsLoaded}
             popularPeers={popularPeers}
             onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
@@ -3743,6 +3975,9 @@ function App() {
             signallingStatus={signallingStatus}
             connectedPeers={connectedPeersCount}
             syncStatus={syncStatus}
+            recommendationFrequency={homeFeedInjectionFrequencies.recommendation}
+            discoveryFrequency={homeFeedInjectionFrequencies.discovery}
+            onInjectionFrequencyChange={handleInjectionFrequencyChange}
             onAddPeerAddress={handleAddPeerByAddress}
             onResetApp={() => {
               setHiddenPostIds(new Set());

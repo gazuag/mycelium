@@ -9,7 +9,12 @@ import type { DistributedObject, ObjectStore } from '../object-layer/types';
 import { useDmUnread } from './useDmUnread';
 
 export interface DmConversationOutbox {
-  get(objectId: string): Promise<{ delivered_direct: boolean; replicated_to: string[] } | null>;
+  get(objectId: string): Promise<{
+    direct_send_attempted?: boolean;
+    replication_send_attempted?: boolean;
+    replicated_to?: string[];
+    delivered_direct?: boolean;
+  } | null>;
 }
 
 export interface DmConversationService {

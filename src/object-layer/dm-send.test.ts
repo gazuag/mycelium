@@ -90,7 +90,7 @@ describe('sendDm', () => {
     if (result.status !== 'sent') throw new Error('Expected a sent DM');
     expect(records).toEqual([result.object]);
     expect(result.object.recipient).toBe(recipient.publicKey);
-    expect(result.replicatedTo).toEqual(['peer-replica']);
+    expect(result.attemptedTo).toEqual(['peer-replica']);
     await expect(decryptDmObject({
       object: result.object,
       identity: recipient,
@@ -189,7 +189,7 @@ describe('sendDm', () => {
     expect(replicate).not.toHaveBeenCalled();
   });
 
-  it('keeps sent status and an empty replicatedTo list when replication throws', async () => {
+  it('keeps sent status and an empty attemptedTo list when replication throws', async () => {
     const sender = await createIdentity('sender');
     const recipient = await createIdentity('recipient');
     const records: DistributedObject[] = [];
@@ -203,7 +203,7 @@ describe('sendDm', () => {
     });
 
     expect(result.status).toBe('sent');
-    expect(result.replicatedTo).toEqual([]);
+    expect(result.attemptedTo).toEqual([]);
     expect(records).toHaveLength(1);
   });
 
@@ -221,7 +221,7 @@ describe('sendDm', () => {
     });
 
     expect(result.status).toBe('sent');
-    expect(result.replicatedTo).toEqual(peerIds);
+    expect(result.attemptedTo).toEqual(peerIds);
   });
 
   it('does not log or persist plaintext in clear text', async () => {

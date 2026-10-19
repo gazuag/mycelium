@@ -180,7 +180,21 @@ describe('LocalPostView UI migration', () => {
     expect(markup).toContain('Hello @alice');
   });
 
-  it('orders injected Home feed posts by injectedAt and keeps baseline posts chronological', () => {
+  it('does not render feed-injection debug metadata on posts', () => {
+    const markup = renderToStaticMarkup(
+      <PostCard
+        post={makeView()}
+        {...commonPostProps}
+        feedSource="recommendation"
+        recommendationLabel="Recommended by Alice"
+      />
+    );
+
+    expect(markup).not.toContain('[DEBUG:');
+    expect(markup).not.toContain('feed-debug-line');
+  });
+
+  it('sorts injections by their stable timestamp and moves them down as newer posts arrive', () => {
     const baselineNewest = makeView();
     const injected = makeView();
     const baselineOlder = makeView();
@@ -199,9 +213,9 @@ describe('LocalPostView UI migration', () => {
         object: { ...baselineNewest.object, object_id: 'baseline-newest', created_at: '2026-08-27T00:00:00.000Z', payload: { content: 'baseline newest' } }
       }
     ];
-    const markup = renderToStaticMarkup(
+    const renderHomeFeed = (feedPosts: LocalPostView[]) => renderToStaticMarkup(
       <HomePage
-        posts={posts}
+        posts={feedPosts}
         contacts={[contact]}
         postText=""
         onPostTextChange={noop}
@@ -214,9 +228,24 @@ describe('LocalPostView UI migration', () => {
         onHide={noop}
       />
     );
+    const markup = renderHomeFeed(posts);
 
     expect(markup.indexOf('baseline newest')).toBeLessThan(markup.indexOf('injected'));
     expect(markup.indexOf('injected')).toBeLessThan(markup.indexOf('baseline older'));
+
+    const newerPost = {
+      ...makeView(),
+      object: {
+        ...makeView().object,
+        object_id: 'baseline-newest-arrival',
+        created_at: '2026-08-28T00:00:00.000Z',
+        payload: { content: 'baseline newest arrival' }
+      }
+    };
+    const refreshedMarkup = renderHomeFeed([newerPost, ...posts]);
+    expect(refreshedMarkup.indexOf('baseline newest arrival')).toBeLessThan(refreshedMarkup.indexOf('injected'));
+    expect(refreshedMarkup.indexOf('baseline newest')).toBeLessThan(refreshedMarkup.indexOf('injected'));
+    expect(refreshedMarkup.indexOf('baseline newest')).toBeLessThan(refreshedMarkup.indexOf('baseline older'));
   });
 
   it('renders distinct recommendation and Discovery attribution with recommender names', () => {
@@ -670,7 +699,7 @@ describe('relationship and discovery people UI', () => {
     expect(peopleTab.indexOf('Recent Person')).toBeLessThan(peopleTab.indexOf('Older Person'));
   });
 
-  it('keeps popular peer suggestions visible after the user follows someone', () => {
+  it('does not start a suggestion cycle when the user already follows someone', () => {
     const followedPeer: Contact = {
       publicKey: 'aa:bb:cc:dd:ee:ff:00:22',
       fingerprint: 'aa:bb:cc:dd:ee:ff:00:22',
@@ -695,9 +724,9 @@ describe('relationship and discovery people UI', () => {
       />
     );
 
-    expect(markup).toContain('Popular posters right now.');
-    expect(markup).toContain('Unfollow');
-    expect(markup).toContain('aria-label="Dismiss popular peer suggestions"');
+    expect(markup).not.toContain('Popular posters right now.');
+    expect(markup).not.toContain('Unfollow');
+    expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
     expect(markup).not.toContain('New posts from people you follow.');
     expect(markup).not.toContain('Refresh posts');
   });

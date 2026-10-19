@@ -108,14 +108,14 @@ function makeHarness(options: {
   contact?: Contact | null;
   peers?: string[];
   sendDirect?: (peerId: string, object: DistributedObject) => Promise<boolean>;
-  replicate?: (object: DistributedObject, alreadyReplicatedTo: Set<string>) => Promise<string[]>;
+  replicate?: (object: DistributedObject, alreadyAttemptedTo: Set<string>) => Promise<string[]>;
   flush?: () => Promise<unknown>;
 } = { identity: null }) {
   const records: DistributedObject[] = [];
   const outboxStore = makeOutboxStore();
   const connectedPeers = options.peers ?? [];
   const sends: Array<{ peerId: string; object: DistributedObject }> = [];
-  const replicateCalls: Array<{ object: DistributedObject; alreadyReplicatedTo: Set<string> }> = [];
+  const replicateCalls: Array<{ object: DistributedObject; alreadyAttemptedTo: Set<string> }> = [];
   const outbox = createOutboxService({
     outbox: outboxStore,
     objectStore: {
@@ -127,8 +127,8 @@ function makeHarness(options: {
       sends.push({ peerId, object });
       return true;
     }),
-    replicate: options.replicate ?? (async (object, alreadyReplicatedTo) => {
-      replicateCalls.push({ object, alreadyReplicatedTo });
+    replicate: options.replicate ?? (async (object, alreadyAttemptedTo) => {
+      replicateCalls.push({ object, alreadyAttemptedTo });
       return [];
     }),
     resolveRecipientPeerId: (publicKey) => publicKey === options.contact?.publicKey
@@ -146,7 +146,7 @@ function makeHarness(options: {
           enqueue: (object) => outbox.enqueue(object),
           flush: options.flush,
           getEntry: (objectId) => outbox.getEntry(objectId),
-          getReplicatedTo: (objectId) => outbox.getReplicatedTo(objectId)
+          getAttemptedTo: (objectId) => outbox.getAttemptedTo(objectId)
         }
       : outbox,
     connectedPeers: () => connectedPeers,
@@ -169,7 +169,7 @@ describe('createDmService', () => {
       contact,
       peers: [contact.fingerprint, 'replica-peer'],
       replicate: async (object) => {
-        harness.replicateCalls.push({ object, alreadyReplicatedTo: new Set() });
+        harness.replicateCalls.push({ object, alreadyAttemptedTo: new Set() });
         return ['replica-peer'];
       }
     });
@@ -181,8 +181,14 @@ describe('createDmService', () => {
     expect(harness.records).toHaveLength(1);
     expect(harness.sends).toMatchObject([{ peerId: contact.fingerprint }]);
     expect(harness.replicateCalls).toHaveLength(1);
-    expect(await harness.outbox.getEntry(harness.records[0].object_id)).toBeNull();
-    expect(harness.outbox.getReplicatedTo(harness.records[0].object_id)).toEqual(['replica-peer']);
+    expect(await harness.outbox.getEntry(harness.records[0].object_id)).toMatchObject({
+      direct_send_attempted: true,
+      replication_send_attempted: true
+    });
+    expect(harness.outbox.getAttemptedTo(harness.records[0].object_id)).toEqual([
+      contact.fingerprint,
+      'replica-peer'
+    ]);
   });
 
   it('returns no_key for an unknown contact without storing or enqueuing', async () => {
@@ -197,7 +203,7 @@ describe('createDmService', () => {
         enqueue,
         flush: async () => ({}),
         getEntry: async () => null,
-        getReplicatedTo: () => []
+        getAttemptedTo: () => []
       },
       connectedPeers: () => []
     });
@@ -223,8 +229,8 @@ describe('createDmService', () => {
     expect(harness.records).toHaveLength(1);
     expect(await harness.outbox.getEntry(harness.records[0].object_id)).toMatchObject({
       attempts: 1,
-      replicated_to: [],
-      delivered_direct: false
+      replication_send_attempted: false,
+      direct_send_attempted: false
     });
     expect(harness.sends).toEqual([]);
     expect(harness.replicateCalls).toHaveLength(1);

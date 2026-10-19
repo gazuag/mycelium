@@ -942,6 +942,19 @@ body, html, #root {
   min-width: 0;
 }
 
+.follow-confirmation {
+  position: fixed;
+  z-index: 1000;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius-md);
+  background: var(--color-success-surface);
+  color: var(--color-success);
+  box-shadow: var(--shadow-card);
+}
+
 .messages-page {
   gap: var(--space-3);
 }
@@ -1253,15 +1266,6 @@ body, html, #root {
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
   line-height: 1.4;
-}
-
-.feed-debug-line {
-  display: block;
-  margin-top: 0.3rem;
-  color: var(--color-text-muted);
-  font-size: 0.65rem;
-  line-height: 1.3;
-  overflow-wrap: anywhere;
 }
 
 .post-card:first-child {

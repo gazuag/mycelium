@@ -36,9 +36,11 @@ TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')
 TLS_KEY_PATH = os.environ.get('TLS_KEY_PATH')
 PEER_DISCOVERY_WINDOW_DAYS = int(os.environ.get('PEER_DISCOVERY_WINDOW_DAYS', '30'))
 MAX_REPLY_ACTIVITY_BONUS = 3
+MAX_LIKE_ACTIVITY_BONUS = 3
+ENGAGEMENT_SIGNAL_WEIGHT = 0.5
 MAX_POSTS_PER_AUTHOR_PER_DISCOVERY_BATCH = 2
 DISCOVERY_INTERACTION_SHARE = 0.25
-MAX_PEER_REPLY_ACTIVITY_SCORE = 3
+MAX_PEER_ACTIVITY_SCORE = 10
 
 clients: Dict[str, WebSocketServerProtocol] = {}
 pending_signals: Dict[str, List[Tuple[float, str]]] = {}
@@ -178,7 +180,7 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
         'SELECT object_json, tags FROM discovery_posts'
     ).fetchall()
     objects = []
-    replies_by_post: Dict[str, int] = {}
+    replies_by_post: Dict[str, Set[str]] = {}
     for object_json, tags in rows:
         try:
             obj = json.loads(object_json)
@@ -189,9 +191,16 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
         objects.append((obj, tags if isinstance(tags, str) else ''))
         payload = obj.get('payload')
         reply_to = payload.get('reply_to') if isinstance(payload, dict) else None
-        if obj.get('object_type') == 'mycelium.post' and isinstance(reply_to, str) \
-                and len(reply_to) == 64 and all(character in '0123456789abcdef' for character in reply_to):
-            replies_by_post[reply_to] = replies_by_post.get(reply_to, 0) + 1
+        if obj.get('object_type') == 'mycelium.post' and _is_object_id(reply_to):
+            reply_id = obj.get('object_id')
+            if isinstance(reply_id, str) and reply_id:
+                replies_by_post.setdefault(reply_to, set()).add(reply_id)
+
+    likes_by_post: Dict[str, Set[str]] = {}
+    recommendations = _latest_recommendations([obj for obj, _ in objects])
+    for (author, post_id), recommendation in recommendations.items():
+        if recommendation['action'] == 'recommend':
+            likes_by_post.setdefault(post_id, set()).add(author)
 
     feed_posts = []
     interaction_objects = []
@@ -207,12 +216,13 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
 
     interaction_limit = min(len(interaction_objects), int(limit * DISCOVERY_INTERACTION_SHARE))
     feed_limit = min(len(feed_posts), limit - interaction_limit)
-    ranked_posts = _sample_reply_active_posts(feed_posts, replies_by_post, feed_limit)
+    ranked_posts = _sample_reply_active_posts(feed_posts, replies_by_post, likes_by_post, feed_limit)
     if len(ranked_posts) + interaction_limit < limit:
         remaining_posts = [post for post in feed_posts if post not in ranked_posts]
         ranked_posts.extend(_sample_reply_active_posts(
             remaining_posts,
             replies_by_post,
+            likes_by_post,
             limit - len(ranked_posts) - interaction_limit
         ))
     sampled_interactions = random.sample(interaction_objects, interaction_limit)
@@ -228,7 +238,48 @@ def load_discovery_posts(limit: int, tag: Optional[str]):
     return selected
 
 
-def _sample_reply_active_posts(posts: List[dict], replies_by_post: Dict[str, int], limit: int) -> List[dict]:
+def _is_object_id(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 \
+        and all(character in '0123456789abcdef' for character in value)
+
+
+def _latest_recommendations(objects: List[dict]) -> Dict[Tuple[str, str], dict]:
+    latest_by_author_post: Dict[Tuple[str, str], dict] = {}
+    seen_object_ids = set()
+    for obj in objects:
+        if obj.get('object_type') != 'mycelium.recommendation':
+            continue
+        payload = obj.get('payload')
+        author = obj.get('author')
+        post_id = payload.get('post_id') if isinstance(payload, dict) else None
+        sequence = obj.get('sequence')
+        action = payload.get('action') if isinstance(payload, dict) else None
+        object_id = obj.get('object_id')
+        if not isinstance(author, str) or not author.strip() or not _is_object_id(post_id) \
+                or not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1 \
+                or (payload.get('sequence') if isinstance(payload, dict) else None) != sequence \
+                or action not in {'recommend', 'withdraw'} \
+                or not isinstance(object_id, str) or not object_id or object_id in seen_object_ids:
+            continue
+        seen_object_ids.add(object_id)
+        key = (author, post_id)
+        previous = latest_by_author_post.get(key)
+        if previous is None or sequence > previous['sequence'] \
+                or (sequence == previous['sequence'] and object_id > previous['object_id']):
+            latest_by_author_post[key] = {
+                'sequence': sequence,
+                'object_id': object_id,
+                'action': action
+            }
+    return latest_by_author_post
+
+
+def _sample_reply_active_posts(
+    posts: List[dict],
+    replies_by_post: Dict[str, Set[str]],
+    likes_by_post: Dict[str, Set[str]],
+    limit: int
+) -> List[dict]:
     remaining = list(posts)
     selected: List[dict] = []
     author_counts: Dict[str, int] = {}
@@ -238,14 +289,14 @@ def _sample_reply_active_posts(posts: List[dict], replies_by_post: Dict[str, int
             if author_counts.get(post.get('author', ''), 0) < MAX_POSTS_PER_AUTHOR_PER_DISCOVERY_BATCH
         ]
         candidates = diverse or remaining
-        weights = [
-            1 + min(
-                replies_by_post.get(post.get('object_id', ''), 0)
-                if isinstance(post.get('object_id'), str) else 0,
-                MAX_REPLY_ACTIVITY_BONUS
-            )
-            for post in candidates
-        ]
+        weights = []
+        for post in candidates:
+            post_id = post.get('object_id')
+            reply_count = len(replies_by_post.get(post_id, set())) if isinstance(post_id, str) else 0
+            like_count = len(likes_by_post.get(post_id, set())) if isinstance(post_id, str) else 0
+            engagement_bonus = min(reply_count, MAX_REPLY_ACTIVITY_BONUS) * ENGAGEMENT_SIGNAL_WEIGHT
+            engagement_bonus += min(like_count, MAX_LIKE_ACTIVITY_BONUS) * ENGAGEMENT_SIGNAL_WEIGHT
+            weights.append(1 + engagement_bonus)
         choice = random.random() * sum(weights)
         selected_index = len(candidates) - 1
         for index, weight in enumerate(weights):
@@ -281,6 +332,13 @@ def load_peer_pool(limit: int = 50) -> List[str]:
     ).fetchall()
     peer_ids: List[str] = []
     seen = set()
+    for popular_peer in load_popular_peers(limit):
+        peer_id = popular_peer['peer_id']
+        if peer_id not in seen:
+            seen.add(peer_id)
+            peer_ids.append(peer_id)
+            if len(peer_ids) >= limit:
+                return peer_ids
     for (object_json,) in rows:
         try:
             obj = json.loads(object_json)
@@ -302,27 +360,60 @@ def load_popular_peers(limit: int = 10) -> List[dict]:
         'SELECT object_json FROM discovery_posts WHERE received_at >= ?',
         (_recent_cutoff(),)
     ).fetchall()
-    replies_by_peer: Dict[str, Set[str]] = {}
+    objects = []
+    posts_by_id: Dict[str, str] = {}
     for (object_json,) in rows:
         try:
             obj = json.loads(object_json)
         except (TypeError, json.JSONDecodeError):
             continue
-        if obj.get('object_type') not in {'mycelium.post', 'mycelium.reply'}:
+        if not isinstance(obj, dict):
             continue
+        objects.append(obj)
+        if obj.get('object_type') == 'mycelium.post' and _is_object_id(obj.get('object_id')) \
+                and isinstance(obj.get('author'), str) and obj['author'].strip():
+            posts_by_id[obj['object_id']] = obj['author']
+
+    reply_activity_by_peer_post: Dict[str, Set[str]] = {}
+    for obj in objects:
         payload = obj.get('payload')
         if not isinstance(payload, dict):
             continue
-        peer_id = payload.get('reply_to_author')
-        if isinstance(peer_id, str) and peer_id.strip():
-            peer_id = peer_id.strip()
-            reply_to = payload.get('reply_to')
-            activity_key = reply_to if isinstance(reply_to, str) and reply_to.strip() else obj.get('object_id')
-            if isinstance(activity_key, str) and activity_key:
-                replies_by_peer.setdefault(peer_id, set()).add(activity_key)
+        if obj.get('object_type') in {'mycelium.post', 'mycelium.reply'}:
+            if obj.get('object_type') == 'mycelium.post':
+                parent_id = payload.get('reply_to')
+                target_author = posts_by_id.get(parent_id) if _is_object_id(parent_id) else None
+                peer_id = _peer_id_for_author(target_author) if target_author else payload.get('reply_to_author')
+                if not isinstance(parent_id, str) or not parent_id.strip():
+                    parent_id = obj.get('object_id')
+            else:
+                parent_id = payload.get('reply_to')
+                peer_id = payload.get('reply_to_author')
+                if not isinstance(parent_id, str) or not parent_id:
+                    parent_id = obj.get('object_id')
+            if isinstance(peer_id, str) and peer_id.strip() and isinstance(parent_id, str) and parent_id.strip():
+                reply_activity_by_peer_post.setdefault(peer_id.strip(), set()).add(parent_id)
+
+    likes_by_post: Dict[str, Set[str]] = {}
+    recommendations = _latest_recommendations(objects)
+    for (author, post_id), recommendation in recommendations.items():
+        if recommendation['action'] == 'recommend':
+            likes_by_post.setdefault(post_id, set()).add(author)
+
+    scores_by_peer: Dict[str, float] = {}
+    for peer_id, posts in reply_activity_by_peer_post.items():
+        scores_by_peer[peer_id] = scores_by_peer.get(peer_id, 0) + len(posts)
+    for post_id, likers in likes_by_post.items():
+        post_author = posts_by_id.get(post_id)
+        if not post_author:
+            continue
+        peer_id = _peer_id_for_author(post_author)
+        scores_by_peer[peer_id] = scores_by_peer.get(peer_id, 0) \
+            + min(len(likers), MAX_LIKE_ACTIVITY_BONUS) * ENGAGEMENT_SIGNAL_WEIGHT
+
     ranked = [
-        (peer_id, min(len(reply_ids), MAX_PEER_REPLY_ACTIVITY_SCORE))
-        for peer_id, reply_ids in replies_by_peer.items()
+        (peer_id, min(score, MAX_PEER_ACTIVITY_SCORE))
+        for peer_id, score in scores_by_peer.items()
     ]
     random.shuffle(ranked)
     ranked.sort(key=lambda item: -item[1])

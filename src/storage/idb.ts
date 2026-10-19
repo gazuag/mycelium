@@ -1,6 +1,7 @@
 import { Contact, SignedProfile } from '../types';
 import { exportEncryptionPrivateKey, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
 import { compareFeedKey } from '../object-layer/feed-page';
+import type { InboxBackfillState } from '../object-layer/inbox-sync';
 import type { FeedCursor } from '../object-layer/types';
 
 const DB_NAME = 'mycelium_p2p';
@@ -15,7 +16,9 @@ let identityLoadPromise: Promise<CompleteLocalIdentityRecord | null> | null = nu
 
 interface InboxCursorRecord {
   identity: string;
-  cursor: string;
+  cursor?: string;
+  backfill_cursor?: string;
+  backfill_end?: string;
   updated_at: string;
 }
 
@@ -169,6 +172,61 @@ export async function loadInboxCursor(identityKey: string): Promise<string | nul
   });
 }
 
+export async function loadInboxBackfillState(identityKey: string): Promise<InboxBackfillState | null> {
+  validateIdentityKey(identityKey);
+  const db = await openDatabase();
+  return new Promise<InboxBackfillState | null>((resolve, reject) => {
+    const transaction = db.transaction(INBOX_CURSOR_STORE, 'readonly');
+    const request = transaction.objectStore(INBOX_CURSOR_STORE).get(identityKey);
+    request.onsuccess = () => {
+      const record = request.result as InboxCursorRecord | undefined;
+      resolve(record?.backfill_cursor && record.backfill_end
+        ? { cursor: record.backfill_cursor, end: record.backfill_end }
+        : null);
+    };
+    request.onerror = () => reject(request.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+export async function saveInboxBackfillState(
+  identityKey: string,
+  state: InboxBackfillState | null
+): Promise<void> {
+  validateIdentityKey(identityKey);
+  if (state) {
+    const cursorTime = validateIsoCursor(state.cursor);
+    const endTime = validateIsoCursor(state.end);
+    if (cursorTime > endTime) throw new Error('Inbox backfill cursor must not exceed its end timestamp');
+  }
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(INBOX_CURSOR_STORE, 'readwrite');
+    const store = transaction.objectStore(INBOX_CURSOR_STORE);
+    const request = store.get(identityKey);
+    request.onsuccess = () => {
+      const existing = request.result as InboxCursorRecord | undefined;
+      const next: InboxCursorRecord = {
+        ...existing,
+        identity: identityKey,
+        updated_at: new Date().toISOString()
+      };
+      if (state) {
+        next.backfill_cursor = state.cursor;
+        next.backfill_end = state.end;
+      } else {
+        delete next.backfill_cursor;
+        delete next.backfill_end;
+      }
+      store.put(next);
+    };
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('Inbox backfill state transaction aborted'));
+  });
+}
+
 export async function saveInboxCursor(identityKey: string, cursor: string): Promise<string> {
   validateIdentityKey(identityKey);
   const cursorTime = validateIsoCursor(cursor);
@@ -180,8 +238,13 @@ export async function saveInboxCursor(identityKey: string, cursor: string): Prom
     let resultingCursor = cursor;
     request.onsuccess = () => {
       const existing = request.result as InboxCursorRecord | undefined;
-      if (existing && Date.parse(existing.cursor) > cursorTime) resultingCursor = existing.cursor;
-      store.put({ identity: identityKey, cursor: resultingCursor, updated_at: new Date().toISOString() });
+      if (existing?.cursor && Date.parse(existing.cursor) > cursorTime) resultingCursor = existing.cursor;
+      store.put({
+        ...existing,
+        identity: identityKey,
+        cursor: resultingCursor,
+        updated_at: new Date().toISOString()
+      });
     };
     request.onerror = () => reject(request.error);
     transaction.oncomplete = () => resolve(resultingCursor);

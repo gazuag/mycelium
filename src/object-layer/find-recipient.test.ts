@@ -10,13 +10,14 @@ import {
   buildFindPacket,
   buildLocalQueryCriteria,
   FindAggregation,
+  findObjectsByFindQueryPage,
   filterObjectsByFindQuery,
   getFindQueryCriteria,
   MAX_FIND_QUERY_LIMIT,
   prepareFindQueryResponse,
   respondToFindPacket
 } from './transport';
-import type { DistributedObject, ObjectContent, ObjectStore } from './types';
+import type { DistributedObject, FindResponsePacket, ObjectContent, ObjectStore } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -63,9 +64,33 @@ describe('recipient FIND queries', () => {
       recipient: 'recipient-signing-key',
       since: '2026-09-30T11:00:00.000Z'
     });
-
     expect(packet.payload.recipient).toBe('recipient-signing-key');
     expect(getFindQueryCriteria(packet)).toMatchObject({ recipient: 'recipient-signing-key', since: '2026-09-30T11:00:00.000Z' });
+  });
+
+  it('round-trips the compound page cursor through FIND and forwarding', async () => {
+    const pageBefore = {
+      created_at: '2026-09-30T12:00:00.000Z',
+      object_id: 'b'.repeat(64)
+    };
+    const packet = await buildFindPacket('requester', 'peer-a', [], undefined, 'cursor-round-trip', 1, 'requester', undefined, {
+      recipient: 'recipient-signing-key',
+      page_before: pageBefore
+    });
+    expect(packet.payload.page_before).toEqual(pageBefore);
+    expect(getFindQueryCriteria(packet)?.page_before).toEqual(pageBefore);
+
+    const forwarded = await buildForwardedFindPacket(
+      { recipient: 'recipient-signing-key', page_before: pageBefore },
+      'cursor-forwarded',
+      'peer-a',
+      'peer-b',
+      [],
+      1,
+      'requester',
+      '2026-09-30T12:05:00.000Z'
+    );
+    expect(forwarded.payload.page_before).toEqual(pageBefore);
   });
 
   it('rejects an invalid recipient criterion instead of answering it', async () => {
@@ -97,6 +122,69 @@ describe('recipient FIND queries', () => {
     await expect(respondToFindPacket(packet, store, async (response) => { responses.push(response); }, 'local'))
       .resolves.toBe(true);
     expect(responses[0]?.payload.objects).toEqual([addressed]);
+  });
+
+  it('declares compound cursor support when answering a cursor query', async () => {
+    const store = createStore();
+    const packet = await buildFindPacket('requester', 'local', [], undefined, 'cursor-supported', 0, 'requester', undefined, {
+      recipient: 'recipient-a',
+      order: 'created_at_desc',
+      page_before: {
+        created_at: '2026-09-30T12:00:00.000Z',
+        object_id: 'a'.repeat(64)
+      }
+    });
+    let response: FindResponsePacket | undefined;
+
+    await respondToFindPacket(packet, store, async (packetResponse) => { response = packetResponse; }, 'local');
+
+    expect(response?.payload.pagination_supported).toBe(true);
+  });
+
+  it('reports has_more for a bounded local ordered query', async () => {
+    const store = createStore();
+    const tiedAt = '2026-09-30T12:00:00.000Z';
+    const objects = await Promise.all(['first', 'second', 'third'].map(() =>
+      createObject({ recipient: 'recipient-a', createdAt: tiedAt })
+    ));
+    for (const object of objects) {
+      await store.put(object);
+      storedObjectIds.push(object.object_id);
+    }
+
+    const packet = await buildFindPacket('requester', 'local', [], undefined, 'local-has-more', 0, 'requester', undefined, {
+      recipient: 'recipient-a',
+      order: 'created_at_desc',
+      limit: 2
+    });
+    let response: FindResponsePacket | undefined;
+
+    await respondToFindPacket(packet, store, async (packetResponse) => { response = packetResponse; }, 'local');
+
+    expect(response?.payload.pagination_supported).toBe(true);
+    expect(response?.payload.has_more).toBe(true);
+    expect(response?.payload.objects).toHaveLength(2);
+    const page = await findObjectsByFindQueryPage(store, {
+      recipient: 'recipient-a',
+      order: 'created_at_desc',
+      limit: 2
+    });
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('rejects an invalid compound page cursor instead of ignoring it', async () => {
+    const packet = await buildFindPacket('requester', 'peer-a', [], undefined, 'invalid-cursor', 1, 'requester', undefined, {
+      recipient: 'recipient-a'
+    });
+    const invalidPacket = {
+      ...packet,
+      payload: {
+        ...packet.payload,
+        page_before: { created_at: 'not-a-date', object_id: 'invalid-id' }
+      }
+    };
+
+    expect(getFindQueryCriteria(invalidPacket)).toBeNull();
   });
 
   it('combines recipient and inclusive created_after bounds', async () => {
@@ -143,6 +231,26 @@ describe('recipient FIND queries', () => {
       order: 'created_at_desc',
       limit: 2
     })).resolves.toEqual([newest, middle]);
+  });
+
+  it('filters and orders tied timestamps by the compound page cursor', async () => {
+    const store = createStore();
+    const tiedAt = '2026-09-30T12:00:00.000Z';
+    const objects = await Promise.all(['a', 'b', 'c', 'd'].map(() =>
+      createObject({ recipient: 'recipient-a', createdAt: tiedAt })
+    ));
+    const ordered = [...objects].sort((left, right) => left.object_id.localeCompare(right.object_id));
+    for (const object of objects) {
+      await store.put(object);
+      storedObjectIds.push(object.object_id);
+    }
+
+    const result = await filterObjectsByFindQuery(store, {
+      recipient: 'recipient-a',
+      order: 'created_at_desc',
+      page_before: { created_at: tiedAt, object_id: ordered[2].object_id }
+    });
+    expect(result.map((object) => object.object_id)).toEqual(ordered.slice(0, 2).reverse().map((object) => object.object_id));
   });
 
   it('builds local query criteria with recipient and all parsed fields', () => {

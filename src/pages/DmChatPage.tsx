@@ -38,7 +38,7 @@ export function isDmDraftSendable(text: string, canSend: boolean): boolean {
 
 export function queuedDeliveryNote(result: { status: string; queued: boolean }): string {
   return result.status === 'sent' && result.queued
-    ? 'Will be delivered when they come online.'
+    ? 'Queued for retry; delivery is unconfirmed.'
     : '';
 }
 
@@ -155,7 +155,7 @@ export function DmChatPage({
               <span className="chat-timestamp">
                 {new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 {message.direction === 'out' && message.delivery && (
-                  <> · {message.delivery === 'pending' ? 'Waiting to send' : 'Sent'}</>
+                  <> · {message.delivery === 'pending' ? 'Waiting to send' : 'Attempted'}</>
                 )}
               </span>
             </div>

@@ -31,7 +31,7 @@ describe('object send failure handling', () => {
 
     expect(attempts).toEqual(['peer-fails', 'peer-succeeds']);
     expect(result.targeted).toEqual(['peer-fails', 'peer-succeeds']);
-    expect(result.stored).toEqual(['peer-succeeds']);
+    expect(result.attempted).toEqual(['peer-fails', 'peer-succeeds']);
   });
 
   it('returns an unsent reply result when the connected author send fails', async () => {

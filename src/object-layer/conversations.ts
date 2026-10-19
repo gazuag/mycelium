@@ -21,12 +21,14 @@ export interface ConversationMessage {
   readonly createdAt: string;
   readonly status: ConversationMessageStatus;
   readonly text: string | null;
-  readonly delivery?: 'pending' | 'sent';
+  readonly delivery?: 'pending' | 'attempted';
 }
 
 export interface ConversationOutboxEntry {
-  readonly delivered_direct: boolean;
-  readonly replicated_to: string[];
+  readonly direct_send_attempted?: boolean;
+  readonly delivered_direct?: boolean;
+  readonly replication_send_attempted?: boolean;
+  readonly replicated_to?: string[];
 }
 
 export interface ConversationReadOptions {
@@ -223,12 +225,12 @@ async function buildMessage({
   if (direction === 'in') return base;
 
   const entry = await getOutboxEntry(object.object_id);
-  const delivery: 'pending' | 'sent' = entry
-    && !entry.delivered_direct
-    && entry.replicated_to.length === 0
-    ? 'pending'
-    : 'sent';
-  return { ...base, delivery };
+  if (!entry) return base;
+  const wasAttempted = entry.direct_send_attempted === true
+    || entry.delivered_direct === true
+    || entry.replication_send_attempted === true
+    || (entry.replicated_to?.length ?? 0) > 0;
+  return { ...base, delivery: wasAttempted ? 'attempted' : 'pending' };
 }
 
 function directionFor(object: DistributedObject, myPublicKey: string): ConversationDirection {

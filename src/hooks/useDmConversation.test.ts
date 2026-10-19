@@ -136,7 +136,7 @@ function createHarness(options: {
       : [message(`${input.counterparty}-message`)]);
   const sendMessage = vi.fn(async (recipientPublicKey: string, text: string) => {
     if (options.sender) return await options.sender(recipientPublicKey, text) as never;
-    return { status: 'invalid', replicatedTo: [], queued: false, keyChanged: false } as never;
+    return { status: 'invalid', attemptedTo: [], queued: false, keyChanged: false } as never;
   });
   const store: ObjectStore = {
     put: async () => true,
@@ -232,7 +232,7 @@ describe('useDmConversation', () => {
       replication_policy: {}
     };
     const harness = createHarness({
-      sender: async () => ({ status: 'sent', object: sentObject, replicatedTo: [], queued: false, keyChanged: false })
+      sender: async () => ({ status: 'sent', object: sentObject, attemptedTo: [], queued: false, keyChanged: false })
     });
     harness.mount();
     await settle();
@@ -252,7 +252,7 @@ describe('useDmConversation', () => {
       refreshIntervalMs: 50,
       loader: async () => {
         loadCount += 1;
-        return [message('delivery', { direction: 'out', delivery: loadCount === 1 ? 'pending' : 'sent' })];
+        return [message('delivery', { direction: 'out', delivery: loadCount === 1 ? 'pending' : 'attempted' })];
       }
     });
     harness.mount();
@@ -262,7 +262,7 @@ describe('useDmConversation', () => {
     await vi.advanceTimersByTimeAsync(50);
     await settle();
     harness.runner.render();
-    expect(harness.runner.current.messages[0]?.delivery).toBe('sent');
+    expect(harness.runner.current.messages[0]?.delivery).toBe('attempted');
   });
 
   it('ignores a stale load that finishes after the counterparty changes', async () => {

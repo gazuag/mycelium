@@ -64,7 +64,15 @@ function createTransport(objects: DistributedObject[] = [], peers: string[] = []
         timestamp: NOW.toISOString(),
         sender: peerId,
         recipient: MY_PUBLIC_KEY,
-        payload: { objects, object_id: objects[0]?.object_id ?? '', requestId: packet.payload.requestId },
+        payload: {
+          objects,
+          object_id: objects[0]?.object_id ?? '',
+          requestId: packet.payload.requestId,
+          complete: true,
+          ...(packet.payload.order === 'created_at_desc' && packet.payload.limit !== undefined
+            ? { pagination_supported: true, has_more: false }
+            : {})
+        },
         signature: 'signature'
       };
       handlers.forEach((handler) => handler(peerId, response));
@@ -105,9 +113,7 @@ function createService(options: {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
 
 afterEach(() => {
@@ -117,7 +123,7 @@ afterEach(() => {
 describe('inbox service', () => {
   it('starts the controller and triggers an initial sync', async () => {
     vi.useFakeTimers();
-    const service = createService();
+    const service = createService({ peers: ['peer-a'] });
 
     service.start();
     await flushMicrotasks();
@@ -128,7 +134,7 @@ describe('inbox service', () => {
 
   it('coalesces a peer-connected burst into one sync', async () => {
     vi.useFakeTimers();
-    const service = createService();
+    const service = createService({ peers: ['peer-a'] });
     service.start();
     await flushMicrotasks();
     const initialCalls = service.loadCursor.mock.calls.length;

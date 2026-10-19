@@ -85,20 +85,23 @@ function createFakeTransport(
   };
 }
 
-async function flushMicrotasks() {
-  for (let index = 0; index < 12; index += 1) await Promise.resolve();
+async function waitForSends(fake: FakeTransport, count: number) {
+  await vi.waitFor(() => {
+    expect(fake.sent).toHaveLength(count);
+  });
 }
 
-async function waitForSends(fake: FakeTransport, count: number) {
-  await flushMicrotasks();
-  expect(fake.sent).toHaveLength(count);
+async function flushMicrotasks() {
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
 
 async function emitResponse(
   fake: FakeTransport,
   peerId: string,
   objects: DistributedObject[],
-  requestId?: string
+  requestId?: string,
+  complete = true,
+  hasMore = false
 ) {
   const request = fake.sent.find((sent) => sent.peerId === peerId)?.packet as FindPacket | undefined;
   if (!request) throw new Error(`No FIND sent to ${peerId}`);
@@ -106,7 +109,19 @@ async function emitResponse(
     peerId,
     SENDER,
     requestId ?? request.payload.requestId,
-    objects
+    objects,
+    undefined,
+    undefined,
+    undefined,
+    complete,
+    request.payload.page_before
+      || (request.payload.order === 'created_at_desc' && request.payload.limit !== undefined)
+      ? true
+      : undefined,
+    request.payload.page_before
+      || (request.payload.order === 'created_at_desc' && request.payload.limit !== undefined)
+      ? hasMore
+      : undefined
   );
   fake.emit(peerId, response);
 }
@@ -125,9 +140,30 @@ describe('collectFindResults', () => {
     expect(fake.sent.map((sent) => sent.peerId)).toEqual(['peer-a', 'peer-b']);
     const requestIds = fake.sent.map(({ packet }) => (packet as FindPacket).payload.requestId);
     expect(new Set(requestIds).size).toBe(1);
-    expect(fake.sent.every(({ packet }) => packet.type === 'FIND' && packet.payload.ttl > 0)).toBe(true);
+    expect(fake.sent.every(({ packet }) => packet.type === 'FIND' && packet.payload.ttl === 1)).toBe(true);
     await vi.advanceTimersByTimeAsync(5000);
     await resultPromise;
+  });
+
+  it('uses the default four-peer fanout and does not query other connected peers', async () => {
+    const fake = createFakeTransport(
+      ['peer-e', 'peer-c', 'peer-a', 'peer-d', 'peer-b'],
+      async (peerId, packet, emit) => {
+        const response = await buildFindResponseObjectsPacket(
+          peerId,
+          SENDER,
+          (packet as FindPacket).payload.requestId,
+          []
+        );
+        emit(peerId, response);
+      }
+    );
+
+    const result = await collectFindResults(options(fake));
+
+    expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    expect(fake.sent.every(({ packet }) => packet.type === 'FIND' && packet.payload.ttl === 1)).toBe(true);
+    expect(result.complete).toBe(true);
   });
 
   it('subscribes before sending', async () => {
@@ -239,6 +275,122 @@ describe('collectFindResults', () => {
     expect(fake.unsubscribeCount()).toBe(1);
   });
 
+  it('does not start another round once the requested number of objects is found', async () => {
+    const object = await createObject({ id: 'enough-in-initial-round' });
+    const fake = createFakeTransport(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    const resultPromise = collectFindResults({
+      ...options(fake, { limit: 1 }),
+      fanout: 2
+    });
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [object], undefined, false);
+    await emitResponse(fake, 'peer-b', [], undefined, false);
+
+    const result = await resultPromise;
+
+    expect(result.objects).toEqual([object]);
+    expect(result.complete).toBe(false);
+    expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b']);
+  });
+
+  it('reports a complete search when all selected peers respond even if fewer than the requested limit are found', async () => {
+    const first = await createObject({ id: 'below-requested-limit-1' });
+    const second = await createObject({ id: 'below-requested-limit-2' });
+    const fake = createFakeTransport(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    const resultPromise = collectFindResults({
+      ...options(fake, { recipient: RECIPIENT, limit: 5 }),
+      fanout: 2
+    });
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [first]);
+    await emitResponse(fake, 'peer-b', [second]);
+
+    const result = await resultPromise;
+
+    expect(result.objects.map((object) => object.object_id)).toEqual([first.object_id, second.object_id]);
+    expect(result.complete).toBe(true);
+    expect(result.responded).toEqual(['peer-a', 'peer-b']);
+    expect(result.failed).toEqual([]);
+    expect(result.timedOut).toBe(false);
+    expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b']);
+  });
+
+  it('queries additional peers after an incomplete short round and deduplicates results across rounds', async () => {
+    const shared = await createObject({ id: 'shared-between-rounds' });
+    const newObject = await createObject({ id: 'new-in-second-round' });
+    const fake = createFakeTransport(['peer-d', 'peer-b', 'peer-a', 'peer-c']);
+    const resultPromise = collectFindResults({
+      ...options(fake, { limit: 2 }),
+      fanout: 2
+    });
+
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [shared], undefined, false);
+    await emitResponse(fake, 'peer-b', [shared], undefined, false);
+    await waitForSends(fake, 4);
+    await emitResponse(fake, 'peer-c', [newObject]);
+    await emitResponse(fake, 'peer-d', [shared]);
+
+    const result = await resultPromise;
+
+    expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    expect(new Set(fake.sent.map(({ peerId }) => peerId)).size).toBe(fake.sent.length);
+    expect(result.objects.map((object) => object.object_id)).toEqual([shared.object_id, newObject.object_id]);
+    expect(result.complete).toBe(false);
+    expect(result.failed).toEqual(['peer-a', 'peer-b']);
+    expect(result.responded).toEqual(['peer-c', 'peer-d']);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('limits progressive searches to two fanout rounds', async () => {
+    const peers = Array.from({ length: 8 }, (_, index) => `peer-${String.fromCharCode(97 + index)}`);
+    const fake = createFakeTransport(peers);
+    const resultPromise = collectFindResults({
+      ...options(fake, { limit: 10 }),
+      fanout: 2
+    });
+
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [], undefined, false);
+    await emitResponse(fake, 'peer-b', [], undefined, false);
+    await waitForSends(fake, 4);
+    await emitResponse(fake, 'peer-c', [], undefined, false);
+    await emitResponse(fake, 'peer-d', [], undefined, false);
+
+    const result = await resultPromise;
+
+    expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    expect(result.complete).toBe(false);
+    expect(result.objects).toEqual([]);
+  });
+
+  it('retains partial objects and incomplete status when a later round times out', async () => {
+    vi.useFakeTimers();
+    const partial = await createObject({ id: 'partial-before-late-timeout' });
+    const fake = createFakeTransport(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
+    const resultPromise = collectFindResults({
+      ...options(fake, { limit: 3 }),
+      fanout: 2,
+      timeoutMs: 10000,
+      graceMs: 20000
+    });
+
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [partial], undefined, false);
+    await emitResponse(fake, 'peer-b', [], undefined, false);
+    await waitForSends(fake, 4);
+    await emitResponse(fake, 'peer-c', [], undefined, false);
+    await vi.advanceTimersByTimeAsync(10000);
+
+    const result = await resultPromise;
+
+    expect(result.objects).toEqual([partial]);
+    expect(result.complete).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.failed).toEqual(['peer-a', 'peer-b', 'peer-c']);
+    expect(result.responded).toEqual([]);
+  });
+
   it('settles after grace when one peer stays silent', async () => {
     vi.useFakeTimers();
     const fake = createFakeTransport(['peer-a', 'peer-b']);
@@ -256,6 +408,148 @@ describe('collectFindResults', () => {
     expect(fake.unsubscribeCount()).toBe(1);
   });
 
+  it('preserves a relay peer response marked incomplete while retaining its partial objects', async () => {
+    const object = await createObject({ id: 'partial-subtree' });
+    const fake = createFakeTransport(['peer-a']);
+    const resultPromise = collectFindResults(options(fake));
+    await waitForSends(fake, 1);
+    await emitResponse(fake, 'peer-a', [object], undefined, false);
+
+    const result = await resultPromise;
+    expect(result.objects).toEqual([object]);
+    expect(result.complete).toBe(false);
+    expect(result.responded).toEqual([]);
+    expect(result.failed).toEqual(['peer-a']);
+  });
+
+  it('requires explicit pagination support from every peer on cursor pages', async () => {
+    const criteria: FindQueryCriteria = {
+      recipient: RECIPIENT,
+      page_before: { created_at: NOW.toISOString(), object_id: 'a'.repeat(64) }
+    };
+    const legacy = createFakeTransport(['peer-a'], async (peerId, packet, emit) => {
+      const response = await buildFindResponseObjectsPacket(
+        peerId,
+        SENDER,
+        (packet as FindPacket).payload.requestId,
+        []
+      );
+      const { pagination_supported: _unsupported, ...legacyPayload } = response.payload;
+      emit(peerId, { ...response, payload: legacyPayload });
+    });
+    const legacyResultPromise = collectFindResults({ ...options(legacy, criteria) });
+    await waitForSends(legacy, 1);
+    expect(await legacyResultPromise).toMatchObject({
+      complete: true,
+      paginationSupported: false
+    });
+
+    const supporting = createFakeTransport(['peer-a'], async (peerId, packet, emit) => {
+      const response = await buildFindResponseObjectsPacket(
+        peerId,
+        SENDER,
+        (packet as FindPacket).payload.requestId,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
+        false
+      );
+      emit(peerId, response);
+    });
+    const supportingResultPromise = collectFindResults({ ...options(supporting, criteria) });
+    await waitForSends(supporting, 1);
+    expect(await supportingResultPromise).toMatchObject({
+      complete: true,
+      paginationSupported: true
+    });
+  });
+
+  it('requires explicit has_more metadata on the first bounded ordered page', async () => {
+    const object = await createObject({ id: 'legacy-first-page' });
+    const fake = createFakeTransport(['peer-a'], async (peerId, packet, emit) => {
+      const response = await buildFindResponseObjectsPacket(
+        peerId,
+        SENDER,
+        (packet as FindPacket).payload.requestId,
+        [object]
+      );
+      emit(peerId, response);
+    });
+    const resultPromise = collectFindResults(options(fake, {
+      recipient: RECIPIENT,
+      order: 'created_at_desc',
+      limit: 2
+    }));
+    await waitForSends(fake, 1);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      objects: [object],
+      complete: true,
+      paginationSupported: false,
+      hasMore: false
+    });
+  });
+
+  it('preserves peer has_more when a bounded query returns fewer objects than its limit', async () => {
+    const object = await createObject({ id: 'peer-has-more' });
+    const fake = createFakeTransport(['peer-a'], async (peerId, packet, emit) => {
+      const response = await buildFindResponseObjectsPacket(
+        peerId,
+        SENDER,
+        (packet as FindPacket).payload.requestId,
+        [object],
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
+        true
+      );
+      emit(peerId, response);
+    });
+    const resultPromise = collectFindResults(options(fake, {
+      recipient: RECIPIENT,
+      order: 'created_at_desc',
+      limit: 2
+    }));
+    await waitForSends(fake, 1);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      paginationSupported: true,
+      hasMore: true
+    });
+  });
+
+  it('treats a legacy response without completeness metadata as incomplete', async () => {
+    const fake = createFakeTransport(['peer-a']);
+    const resultPromise = collectFindResults(options(fake));
+    await waitForSends(fake, 1);
+    const request = fake.sent[0].packet as FindPacket;
+    const response = await buildFindResponseObjectsPacket(
+      'peer-a',
+      SENDER,
+      request.payload.requestId,
+      []
+    );
+    const { complete, pagination_supported: legacyPaginationSupport, ...legacyPayload } = response.payload;
+    void complete;
+    void legacyPaginationSupport;
+    fake.emit('peer-a', { ...response, payload: legacyPayload });
+
+    const result = await resultPromise;
+    expect(result).toMatchObject({
+      objects: [],
+      complete: false,
+      paginationSupported: true,
+      responded: [],
+      failed: ['peer-a'],
+      timedOut: false
+    });
+  });
+
   it('reports hard timeout with no responses', async () => {
     vi.useFakeTimers();
     const fake = createFakeTransport(['peer-a']);
@@ -264,7 +558,14 @@ describe('collectFindResults', () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     const result = await resultPromise;
-    expect(result).toMatchObject({ objects: [], complete: false, responded: [], failed: [], timedOut: true });
+    expect(result).toMatchObject({
+      objects: [],
+      complete: false,
+      paginationSupported: true,
+      responded: [],
+      failed: [],
+      timedOut: true
+    });
     expect(fake.unsubscribeCount()).toBe(1);
   });
 
@@ -292,6 +593,8 @@ describe('collectFindResults', () => {
     await expect(collectFindResults(options(fake))).resolves.toEqual({
       objects: [],
       complete: false,
+      paginationSupported: false,
+      hasMore: false,
       responded: [],
       failed: [],
       timedOut: false
@@ -328,7 +631,7 @@ describe('collectFindResults', () => {
     expect(fake.unsubscribeCount()).toBe(1);
   });
 
-  it('exposes a page-fetch-compatible wrapper returning only objects', async () => {
+  it('exposes the objects and completeness through the page-fetch wrapper', async () => {
     const object = await createObject({ id: 'page-wrapper' });
     const fake = createFakeTransport(['peer-a'], async (peerId, packet, emit) => {
       const response = await buildFindResponseObjectsPacket(peerId, SENDER, (packet as FindPacket).payload.requestId, [object]);
@@ -336,6 +639,45 @@ describe('collectFindResults', () => {
     });
     const fetchPage = fetchPageFromPeers(fake.transport, { sender: SENDER, now: () => NOW });
 
-    await expect(fetchPage({ recipient: RECIPIENT, limit: 10 })).resolves.toEqual([object]);
+    await expect(fetchPage({ recipient: RECIPIENT, limit: 10 })).resolves.toEqual({
+      objects: [object],
+      complete: true,
+      paginationSupported: true,
+      hasMore: false
+    });
+  });
+
+  it('rotates bounded peer selections across repeated page queries', async () => {
+    const fake = createFakeTransport(
+      ['peer-e', 'peer-c', 'peer-a', 'peer-d', 'peer-b'],
+      async (peerId, packet, emit) => {
+        const response = await buildFindResponseObjectsPacket(
+          peerId,
+          SENDER,
+          (packet as FindPacket).payload.requestId,
+          []
+        );
+        emit(peerId, response);
+      }
+    );
+    const fetchPage = fetchPageFromPeers(fake.transport, {
+      sender: SENDER,
+      now: () => NOW,
+      fanout: 2
+    });
+
+    await fetchPage({ recipient: RECIPIENT });
+    await fetchPage({ recipient: RECIPIENT });
+    await fetchPage({ recipient: RECIPIENT });
+
+    const selections = [0, 1, 2].map((index) =>
+      fake.sent.slice(index * 2, index * 2 + 2).map(({ peerId }) => peerId)
+    );
+    expect(selections).toEqual([
+      ['peer-a', 'peer-b'],
+      ['peer-b', 'peer-c'],
+      ['peer-c', 'peer-d']
+    ]);
+    expect(fake.sent).toHaveLength(6);
   });
 });

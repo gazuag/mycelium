@@ -8,12 +8,19 @@ import { PeerName } from '../components/PeerName';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
+import {
+  advancePopularPeerSuggestionsState,
+  dismissPopularPeerSuggestions,
+  getInitialPopularPeerSuggestionsState,
+  popularPeerSuggestionsStorageKey
+} from '../utils/popularPeerSuggestions';
 
 interface HomePageProps {
   posts: HomeFeedPost[];
   onDiagnosticLog?: (entry: string) => void;
   replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
+  contactsLoaded?: boolean;
   postText: string;
   onPostTextChange: (value: string) => void;
   onSubmitPost: (publish: boolean) => void;
@@ -34,6 +41,7 @@ export function HomePage({
   onDiagnosticLog,
   replyCounts,
   contacts,
+  contactsLoaded = true,
   postText,
   onPostTextChange,
   onSubmitPost,
@@ -53,7 +61,22 @@ export function HomePage({
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
-  const [popularPeersDismissed, setPopularPeersDismissed] = useState(false);
+  const followedCount = contacts.filter((contact) => contact.followed).length;
+  const allSuggestedPeersFollowed = popularPeers.length > 0 && popularPeers.every(({ peer_id: peerId }) =>
+    contacts.some((contact) =>
+      contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)
+    )
+  );
+  const [popularPeerSuggestionsState, setPopularPeerSuggestionsState] = useState(() =>
+    getInitialPopularPeerSuggestionsState(
+      typeof window === 'undefined'
+        ? null
+        : window.localStorage.getItem(popularPeerSuggestionsStorageKey)
+          ?? (window.localStorage.getItem('popularPeerSuggestionsDismissed') === 'true' ? 'true' : null),
+      contactsLoaded,
+      followedCount
+    )
+  );
   const [autoLoadAvailable, setAutoLoadAvailable] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +89,17 @@ export function HomePage({
       .slice(0, visibleCount),
     [posts, visibleCount]
   );
+  useEffect(() => {
+    setPopularPeerSuggestionsState((current) => advancePopularPeerSuggestionsState(
+      current,
+      contactsLoaded,
+      followedCount,
+      allSuggestedPeersFollowed
+    ));
+  }, [allSuggestedPeersFollowed, contactsLoaded, followedCount]);
+  useEffect(() => {
+    window.localStorage.setItem(popularPeerSuggestionsStorageKey, popularPeerSuggestionsState);
+  }, [popularPeerSuggestionsState]);
   useEffect(() => {
     const firstPost = visiblePosts[0];
     if (!firstPost) return;
@@ -144,14 +178,18 @@ export function HomePage({
         </div>
       </div>
 
-      {!popularPeersDismissed ? (
+      {popularPeerSuggestionsState === 'active' && !allSuggestedPeersFollowed ? (
         <div className="popular-posters-banner">
           <div className="popular-posters-heading">
             <strong>Popular posters right now.</strong>
             <button
               aria-label="Dismiss popular peer suggestions"
               className="popular-posters-close"
-              onClick={() => setPopularPeersDismissed(true)}
+              onClick={() => {
+                const nextState = dismissPopularPeerSuggestions(followedCount);
+                window.localStorage.setItem(popularPeerSuggestionsStorageKey, nextState);
+                setPopularPeerSuggestionsState(nextState);
+              }}
               title="Dismiss suggestions"
               type="button"
             >

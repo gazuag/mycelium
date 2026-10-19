@@ -1,6 +1,7 @@
 import { createInboxController, type InboxControllerConfig } from './inbox-controller';
 import { createDmEvents, type DmEvents } from './dm-events';
 import { createInboxRunner } from './inbox-runner';
+import type { InboxBackfillState } from './inbox-sync';
 import type { FindClientTransport } from './find-client';
 import type { DistributedObject, ObjectStore } from './types';
 
@@ -10,6 +11,8 @@ export interface InboxServiceOptions {
   transport: FindClientTransport;
   loadCursor: (identityKey: string) => Promise<string | null>;
   saveCursor: (identityKey: string, cursor: string) => Promise<unknown>;
+  loadBackfillState?: (identityKey: string) => Promise<InboxBackfillState | null>;
+  saveBackfillState?: (identityKey: string, state: InboxBackfillState | null) => Promise<unknown>;
   events: DmEvents;
   controllerConfig?: Partial<InboxControllerConfig>;
   now?: () => Date;
@@ -23,6 +26,8 @@ export function createInboxService({
   transport,
   loadCursor,
   saveCursor,
+  loadBackfillState,
+  saveBackfillState,
   events,
   controllerConfig,
   now,
@@ -53,6 +58,8 @@ export function createInboxService({
     transport,
     loadCursor,
     saveCursor,
+    loadBackfillState,
+    saveBackfillState,
     now,
     onStored: (objects) => objects.forEach(notifyObjectStored)
   });

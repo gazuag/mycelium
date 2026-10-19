@@ -14,8 +14,10 @@ export interface OutboxEntry {
   readonly object_id: string;
   readonly created_at: string;
   readonly expires_at: string;
-  readonly replicated_to: string[];
-  readonly delivered_direct: boolean;
+  readonly replication_send_attempted?: boolean;
+  readonly replicated_to?: string[];
+  readonly direct_send_attempted?: boolean;
+  readonly delivered_direct?: boolean;
   readonly attempts: number;
   readonly last_attempt_at: string | null;
 }
@@ -177,7 +179,13 @@ export class IndexedDbOutboxStore implements OutboxStore {
     const database = await this.getDatabase();
     const entries = await runRequest<OutboxEntry[]>(database, 'readonly', (store) => store.getAll(), OUTBOX_STORE_NAME);
     return entries
-      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+      .sort((left, right) => {
+        const leftAttempt = left.last_attempt_at ? Date.parse(left.last_attempt_at) : Number.NEGATIVE_INFINITY;
+        const rightAttempt = right.last_attempt_at ? Date.parse(right.last_attempt_at) : Number.NEGATIVE_INFINITY;
+        return left.attempts - right.attempts
+          || leftAttempt - rightAttempt
+          || Date.parse(left.created_at) - Date.parse(right.created_at);
+      })
       .slice(0, Math.max(0, limit));
   }
 

@@ -109,12 +109,6 @@ export function PostCard({
         {postTags(post).length > 0 ? (
           <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>
         ) : null}
-        {import.meta.env.DEV ? (
-          <small className="feed-debug-line">
-            [DEBUG: injectedAt={post.injectedAt === undefined ? 'undefined' : new Date(post.injectedAt).toISOString().slice(0, 19)},
-            {' '}created={post.object.created_at.slice(0, 19)}, source={feedSource ?? 'unknown'}]
-          </small>
-        ) : null}
       </div>
 
       <div className="post-card-actions">

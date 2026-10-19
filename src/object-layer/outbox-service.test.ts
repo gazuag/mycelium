@@ -33,8 +33,8 @@ function makeEntry(
     object_id: objectId,
     created_at: createdAt.toISOString(),
     expires_at: expiresAt.toISOString(),
-    replicated_to: [],
-    delivered_direct: false,
+    replication_send_attempted: false,
+    direct_send_attempted: false,
     attempts: 0,
     last_attempt_at: null
   };
@@ -52,7 +52,13 @@ function makeMemoryOutbox(): OutboxStore {
     },
     async listPending(limit) {
       return [...entries.values()]
-        .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+        .sort((left, right) => {
+          const leftAttempt = left.last_attempt_at ? Date.parse(left.last_attempt_at) : Number.NEGATIVE_INFINITY;
+          const rightAttempt = right.last_attempt_at ? Date.parse(right.last_attempt_at) : Number.NEGATIVE_INFINITY;
+          return left.attempts - right.attempts
+            || leftAttempt - rightAttempt
+            || Date.parse(left.created_at) - Date.parse(right.created_at);
+        })
         .slice(0, limit)
         .map((entry) => structuredClone(entry));
     },
@@ -81,7 +87,7 @@ function createHarness(options: {
   connectedPeers?: string[];
   resolvePeer?: (recipient: string) => string | null;
   sendDirect?: (peerId: string, object: DistributedObject) => Promise<boolean>;
-  replicate?: (object: DistributedObject, alreadyReplicatedTo: Set<string>) => Promise<string[]>;
+  replicate?: (object: DistributedObject, alreadyAttemptedTo: Set<string>) => Promise<string[]>;
   config?: { maxPerFlush?: number };
 } = {}) {
   const objects = new Map((options.objects ?? []).map((object) => [object.object_id, object]));
@@ -199,7 +205,7 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     expect(await store.get('prune-future')).not.toBeNull();
   });
 
-  it('sends directly to a connected recipient and records delivered_direct', async () => {
+  it('records a successful direct transport send as an attempt, not a delivery receipt', async () => {
     const object = makeObject('direct-connected', { recipient: 'recipient-signing-key' });
     const { service, outbox, sendDirect } = createHarness({ objects: [object] });
     await service.enqueue(object);
@@ -207,7 +213,7 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     await service.flush();
 
     expect(sendDirect).toHaveBeenCalledWith('recipient-peer', object);
-    expect(await outbox.get(object.object_id)).toMatchObject({ delivered_direct: true, attempts: 1 });
+    expect(await outbox.get(object.object_id)).toMatchObject({ direct_send_attempted: true, attempts: 1 });
   });
 
   it('does not send directly when the resolved recipient peer is disconnected', async () => {
@@ -218,13 +224,13 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     await service.flush();
 
     expect(sendDirect).not.toHaveBeenCalled();
-    expect(await outbox.get(object.object_id)).toMatchObject({ delivered_direct: false, attempts: 1 });
+    expect(await outbox.get(object.object_id)).toMatchObject({ direct_send_attempted: false, attempts: 1 });
   });
 
   it('does not count a direct recipient send toward the replication budget', async () => {
     const object = makeObject('direct-not-replica', { recipient: 'recipient-signing-key' });
-    const replicate = vi.fn(async (_object: DistributedObject, alreadyReplicatedTo: Set<string>) => {
-      expect([...alreadyReplicatedTo]).toEqual([]);
+    const replicate = vi.fn(async (_object: DistributedObject, alreadyAttemptedTo: Set<string>) => {
+      expect([...alreadyAttemptedTo]).toEqual([]);
       return [];
     });
     const { service, outbox } = createHarness({ objects: [object], replicate });
@@ -233,33 +239,61 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     await service.flush();
 
     expect(replicate).toHaveBeenCalledTimes(1);
-    expect(await outbox.get(object.object_id)).toMatchObject({ delivered_direct: true, replicated_to: [] });
+    expect(await outbox.get(object.object_id)).toMatchObject({
+      direct_send_attempted: true,
+      replication_send_attempted: false
+    });
   });
 
-  it('merges replication results and completes when the replication budget is met', async () => {
+  it('retries peers even when legacy state records an earlier transport send', async () => {
     const object = makeObject('replication-budget');
     const outbox = makeMemoryOutbox();
     await outbox.add({ ...makeEntry(object.object_id, NOW), replicated_to: ['existing-peer'] });
     const { service } = createHarness({
       objects: [object],
       outbox,
-      replicate: async (_object, alreadyReplicatedTo) => {
-        expect([...alreadyReplicatedTo]).toEqual(['existing-peer']);
-        return ['peer-two', 'peer-three'];
+      replicate: async (_object, alreadyAttemptedTo) => {
+        expect([...alreadyAttemptedTo]).toEqual([]);
+        return ['existing-peer'];
       }
     });
 
-    await expect(service.flush()).resolves.toEqual({ processed: 1, completed: 1 });
-    expect(await outbox.get(object.object_id)).toBeNull();
+    await expect(service.flush()).resolves.toEqual({ processed: 1, completed: 0 });
+    expect(await outbox.get(object.object_id)).toMatchObject({
+      replication_send_attempted: true,
+      attempts: 1
+    });
   });
 
-  it('completes after direct delivery plus one replica', async () => {
+  it('retries a peer after a successful transport send until expiry', async () => {
+    const object = makeObject('replication-retry', { recipient: 'recipient-signing-key' });
+    const sendDirect = vi.fn(async () => true);
+    const replicate = vi.fn(async () => ['replica-peer']);
+    const { service, outbox } = createHarness({ objects: [object], sendDirect, replicate });
+    await service.enqueue(object);
+
+    await service.flush();
+    await service.flush();
+
+    expect(sendDirect).toHaveBeenCalledTimes(2);
+    expect(replicate).toHaveBeenCalledTimes(2);
+    expect(await outbox.get(object.object_id)).toMatchObject({
+      direct_send_attempted: true,
+      replication_send_attempted: true,
+      attempts: 2
+    });
+  });
+
+  it('keeps a direct send and replica attempt queued until object expiry', async () => {
     const object = makeObject('direct-and-replica', { recipient: 'recipient-signing-key' });
     const { service, outbox } = createHarness({ objects: [object], replicate: async () => ['replica-peer'] });
     await service.enqueue(object);
 
-    await expect(service.flush()).resolves.toMatchObject({ completed: 1 });
-    expect(await outbox.get(object.object_id)).toBeNull();
+    await expect(service.flush()).resolves.toMatchObject({ completed: 0 });
+    expect(await outbox.get(object.object_id)).toMatchObject({
+      direct_send_attempted: true,
+      replication_send_attempted: true
+    });
   });
 
   it('leaves an entry pending without peers and increments its attempt metadata', async () => {
@@ -274,8 +308,29 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     expect(await outbox.get(object.object_id)).toMatchObject({
       attempts: 1,
       last_attempt_at: NOW.toISOString(),
-      replicated_to: [],
-      delivered_direct: false
+      replication_send_attempted: false,
+      direct_send_attempted: false
+    });
+  });
+
+  it('continues retrying after 200 empty-peer attempts and tries newly connected peers', async () => {
+    const object = makeObject('retry-beyond-old-attempt-cap');
+    const outbox = makeMemoryOutbox();
+    await outbox.add({ ...makeEntry(object.object_id, NOW), attempts: 200 });
+    const connectedPeers: string[] = [];
+    const replicate = vi.fn(async () => connectedPeers);
+    const { service } = createHarness({ objects: [object], outbox, connectedPeers, replicate });
+
+    await service.flush();
+    expect(await outbox.get(object.object_id)).toMatchObject({ attempts: 201 });
+
+    connectedPeers.push('peer-connected-later');
+    await service.flush();
+
+    expect(replicate).toHaveBeenCalledTimes(2);
+    expect(await outbox.get(object.object_id)).toMatchObject({
+      attempts: 202,
+      replication_send_attempted: true
     });
   });
 
@@ -285,14 +340,16 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     const outbox = makeMemoryOutbox();
     await outbox.add(makeEntry(expired.object_id, NOW, FUTURE));
     await outbox.add(makeEntry(missing.object_id, new Date(NOW.getTime() + 1), FUTURE));
-    const { service } = createHarness({ objects: [expired], outbox });
+    const replicate = vi.fn(async () => []);
+    const { service } = createHarness({ objects: [expired], outbox, replicate });
 
     await expect(service.flush()).resolves.toEqual({ processed: 2, completed: 2 });
     expect(await outbox.get(expired.object_id)).toBeNull();
     expect(await outbox.get(missing.object_id)).toBeNull();
+    expect(replicate).not.toHaveBeenCalled();
   });
 
-  it('continues to other entries when direct send or replication throws', async () => {
+  it('continues to other entries and records attempted direct sends when transport calls throw', async () => {
     const failed = makeObject('failing-entry', { recipient: 'recipient-signing-key' });
     const succeeds = makeObject('following-entry', { recipient: 'recipient-signing-key' });
     const outbox = makeMemoryOutbox();
@@ -308,9 +365,9 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     await service.enqueue(failed);
     await service.enqueue(succeeds);
 
-    await expect(service.flush()).resolves.toEqual({ processed: 2, completed: 1 });
-    expect(await outbox.get(failed.object_id)).toMatchObject({ attempts: 1, delivered_direct: false });
-    expect(await outbox.get(succeeds.object_id)).toBeNull();
+    await expect(service.flush()).resolves.toEqual({ processed: 2, completed: 0 });
+    expect(await outbox.get(failed.object_id)).toMatchObject({ attempts: 1, direct_send_attempted: true });
+    expect(await outbox.get(succeeds.object_id)).toMatchObject({ attempts: 1 });
   });
 
   it('shares one in-flight flush across overlapping calls', async () => {
@@ -330,13 +387,25 @@ describe('IndexedDbOutboxStore and outbox service', () => {
 
   it('limits the number of entries processed in a single flush', async () => {
     const objects = Array.from({ length: 52 }, (_, index) => makeObject(`bounded-${index}`));
-    const { service, outbox } = createHarness({ objects, config: { maxPerFlush: 50 } });
+    const replicationOrder: string[] = [];
+    const { service, outbox } = createHarness({
+      objects,
+      config: { maxPerFlush: 50 },
+      replicate: async (object) => {
+        replicationOrder.push(object.object_id);
+        return [];
+      }
+    });
     for (const object of objects) await service.enqueue(object);
 
     const result = await service.flush();
 
     expect(result.processed).toBe(50);
-    expect((await outbox.listPending(100)).length).toBe(52);
+    const pendingAfterFirst = await outbox.listPending(100);
+    expect(pendingAfterFirst).toHaveLength(52);
+    expect(pendingAfterFirst.slice(0, 2).map(({ attempts }) => attempts)).toEqual([0, 0]);
+    await expect(service.flush()).resolves.toMatchObject({ processed: 50 });
+    expect(replicationOrder.slice(50, 52)).toEqual(objects.slice(50).map(({ object_id }) => object_id));
   });
 
   it('stores no payload or plaintext in outbox entries', async () => {
@@ -371,13 +440,13 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     });
   });
 
-  it('removes an entry when its attempt count reaches 200', async () => {
+  it('keeps an unexpired entry queued beyond the previous 200-attempt limit', async () => {
     const object = makeObject('attempt-cap');
     const outbox = makeMemoryOutbox();
     await outbox.add({ ...makeEntry(object.object_id, NOW), attempts: 199 });
     const { service } = createHarness({ objects: [object], outbox });
 
-    await expect(service.flush()).resolves.toMatchObject({ completed: 1 });
-    expect(await outbox.get(object.object_id)).toBeNull();
+    await expect(service.flush()).resolves.toMatchObject({ completed: 0 });
+    expect(await outbox.get(object.object_id)).toMatchObject({ attempts: 200 });
   });
 });

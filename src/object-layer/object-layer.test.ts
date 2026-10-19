@@ -10,7 +10,7 @@ import { RecommendationIndex, recommendationWeight, selectRecommendationCandidat
 import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { buildPacket } from '../p2p/protocol';
 import { PeerConnectionObjectTransport } from '../p2p/object-transport';
-import type { DistributedObject, FindResponsePacket, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
+import type { DistributedObject, FindPacket, FindResponsePacket, LocalPostView, ObjectPacket, ObjectStore, ObjectTransport, PostObject, RecommendationSummary } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -1045,23 +1045,30 @@ describe('distributed object foundation', () => {
     vi.useRealTimers();
   });
 
-  it('does not leave unbounded request state behind when forwarding fails', async () => {
+  it('clears the processed-request cache when recursive forwarding fails', async () => {
     const cache = new Map<string, number>();
-    const route = new Map<string, { upstreamPeer: string; expiresAt: number }>();
     const requestId = 'failed-forward-request';
-
-    cache.set(requestId, Date.now() + 5000);
-    route.set(requestId, { upstreamPeer: 'peer-a', expiresAt: Date.now() + 5000 });
-
-    try {
+    const packet = await buildFindPacket(
+      'peer-a',
+      'peer-b',
+      'a'.repeat(64),
+      undefined,
+      requestId,
+      1,
+      'peer-a'
+    );
+    const store = createMemoryStore();
+    const send = vi.fn(async () => undefined);
+    const forward = vi.fn(async () => {
       throw new Error('forward failed');
-    } catch {
-      cache.delete(requestId);
-      route.delete(requestId);
-    }
+    });
+
+    await expect(respondToFindPacket(packet, store, send, 'peer-b', cache, forward))
+      .rejects.toThrow('forward failed');
 
     expect(cache.has(requestId)).toBe(false);
-    expect(route.has(requestId)).toBe(false);
+    expect(forward).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('correlates FIND responses by request ID and gives each request a unique ID', async () => {
@@ -1088,6 +1095,7 @@ describe('distributed object foundation', () => {
     expect(response.type).toBe('FIND_RESPONSE');
     if (response.type === 'FIND_RESPONSE') {
       expect(response.payload.object).toEqual(object);
+      expect(response.payload.complete).toBe(true);
     }
   });
 
@@ -1183,6 +1191,97 @@ describe('distributed object foundation', () => {
     expect(response.payload.origin).toBe('peer-a');
     expect(relayed.payload.requestId).toBe(requestId);
     expect(relayed.payload.origin).toBe('peer-a');
+  });
+
+  it('searches through the configured recursive TTL and relays a found object to the origin', async () => {
+    const object = await createFixtureObject({
+      object_type: 'recursive-depth',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { value: 'found-at-final-hop' },
+      replication_policy: {}
+    });
+    const peerIds = ['peer-b', 'peer-c', 'peer-d'];
+    const stores = new Map(peerIds.map((peerId) => [peerId, createMemoryStore()]));
+    await stores.get('peer-d')!.put(object);
+    const caches = new Map(peerIds.map((peerId) => [peerId, new Map<string, number>()]));
+    const forwarded: Array<{ from: string; to: string; requestId: string; ttl: number }> = [];
+    const responses: FindResponsePacket[] = [];
+    const requestId = 'recursive-depth-request';
+    const expiresAt = new Date(Date.now() + 5000).toISOString();
+    const initial = await buildFindPacket(
+      'peer-a',
+      'peer-b',
+      object.object_id,
+      undefined,
+      requestId,
+      2,
+      'peer-a',
+      expiresAt
+    );
+
+    const visit = async (
+      peerId: string,
+      packet: FindPacket,
+      relayUpstream: (response: FindResponsePacket) => Promise<void>
+    ): Promise<void> => {
+      const currentIndex = peerIds.indexOf(peerId);
+      await respondToFindPacket(
+        packet,
+        stores.get(peerId)!,
+        relayUpstream,
+        peerId,
+        caches.get(peerId)!,
+        async (request) => {
+          const childPeerId = peerIds[currentIndex + 1];
+          if (!childPeerId) throw new Error('Unexpected forward beyond the configured TTL');
+          const forwardedPacket = await buildFindPacket(
+            peerId,
+            childPeerId,
+            request.objectId,
+            undefined,
+            request.requestId,
+            request.ttl,
+            request.origin,
+            request.expiresAt
+          );
+          forwarded.push({
+            from: peerId,
+            to: childPeerId,
+            requestId: forwardedPacket.payload.requestId,
+            ttl: forwardedPacket.payload.ttl
+          });
+          await visit(childPeerId, forwardedPacket, async (response) => {
+            await relayUpstream(await buildFindResponsePacket(
+              peerId,
+              packet.sender,
+              response.payload.object_id,
+              response.payload.requestId,
+              response.payload.object,
+              undefined,
+              response.payload.origin,
+              response.payload.expiresAt,
+              response.payload.complete
+            ));
+          });
+        }
+      );
+    };
+
+    await visit('peer-b', initial, async (response) => {
+      responses.push(response);
+    });
+
+    expect(forwarded).toEqual([
+      { from: 'peer-b', to: 'peer-c', requestId, ttl: 1 },
+      { from: 'peer-c', to: 'peer-d', requestId, ttl: 0 }
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      sender: 'peer-b',
+      recipient: 'peer-a',
+      payload: { requestId, object, complete: true }
+    });
   });
 
   it('stops forwarding once TTL reaches zero and ignores duplicate forwarded requests', async () => {
@@ -1472,7 +1571,7 @@ describe('distributed object foundation', () => {
     await aggregation.addChildObjects('peer-c', []);
     expect(complete).not.toHaveBeenCalled();
     await aggregation.addChildObjects('peer-d', []);
-    expect(complete).toHaveBeenCalledWith([], 'all-children-responded-or-failed');
+    expect(complete).toHaveBeenCalledWith([], 'all-children-responded-or-failed', false);
   });
 
   it('completes after the grace period, deadline, or child failure', async () => {
@@ -1674,9 +1773,9 @@ describe('distributed object foundation', () => {
 
       expect(getReplicationBudget(object)).toBe(2);
       expect(result.budget).toBe(2);
-      // Bounded: exactly 2 peers were targeted even though 3 peers were connected (budget is a replica target, not a hop count).
-      expect(result.stored).toHaveLength(2);
-      expect(result.targeted).toEqual(result.stored);
+      // Bounded: the transport accepted sends to exactly 2 peers; remote storage is not acknowledged.
+      expect(result.attempted).toHaveLength(2);
+      expect(result.targeted).toEqual(result.attempted);
       expect(await stores.get('peer-b')!.get(object.object_id)).toEqual(object);
       expect(await stores.get('peer-c')!.get(object.object_id)).toEqual(object);
       expect(await stores.get('peer-d')!.get(object.object_id)).toBeNull();
@@ -1685,8 +1784,8 @@ describe('distributed object foundation', () => {
       expect(logs.some((line) => line.includes(`REPLICATION considering object_id=${object.object_id} budget=2`))).toBe(true);
       expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-b`))).toBe(true);
       expect(logs.some((line) => line.startsWith(`REPLICATION target selected object_id=${object.object_id} peer=peer-c`))).toBe(true);
-      expect(logs.some((line) => line.includes('REPLICATION budget reached') && line.includes('stopping'))).toBe(true);
-      expect(logs.some((line) => line.includes('REPLICATION complete') && line.includes('newReplicas=2'))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION send budget reached') && line.includes('stopping'))).toBe(true);
+      expect(logs.some((line) => line.includes('REPLICATION complete') && line.includes('attempted=2'))).toBe(true);
     });
 
     it('falls back to the default replication budget for objects without an explicit policy value', async () => {
@@ -1704,7 +1803,7 @@ describe('distributed object foundation', () => {
       const result = await replicateObject('peer-a', object, transport, undefined, new Set(), (message) => logs.push(message));
 
       expect(result.budget).toBe(DEFAULT_REPLICATION_BUDGET);
-      expect(result.stored).toEqual(['peer-b']);
+      expect(result.attempted).toEqual(['peer-b']);
       expect(sent).toHaveLength(1);
       expect(logs.some((line) => line.includes('(defaulted)'))).toBe(true);
     });
@@ -1720,18 +1819,18 @@ describe('distributed object foundation', () => {
       const { transport, stores, sent } = createFakeTransport(['peer-b', 'peer-c']);
 
       const first = await replicateObject('peer-a', object, transport);
-      expect(first.stored).toEqual(['peer-b']);
+      expect(first.attempted).toEqual(['peer-b']);
       expect(sent).toHaveLength(1);
 
-      // Re-running with local knowledge that peer-b already holds a replica must not duplicate storage there,
+      // A prior attempt within this operation must not duplicate a send to peer-b,
       // and must recognize the budget is already satisfied without contacting any other peer.
       const logs: string[] = [];
-      const second = await replicateObject('peer-a', object, transport, undefined, new Set(first.stored), (message) => logs.push(message));
-      expect(second.stored).toHaveLength(0);
+      const second = await replicateObject('peer-a', object, transport, undefined, new Set(first.attempted), (message) => logs.push(message));
+      expect(second.attempted).toHaveLength(0);
       expect(second.targeted).toHaveLength(0);
       expect(sent).toHaveLength(1);
       expect(await stores.get('peer-c')!.get(object.object_id)).toBeNull();
-      expect(logs.some((line) => line.includes('already satisfied') && line.includes('stopping'))).toBe(true);
+      expect(logs.some((line) => line.includes('send budget already used') && line.includes('stopping'))).toBe(true);
 
       // A single peer's local store never ends up with more than one copy of the same object_id.
       const peerBObjects = (await stores.get('peer-b')!.query()).filter((stored) => stored.object_id === object.object_id);

@@ -6,8 +6,13 @@ import type { DistributedObject, ObjectStore } from './types';
 export interface DmOutboxService {
   enqueue(object: DistributedObject): Promise<void>;
   flush(): Promise<unknown>;
-  getEntry(objectId: string): Promise<{ replicated_to: string[] } | null>;
-  getReplicatedTo(objectId: string): readonly string[];
+  getEntry(objectId: string): Promise<{
+    replication_send_attempted?: boolean;
+    replicated_to?: string[];
+    direct_send_attempted?: boolean;
+    delivered_direct?: boolean;
+  } | null>;
+  getAttemptedTo(objectId: string): readonly string[];
 }
 
 export interface DmServiceOptions {
@@ -40,11 +45,11 @@ export function createDmService({
   ): Promise<SendMessageResult> => {
     const identity = getIdentity();
     if (!identity) {
-      return { status: 'invalid', replicatedTo: [], keyChanged: false, queued: false };
+      return { status: 'invalid', attemptedTo: [], keyChanged: false, queued: false };
     }
     const contact = getContact(recipientPublicKey);
     if (!contact) {
-      return { status: 'no_key', replicatedTo: [], keyChanged: false, queued: false };
+      return { status: 'no_key', attemptedTo: [], keyChanged: false, queued: false };
     }
 
     const result = await sendDm({
@@ -57,7 +62,7 @@ export function createDmService({
         await outbox.enqueue(object);
         await outbox.flush();
         const entry = await outbox.getEntry(object.object_id);
-        return entry?.replicated_to ?? [...outbox.getReplicatedTo(object.object_id)];
+        return [...outbox.getAttemptedTo(object.object_id)];
       }
     });
 
@@ -65,7 +70,14 @@ export function createDmService({
     if (result.status === 'sent') {
       try {
         const entry = await outbox.getEntry(result.object.object_id);
-        queued = entry !== null || connectedPeers().length === 0;
+        const attempted = entry !== null && (
+          entry.direct_send_attempted === true
+          || entry.delivered_direct === true
+          || entry.replication_send_attempted === true
+          || (entry.replicated_to?.length ?? 0) > 0
+        );
+        queued = entry !== null && !attempted;
+        if (entry === null && connectedPeers().length === 0) queued = true;
       } catch {
         queued = true;
       }

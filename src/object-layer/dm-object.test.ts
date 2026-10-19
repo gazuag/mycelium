@@ -379,7 +379,7 @@ describe('mycelium.dm objects', () => {
     const result = await replicateObject(sender.id, object, transport);
 
     expect(result.budget).toBe(3);
-    expect(result.stored).toEqual(['peer-a', 'peer-b', 'peer-c']);
+    expect(result.attempted).toEqual(['peer-a', 'peer-b', 'peer-c']);
     expect(sent).toHaveLength(3);
     expect(sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b', 'peer-c']);
     expect(sent.every(({ packet }) => packet.type === 'OBJECT_STORE' && packet.payload.object.object_id === object.object_id)).toBe(true);
