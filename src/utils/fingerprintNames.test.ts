@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayNameOrFallback, fingerprintToHumanName, shortPeerId } from './fingerprintNames';
+import { displayNameOrFallback, displayProfileBio, fingerprintToHumanName, shortPeerId } from './fingerprintNames';
 import { keyToUsername } from './usernameCodec';
 
 describe('peer identity display helpers', () => {
@@ -18,5 +18,12 @@ describe('peer identity display helpers', () => {
 
   it('renders 64-bit fingerprints through the deterministic vocabulary codec', () => {
     expect(fingerprintToHumanName('00:00:00:00:00:00:00:00')).toBe(keyToUsername(0n));
+  });
+
+  it('shows the full peer ID in generated profile bios while preserving custom bios', () => {
+    const peerId = '2d:8f:e4:f0:12:34:56:78';
+    expect(displayProfileBio('Peer 2d:8f:e4:f0:', peerId)).toBe(`Peer id: ${peerId}`);
+    expect(displayProfileBio(`Peer ${peerId}`, peerId)).toBe(`Peer id: ${peerId}`);
+    expect(displayProfileBio('A custom bio', peerId)).toBe('A custom bio');
   });
 });

@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, displayProfileBio } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
@@ -53,7 +53,7 @@ export function ProfileHeader({
           <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
         ) : null}
       </div>
-      <p className="note">{contact.profile?.bio ?? 'No bio yet.'}</p>
+      <p className="note">{displayProfileBio(contact.profile?.bio, contact.fingerprint) ?? 'No bio yet.'}</p>
       {showActions && onFollowToggle && onMessage && onBlock ? (
         <div className="profile-actions">
           <FollowButton

@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, displayProfileBio } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 
@@ -14,6 +14,7 @@ interface PersonRowProps {
 
 export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutualLabel, metric }: PersonRowProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey);
+  const bio = displayProfileBio(contact.profile?.bio, contact.fingerprint || contact.publicKey);
   const lastSeen = contact.lastSeen && Number.isFinite(Date.parse(contact.lastSeen))
     ? new Date(contact.lastSeen).toLocaleString()
     : undefined;
@@ -37,7 +38,7 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
               onProfileClick={onViewProfile}
             />
           </strong>
-          {contact.profile?.bio ? <span className="person-row-bio">{contact.profile.bio}</span> : null}
+          {bio ? <span className="person-row-bio">{bio}</span> : null}
           {mutualLabel ? <span className="person-row-mutual">{mutualLabel}</span> : null}
           {metric ? <span className="person-row-metric">{metric}</span> : null}
           {contact.online === true ? <span className="person-row-status online">Online</span> : null}

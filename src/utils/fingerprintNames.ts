@@ -182,3 +182,13 @@ export function displayNameOrFallback(displayName: string | undefined, fingerpri
   }
   return fingerprintToHumanName(fingerprint);
 }
+
+export function displayProfileBio(bio: string | undefined, peerId: string): string | undefined {
+  const trimmed = bio?.trim();
+  if (!trimmed) return trimmed;
+
+  const isPeerId = /^(?:[0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(peerId);
+  const isGeneratedPeerBio = /^Peer (?:(?:[0-9a-f]{2}:){3}[0-9a-f]{2}:?|(?:[0-9a-f]{2}:){7}[0-9a-f]{2})$/i.test(trimmed);
+  if (isPeerId && isGeneratedPeerBio) return `Peer id: ${peerId}`;
+  return trimmed;
+}

@@ -1237,7 +1237,7 @@ function App() {
       displayName: p.displayName.trim() || fallbackName || 'Me',
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
-      bio: p.bio.trim() || `Peer ${id?.id ?? 'unknown'}`,
+      bio: p.bio.trim() || `Peer id: ${id?.id ?? 'unknown'}`,
       tags: []
     };
     return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;
