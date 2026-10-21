@@ -1317,9 +1317,89 @@ body, html, #root {
   min-width: 0;
 }
 
-.home-composer-entry textarea {
+.markdown-compose-field {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.markdown-compose-field textarea {
+  width: 100%;
+}
+
+.markdown-help-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+.markdown-help-link:hover {
+  color: var(--color-text);
+}
+
+.markdown-help-link:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.markdown-help-backdrop {
+  position: fixed;
+  z-index: 1001;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 60%);
+}
+
+.markdown-help-dialog {
+  width: min(100%, 36rem);
+  max-height: min(85vh, 44rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: var(--shadow-card);
+}
+
+.markdown-help-dialog p,
+.markdown-help-dialog h2 {
+  margin: 0;
+}
+
+.markdown-help-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.markdown-help-heading h2 {
+  font-size: var(--font-size-lg);
+}
+
+.markdown-help-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.markdown-help-list code {
+  overflow-wrap: anywhere;
+  color: var(--color-text);
 }
 
 .checkbox-row {
@@ -2062,6 +2142,16 @@ button.post-reply-count:focus-visible {
   height: 2.5rem;
   padding: 0.55rem 0.7rem;
   resize: vertical;
+}
+
+.conversation-inline-input-row .markdown-compose-field {
+  flex: 1 1 auto;
+  width: 0;
+}
+
+.conversation-inline-input-row .markdown-compose-field textarea {
+  flex: initial;
+  width: 100%;
 }
 
 .conversation-inline-input-row .btn {

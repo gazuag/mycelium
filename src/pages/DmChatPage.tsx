@@ -10,6 +10,7 @@ import { useDmConversation } from '../hooks/useDmConversation';
 import type { SenderEncryptionKeyResolver } from '../object-layer/dm-inbox';
 import type { ObjectStore } from '../object-layer/types';
 import { MarkdownContent } from '../components/MarkdownContent';
+import { MarkdownHelp } from '../components/MarkdownHelp';
 import { checkExternalImageSizes, encodeMarkdownMessage } from '../markdown/external-content';
 
 const MAX_MESSAGE_LENGTH = 4000;
@@ -204,6 +205,7 @@ export function DmChatPage({
             disabled={!canSend}
             aria-label="Message"
           />
+          <MarkdownHelp />
           <span className={draft.length > MAX_MESSAGE_LENGTH ? 'dm-character-count over-limit' : 'dm-character-count'}>
             {draft.length}/{MAX_MESSAGE_LENGTH}
           </span>

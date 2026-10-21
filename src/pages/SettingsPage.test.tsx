@@ -34,6 +34,9 @@ describe('SettingsPage', () => {
     );
 
     expect(markup).toContain('<h3>Settings</h3>');
+    expect(markup).toContain('<h3 id="web-push-settings-heading">Web Push</h3>');
+    expect(markup).toContain('Enable Web Push');
+    expect(markup).toContain('requests notification permission only after you choose this action');
     expect(markup).toContain('<h3>Diagnostics</h3>');
     expect(markup).toContain('Copy fingerprint');
     expect(markup).toContain('my-peer-id');

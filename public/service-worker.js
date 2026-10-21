@@ -12,3 +12,9 @@ self.addEventListener('fetch', (event) => {
     caches.match(event.request).then((response) => response || fetch(event.request))
   );
 });
+
+self.addEventListener('push', () => {});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+});

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LogCategory, LogEntry } from '../App';
 import {
   BYTES_PER_MB,
@@ -7,6 +7,7 @@ import {
   MIN_OBJECT_STORAGE_BYTES
 } from '../object-layer/storage-gc';
 import { DEFAULT_EXTERNAL_IMAGE_LIMIT_MB, MAX_EXTERNAL_IMAGE_LIMIT_MB } from '../markdown/external-content';
+import { webPushManager, type WebPushStatus } from '../services/web-push';
 
 interface SettingsPageProps {
   identityId: string;
@@ -84,6 +85,9 @@ export function SettingsPage({
   const [externalImageLimitDraft, setExternalImageLimitDraft] = useState(String(externalImageLimitMb));
   const [externalImageLimitError, setExternalImageLimitError] = useState('');
   const [externalImageLimitSaveStatus, setExternalImageLimitSaveStatus] = useState('');
+  const [webPushStatus, setWebPushStatus] = useState<WebPushStatus | null>(null);
+  const [webPushBusy, setWebPushBusy] = useState(false);
+  const [webPushError, setWebPushError] = useState('');
   const [followConfirmation, setFollowConfirmation] = useState('');
   const followConfirmationTimer = useRef<number | undefined>(undefined);
   const [identityCopyStatus, setIdentityCopyStatus] = useState('');
@@ -104,10 +108,32 @@ export function SettingsPage({
       ? 'Connecting to network'
       : 'Disconnected. See diagnostics';
 
+  const refreshWebPushStatus = useCallback(async () => {
+    try {
+      setWebPushStatus(await webPushManager.getStatus());
+      setWebPushError('');
+    } catch (error) {
+      setWebPushError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   useEffect(() => {
     setRecommendationFrequencyDraft(String(recommendationFrequency));
     setDiscoveryFrequencyDraft(String(discoveryFrequency));
   }, [recommendationFrequency, discoveryFrequency]);
+
+  useEffect(() => {
+    void refreshWebPushStatus();
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshWebPushStatus();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshWebPushStatus]);
 
   useEffect(() => {
     setObjectStorageLimitDraft(String(objectStorageLimitMb));
@@ -164,6 +190,46 @@ export function SettingsPage({
     }
   };
 
+  const enableWebPush = async () => {
+    setWebPushBusy(true);
+    setWebPushError('');
+    try {
+      setWebPushStatus(await webPushManager.enable());
+    } catch (error) {
+      setWebPushError(error instanceof Error ? error.message : String(error));
+      await refreshWebPushStatus();
+    } finally {
+      setWebPushBusy(false);
+    }
+  };
+
+  const disableWebPush = async () => {
+    setWebPushBusy(true);
+    setWebPushError('');
+    try {
+      await webPushManager.disable();
+      await refreshWebPushStatus();
+    } catch (error) {
+      setWebPushError(error instanceof Error ? error.message : String(error));
+      await refreshWebPushStatus();
+    } finally {
+      setWebPushBusy(false);
+    }
+  };
+
+  const webPushStatusText = (() => {
+    switch (webPushStatus?.state) {
+      case 'unsupported': return 'Web Push is unavailable in this browser or context.';
+      case 'configuration-missing': return 'Web Push is not configured for this deployment yet.';
+      case 'disabled': return 'Web Push is disabled.';
+      case 'permission-not-granted': return 'Notification permission has not been granted.';
+      case 'permission-denied': return 'Notifications are blocked in browser settings. Change that permission there before enabling Web Push.';
+      case 'enabled': return 'Web Push is enabled and this browser has a subscription.';
+      case 'subscription-unavailable': return 'Web Push is enabled, but the browser subscription is unavailable. Retry to create a new subscription or disable Web Push.';
+      default: return 'Checking Web Push availability…';
+    }
+  })();
+
   return (
     <section className="page-view">
       <div className="page-header">
@@ -174,6 +240,37 @@ export function SettingsPage({
       <div className="card">
         <section>
           <h3>Settings</h3>
+        </section>
+
+        <section aria-labelledby="web-push-settings-heading">
+          <h3 id="web-push-settings-heading">Web Push</h3>
+          <div className="add-peer-card">
+            <p className="note" role="status" aria-live="polite">{webPushStatusText}</p>
+            {webPushStatus?.subscribed && webPushStatus.state !== 'enabled'
+              ? <p className="note">A browser subscription already exists, but Mycelium has not enabled Web Push.</p>
+              : null}
+            {webPushStatus?.state === 'permission-denied'
+              ? <p className="note">Mycelium will not ask again automatically.</p>
+              : null}
+            {webPushError ? <p className="note" role="alert">{webPushError}</p> : null}
+            <div className="row">
+              {webPushStatus?.state === 'enabled' ? (
+                <button className="btn secondary" type="button" disabled={webPushBusy} onClick={() => void disableWebPush()}>
+                  Disable Web Push
+                </button>
+              ) : (
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={webPushBusy || !webPushStatus || ['unsupported', 'configuration-missing', 'permission-denied'].includes(webPushStatus.state)}
+                  onClick={() => void enableWebPush()}
+                >
+                  {webPushStatus?.state === 'subscription-unavailable' ? 'Retry Web Push subscription' : 'Enable Web Push'}
+                </button>
+              )}
+            </div>
+            <p className="note">Enabling requests notification permission only after you choose this action. Your subscription stays in browser-managed storage and is not shown or shared by this setting.</p>
+          </div>
         </section>
 
         <section>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Contact } from '../types';
 import { postReplyTo, type DeletionTombstone, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
+import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
@@ -167,13 +168,16 @@ export function ConversationPage({
       </>
     );
     const textarea = (
-      <textarea
-        ref={objectId === post.object.object_id ? selectedReplyTextareaRef : undefined}
-        value={replyText}
-        onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
-        placeholder={`Reply to ${authorName}...`}
-        aria-label={`Reply to ${authorName}`}
-      />
+      <div className="markdown-compose-field">
+        <textarea
+          ref={objectId === post.object.object_id ? selectedReplyTextareaRef : undefined}
+          value={replyText}
+          onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
+          placeholder={`Reply to ${authorName}...`}
+          aria-label={`Reply to ${authorName}`}
+        />
+        <MarkdownHelp />
+      </div>
     );
 
     if (inline) {

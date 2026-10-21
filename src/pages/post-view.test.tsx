@@ -155,6 +155,8 @@ describe('LocalPostView UI migration', () => {
     );
 
     expect(markup).toContain('placeholder="Share what is happening..."');
+    expect(markup).toContain('class="markdown-help-link"');
+    expect(markup).toContain('>Markdown formatting</button>');
     expect(markup.indexOf('home-composer')).toBeLessThan(markup.indexOf('empty-state'));
     expect(markup).not.toContain('popular-posters-banner');
     expect(markup).not.toContain('<h2>Home</h2>');

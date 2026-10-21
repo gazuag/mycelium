@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
+import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
@@ -208,23 +209,26 @@ export function HomePage({
           >
             <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" />
           </button>
-          <textarea
-            ref={composerRef}
-            value={postText}
-            onChange={(event) => {
-              onPostTextChange(event.target.value);
-              updateActiveMention(event.target.value, event.currentTarget.selectionStart);
-            }}
-            onClick={(event) => updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart)}
-            onKeyUp={(event) => {
-              if (event.key === 'Escape') {
-                setActiveMention(null);
-                return;
-              }
-              updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart);
-            }}
-            placeholder="Share what is happening..."
-          />
+          <div className="markdown-compose-field">
+            <textarea
+              ref={composerRef}
+              value={postText}
+              onChange={(event) => {
+                onPostTextChange(event.target.value);
+                updateActiveMention(event.target.value, event.currentTarget.selectionStart);
+              }}
+              onClick={(event) => updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+              onKeyUp={(event) => {
+                if (event.key === 'Escape') {
+                  setActiveMention(null);
+                  return;
+                }
+                updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart);
+              }}
+              placeholder="Share what is happening..."
+            />
+            <MarkdownHelp />
+          </div>
         </div>
         {activeMention ? (
           <PeerRecipientPicker
@@ -366,11 +370,14 @@ export function HomePage({
                 isOwnPost={post.authorFingerprint === myPeerId}
                 replyComposer={isReplying ? (
                   <>
-                    <textarea
-                      value={replyText}
-                      onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
-                      placeholder="Write a reply..."
-                    />
+                    <div className="markdown-compose-field">
+                      <textarea
+                        value={replyText}
+                        onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
+                        placeholder="Write a reply..."
+                      />
+                      <MarkdownHelp />
+                    </div>
                     <label className="checkbox-row">
                       <input
                         type="checkbox"

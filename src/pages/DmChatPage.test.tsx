@@ -202,6 +202,10 @@ describe('DmChatPage', () => {
     expect(renderPage()).toContain('0/4000');
   });
 
+  it('shows the Markdown formatting guide beside the message composer', () => {
+    expect(renderPage()).toContain('class="markdown-help-link"');
+  });
+
   it('sends on Enter but preserves Shift+Enter for a newline', () => {
     expect(shouldSendOnEnter('Enter', false)).toBe(true);
     expect(shouldSendOnEnter('Enter', true)).toBe(false);
