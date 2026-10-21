@@ -315,6 +315,32 @@ describe('collectFindResults', () => {
     expect(fake.sent.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b']);
   });
 
+  it('keeps selected-peer order when object validation completes out of order', async () => {
+    const first = await createObject({ id: 'slow-first-peer-validation' });
+    const second = await createObject({ id: 'fast-second-peer-validation' });
+    const fake = createFakeTransport(['peer-a', 'peer-b']);
+    const resultPromise = collectFindResults({
+      ...options(fake, { recipient: RECIPIENT, limit: 5 }),
+      fanout: 2,
+      validate: async (object) => {
+        await new Promise((resolve) => setTimeout(
+          resolve,
+          object.object_id === first.object_id ? 25 : 0
+        ));
+        return true;
+      }
+    });
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [first]);
+    await emitResponse(fake, 'peer-b', [second]);
+
+    const result = await resultPromise;
+
+    expect(result.objects.map((object) => object.object_id)).toEqual([first.object_id, second.object_id]);
+    expect(result.complete).toBe(true);
+    expect(result.responded).toEqual(['peer-a', 'peer-b']);
+  });
+
   it('queries additional peers after an incomplete short round and deduplicates results across rounds', async () => {
     const shared = await createObject({ id: 'shared-between-rounds' });
     const newObject = await createObject({ id: 'new-in-second-round' });

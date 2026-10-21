@@ -166,7 +166,7 @@ async function collectFindRound({
     expiresAt,
     criteria
   )));
-  const objects = new Map<string, DistributedObject>();
+  const objectsByPeer = new Map<string, Map<string, DistributedObject>>();
   const responsePeers = new Set<string>();
   const respondedPeers = new Set<string>();
   const failedPeers = new Set<string>();
@@ -186,6 +186,12 @@ async function collectFindRound({
       settled = true;
       const responded = orderedPeers(respondedPeers);
       const failed = orderedPeers(failedPeers);
+      const objects = new Map<string, DistributedObject>();
+      for (const peerId of peers) {
+        for (const [objectId, object] of objectsByPeer.get(peerId) ?? []) {
+          if (!objects.has(objectId)) objects.set(objectId, object);
+        }
+      }
       const mergedObjects = [...objects.values()];
       if (criteria.order === 'created_at_desc') {
         mergedObjects.sort(compareObjectsByCreatedAtDesc);
@@ -242,7 +248,14 @@ async function collectFindRound({
             } catch {
               isValid = false;
             }
-            if (isValid && !objects.has(object.object_id)) objects.set(object.object_id, object);
+            if (isValid) {
+              let peerObjects = objectsByPeer.get(peerId);
+              if (!peerObjects) {
+                peerObjects = new Map<string, DistributedObject>();
+                objectsByPeer.set(peerId, peerObjects);
+              }
+              if (!peerObjects.has(object.object_id)) peerObjects.set(object.object_id, object);
+            }
           }
           if (response.payload.complete === true) respondedPeers.add(peerId);
           else failedPeers.add(peerId);
