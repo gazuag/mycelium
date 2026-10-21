@@ -6,6 +6,7 @@ import {
   MAX_OBJECT_STORAGE_LIMIT_MB,
   MIN_OBJECT_STORAGE_BYTES
 } from '../object-layer/storage-gc';
+import { DEFAULT_EXTERNAL_IMAGE_LIMIT_MB, MAX_EXTERNAL_IMAGE_LIMIT_MB } from '../markdown/external-content';
 
 interface SettingsPageProps {
   identityId: string;
@@ -26,6 +27,8 @@ interface SettingsPageProps {
   objectStorageLimitMb: number;
   objectStorageUsedBytes: number | null;
   onSaveObjectStorageLimit: (limitMb: number) => boolean;
+  externalImageLimitMb: number;
+  onSaveExternalImageLimit: (limitMb: number) => boolean;
   onExportIdentity: (passphrase: string) => Promise<void>;
   onImportIdentity: (file: File, passphrase: string) => Promise<void>;
   onCreateIdentity: () => void;
@@ -57,6 +60,8 @@ export function SettingsPage({
   objectStorageLimitMb,
   objectStorageUsedBytes,
   onSaveObjectStorageLimit,
+  externalImageLimitMb,
+  onSaveExternalImageLimit,
   onExportIdentity,
   onImportIdentity,
   onCreateIdentity,
@@ -76,6 +81,9 @@ export function SettingsPage({
   const [objectStorageLimitDraft, setObjectStorageLimitDraft] = useState(String(objectStorageLimitMb));
   const [objectStorageLimitError, setObjectStorageLimitError] = useState('');
   const [objectStorageLimitSaveStatus, setObjectStorageLimitSaveStatus] = useState('');
+  const [externalImageLimitDraft, setExternalImageLimitDraft] = useState(String(externalImageLimitMb));
+  const [externalImageLimitError, setExternalImageLimitError] = useState('');
+  const [externalImageLimitSaveStatus, setExternalImageLimitSaveStatus] = useState('');
   const [followConfirmation, setFollowConfirmation] = useState('');
   const followConfirmationTimer = useRef<number | undefined>(undefined);
   const [identityCopyStatus, setIdentityCopyStatus] = useState('');
@@ -104,6 +112,10 @@ export function SettingsPage({
   useEffect(() => {
     setObjectStorageLimitDraft(String(objectStorageLimitMb));
   }, [objectStorageLimitMb]);
+
+  useEffect(() => {
+    setExternalImageLimitDraft(String(externalImageLimitMb));
+  }, [externalImageLimitMb]);
 
   useEffect(() => () => {
     if (followConfirmationTimer.current !== undefined) {
@@ -162,6 +174,73 @@ export function SettingsPage({
       <div className="card">
         <section>
           <h3>Settings</h3>
+        </section>
+
+        <section>
+          <h3>External images</h3>
+          <div className="add-peer-card">
+            <label>
+              <strong>Maximum known external image size (MB)</strong>
+              <input
+                aria-label="Maximum known external image size (MB)"
+                type="number"
+                min={0}
+                max={MAX_EXTERNAL_IMAGE_LIMIT_MB}
+                step={0.1}
+                value={externalImageLimitDraft}
+                onChange={(event) => {
+                  setExternalImageLimitDraft(event.currentTarget.value);
+                  setExternalImageLimitError('');
+                  setExternalImageLimitSaveStatus('');
+                }}
+              />
+            </label>
+            <div className="row" aria-label="External image size presets">
+              {[0, 1, DEFAULT_EXTERNAL_IMAGE_LIMIT_MB, 10, 25].map((limit) => (
+                <button
+                  key={limit}
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setExternalImageLimitDraft(String(limit));
+                    setExternalImageLimitError('');
+                    setExternalImageLimitSaveStatus('');
+                  }}
+                >
+                  {limit} MB
+                </button>
+              ))}
+            </div>
+            <p className="note">
+              MB uses decimal units (1 MB = 1,000,000 bytes). Images with unknown or larger reported sizes require an explicit load action. Setting this to 0 disables automatic image display. Every loaded image also has a separate 10 MiB hard client-side download cap.
+            </p>
+            <div className="row">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  const parsed = Number(externalImageLimitDraft);
+                  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_EXTERNAL_IMAGE_LIMIT_MB) {
+                    setExternalImageLimitError(`Enter a number between 0 and ${MAX_EXTERNAL_IMAGE_LIMIT_MB} MB.`);
+                    setExternalImageLimitSaveStatus('');
+                    return;
+                  }
+                  if (!onSaveExternalImageLimit(parsed)) {
+                    setExternalImageLimitError('The external image display limit could not be saved.');
+                    setExternalImageLimitSaveStatus('');
+                    return;
+                  }
+                  setExternalImageLimitDraft(String(parsed));
+                  setExternalImageLimitError('');
+                  setExternalImageLimitSaveStatus('External image display limit saved.');
+                }}
+              >
+                Save Image Limit
+              </button>
+              {externalImageLimitError ? <span className="note" role="alert">{externalImageLimitError}</span> : null}
+              {externalImageLimitSaveStatus ? <span className="note" role="status">{externalImageLimitSaveStatus}</span> : null}
+            </div>
+          </div>
         </section>
 
         <section>

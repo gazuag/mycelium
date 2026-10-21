@@ -9,6 +9,8 @@ import type { DmConversationOutbox, DmConversationService } from '../hooks/useDm
 import { useDmConversation } from '../hooks/useDmConversation';
 import type { SenderEncryptionKeyResolver } from '../object-layer/dm-inbox';
 import type { ObjectStore } from '../object-layer/types';
+import { MarkdownContent } from '../components/MarkdownContent';
+import { checkExternalImageSizes, encodeMarkdownMessage } from '../markdown/external-content';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -71,6 +73,7 @@ export function DmChatPage({
   });
   const [draft, setDraft] = useState('');
   const [offlineNote, setOfflineNote] = useState('');
+  const [checkingImages, setCheckingImages] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
 
@@ -85,10 +88,16 @@ export function DmChatPage({
   }, [counterparty]);
 
   const submit = async () => {
-    if (!isDmDraftSendable(draft, canSend) || sending) return;
-    const result = await send(draft);
-    setDraft('');
-    setOfflineNote(queuedDeliveryNote(result));
+    if (!isDmDraftSendable(draft, canSend) || sending || checkingImages) return;
+    setCheckingImages(true);
+    try {
+      const imageSizes = await checkExternalImageSizes(draft);
+      const result = await send(encodeMarkdownMessage(draft, imageSizes));
+      setDraft('');
+      setOfflineNote(queuedDeliveryNote(result));
+    } finally {
+      setCheckingImages(false);
+    }
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -150,7 +159,9 @@ export function DmChatPage({
               {message.deleted
                 ? <p className="dm-message-deleted">[Deleted message]</p>
                 : message.status === 'ok' && message.text !== null
-                ? <p>{message.text}</p>
+                ? <div className="dm-message-content">
+                    <MarkdownContent source={message.text} imageSizes={message.imageSizes} />
+                  </div>
                 : <p className={`dm-message-placeholder ${message.status}`}>
                     {message.status === 'unverified'
                       ? "Can't verify the sender yet. Connect with them once to exchange encryption keys."
@@ -201,9 +212,9 @@ export function DmChatPage({
           className="btn"
           onClick={() => void submit()}
           type="button"
-          disabled={!isDmDraftSendable(draft, canSend) || sending}
+          disabled={!isDmDraftSendable(draft, canSend) || sending || checkingImages}
         >
-          {sending ? 'Sending…' : 'Send'}
+          {checkingImages ? 'Checking images…' : sending ? 'Sending…' : 'Send'}
         </button>
       </div>
       {noKey && (

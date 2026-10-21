@@ -12,6 +12,30 @@ A privacy-first peer-to-peer social app prototype.
 - Publishes and fetches discovery posts via the Mycelium Protocol over WebSocket.
 - Shows connection state: signalling, connecting, connected, disconnected.
 
+## Markdown and external content
+
+Posts, replies, and direct messages render paragraphs, bold, italic, underline,
+blockquotes, explicit and pasted HTTP(S) links, and Markdown images. Raw HTML is
+shown as text and is not executed. External links open only after the in-app
+"You are now leaving Mycelium" interstitial, which displays the URL parser's
+ASCII hostname (including punycode for internationalized domains) and the full
+destination.
+
+Markdown image URLs remain in the original text and image bytes are never added
+to Mycelium objects or IndexedDB object storage. At publish/send time Mycelium
+tries a CORS-governed HTTP HEAD request and stores only known/unknown byte-size
+metadata. A blocked request or missing/invalid `Content-Length` leaves size
+unknown. In **Settings → External images**, choose the maximum reported size
+that may display automatically (decimal MB, where 1 MB is 1,000,000 bytes;
+default 5 MB; 0 disables automatic display). Unknown or larger images require
+an explicit load action. Image loads use a streamed client-side 10 MiB cap and
+allow only supported raster formats; CORS, format, and network failures remain
+placeholders with an error/retry action. Explicitly loaded images may be reused
+from a 10 MiB, 32-entry in-memory cache; the cache is neither persistent nor
+part of object storage. The cap bounds bytes read from the response stream,
+though a browser may transiently provide an individual stream chunk larger
+than the remaining allowance before the client can abort it.
+
 ## Project structure
 
 - `src/crypto/identity.ts` — local keypair generation and fingerprint derivation.
@@ -19,6 +43,7 @@ A privacy-first peer-to-peer social app prototype.
 - `src/p2p/signalling.ts` — WebSocket signalling connection.
 - `src/p2p/webrtc.ts` — WebRTC peer connection and data channel.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.
+- `src/markdown/external-content.ts` — safe URL handling, Markdown image-size metadata, and bounded raster image loading.
 - `server.py` — Python WebSocket server handling signalling and discovery over one WebSocket endpoint.
 
 ## Install dependencies
@@ -446,6 +471,8 @@ Signed by owner.
 - timestamp
 - content
 - tags[]
+- optional advisory `image_sizes[]` entries (`url` plus a known byte count or
+  an explicit unknown state)
 - signature
   
 Posts are immutable.
@@ -457,7 +484,9 @@ Edits create new posts.
 
 A direct message is a signed object with an author, recipient, creation time,
 and encrypted payload. The payload contains ciphertext and a nonce; the
-plaintext is never stored in the object database.
+plaintext is never stored in the object database. Markdown text and its
+lightweight image-size metadata travel together only inside that encrypted
+plaintext.
 
 ⸻
 

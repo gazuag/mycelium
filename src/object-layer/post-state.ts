@@ -16,6 +16,10 @@ export function postTags(view: LocalPostView): string[] {
   return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : [];
 }
 
+export function postImageSizes(view: LocalPostView): unknown {
+  return postPayload(view).image_sizes;
+}
+
 export function postReplyTo(view: LocalPostView): string | undefined {
   const replyTo = postPayload(view).reply_to;
   return typeof replyTo === 'string' ? replyTo : undefined;
@@ -125,11 +129,16 @@ export function createPostObjectPayload(
   tags: readonly string[],
   mentions: readonly PostMention[] = [],
   replyTo?: string,
-  replyToAuthor?: string
+  replyToAuthor?: string,
+  imageSizes: readonly (
+    | { readonly url: string; readonly status: 'known'; readonly sizeBytes: number }
+    | { readonly url: string; readonly status: 'unknown' }
+  )[] = []
 ): JsonValue {
   return {
     content,
     tags: [...tags],
+    ...(imageSizes.length > 0 ? { image_sizes: imageSizes.map((size) => ({ ...size })) } : {}),
     ...(mentions.length > 0 ? {
       mentions: mentions.map((mention) => ({
         handle: mention.handle,

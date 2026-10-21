@@ -24,6 +24,8 @@ describe('SettingsPage', () => {
         objectStorageLimitMb={500}
         objectStorageUsedBytes={12_345_678}
         onSaveObjectStorageLimit={vi.fn(() => true)}
+        externalImageLimitMb={5}
+        onSaveExternalImageLimit={vi.fn(() => true)}
         onExportIdentity={vi.fn()}
         onImportIdentity={vi.fn()}
         onCreateIdentity={vi.fn()}
@@ -57,6 +59,11 @@ describe('SettingsPage', () => {
     expect(markup).toContain('value="500"');
     expect(markup).toContain('type="number" min="100" max=');
     expect(markup).toContain('>Save Storage Limit</button>');
+    expect(markup).toContain('<h3>External images</h3>');
+    expect(markup).toContain('aria-label="Maximum known external image size (MB)"');
+    expect(markup).toContain('>Save Image Limit</button>');
+    expect(markup).toContain('0 MB');
+    expect(markup).toContain('10 MiB hard client-side download cap');
     expect(markup).toContain('Storage used: 12.35 MB of 500 MB (2.5%).');
     expect(markup).toContain('Identity management');
     expect(markup).toContain('aria-label="Export passphrase"');

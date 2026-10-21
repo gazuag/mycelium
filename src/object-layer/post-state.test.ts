@@ -23,4 +23,17 @@ describe('post object payloads', () => {
         reply_to_author: 'parent-author'
       });
   });
+
+  it('stores image-size metadata separately from the Markdown source without image data', () => {
+    const content = '![alt](https://images.example/picture.png)';
+    const payload = createPostObjectPayload(content, [], [], undefined, undefined, [
+      { url: 'https://images.example/picture.png', status: 'known', sizeBytes: 2048 }
+    ]) as Record<string, unknown>;
+
+    expect(payload.content).toBe(content);
+    expect(payload.image_sizes).toEqual([
+      { url: 'https://images.example/picture.png', status: 'known', sizeBytes: 2048 }
+    ]);
+    expect(JSON.stringify(payload)).not.toContain('data:image');
+  });
 });

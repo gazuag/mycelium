@@ -11,6 +11,7 @@ import {
   exportEncryptionPublicKey,
   generateEncryptionKeyPair
 } from '../crypto/dm-crypto';
+import { encodeMarkdownMessage } from '../markdown/external-content';
 import * as dmInbox from './dm-inbox';
 import { createDmObject, type DmObjectIdentity } from './dm-object';
 import {
@@ -343,6 +344,26 @@ describe('conversation read model', () => {
       { status: 'unverified', text: null },
       { status: 'key_changed', text: null },
       { status: 'invalid', text: null }
+    ]);
+  });
+
+  it('decodes Markdown and image-size metadata from encrypted message plaintext', async () => {
+    const identity = identityForKeys('me-key');
+    const object = stubDm('markdown-dm', 'alice-key', 'me-key', '2026-10-01T00:00:00.000Z');
+    const content = '![picture](https://images.example/picture.png)';
+    vi.spyOn(dmInbox, 'openDm').mockResolvedValue({
+      status: 'ok',
+      plaintext: encodeMarkdownMessage(content, [
+        { url: 'https://images.example/picture.png', status: 'known', sizeBytes: 512 }
+      ]),
+      counterparty: 'alice-key'
+    });
+
+    const [message] = await loadConversation(optionsFor([object], identity, 'alice-key'));
+
+    expect(message.text).toBe(content);
+    expect(message.imageSizes).toEqual([
+      { url: 'https://images.example/picture.png', status: 'known', sizeBytes: 512 }
     ]);
   });
 

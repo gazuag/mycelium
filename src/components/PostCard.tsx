@@ -1,9 +1,10 @@
 import type { LocalPostView } from '../object-layer';
-import { postContent, postTags } from '../object-layer';
+import { postContent, postImageSizes, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
 import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
+import { MarkdownContent } from './MarkdownContent';
 
 interface PostCardProps {
   post: LocalPostView;
@@ -108,7 +109,9 @@ export function PostCard({
           </div>
         ) : null}
 
-        <p className="post-content">{content}</p>
+        <div className="post-content">
+          <MarkdownContent source={content} imageSizes={postImageSizes(post)} />
+        </div>
 
         {postTags(post).length > 0 ? (
           <div className="post-tags">{postTags(post).map((tag) => <span key={tag} className="tag">#{tag}</span>)}</div>

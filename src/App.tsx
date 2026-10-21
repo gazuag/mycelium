@@ -35,7 +35,9 @@ import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
-import { canonicalize, type PacketSigner } from './p2p/protocol';
+import { ExternalImageLimitContext } from './components/MarkdownContent';
+import { canonicalize, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
+import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { parsePeerId } from './utils/peerId';
@@ -43,6 +45,13 @@ import { parseAddPeerInvitePath } from './utils/addPeerInvite';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
 import { mentionsPresentInText } from './utils/postMentions';
+import {
+  checkExternalImageSizes,
+  DEFAULT_EXTERNAL_IMAGE_LIMIT_MB,
+  EXTERNAL_IMAGE_LIMIT_STORAGE_KEY,
+  MAX_EXTERNAL_IMAGE_LIMIT_MB,
+  parseExternalImageLimitMb
+} from './markdown/external-content';
 import {
   BYTES_PER_MB,
   DEFAULT_OBJECT_STORAGE_BYTES,
@@ -96,6 +105,14 @@ function loadObjectStorageLimitMb(): number {
     return parseObjectStorageLimitMb(localStorage.getItem(OBJECT_STORAGE_LIMIT_STORAGE_KEY));
   } catch {
     return DEFAULT_OBJECT_STORAGE_BYTES / BYTES_PER_MB;
+  }
+}
+
+function loadExternalImageLimitMb(): number {
+  try {
+    return parseExternalImageLimitMb(localStorage.getItem(EXTERNAL_IMAGE_LIMIT_STORAGE_KEY));
+  } catch {
+    return DEFAULT_EXTERNAL_IMAGE_LIMIT_MB;
   }
 }
 
@@ -246,6 +263,7 @@ function App() {
   const [objectStorageLimitMb, setObjectStorageLimitMb] = useState(loadObjectStorageLimitMb);
   const objectStorageLimitBytesRef = useRef(objectStorageLimitMb * BYTES_PER_MB);
   const [objectStorageUsedBytes, setObjectStorageUsedBytes] = useState<number | null>(null);
+  const [externalImageLimitMb, setExternalImageLimitMb] = useState(loadExternalImageLimitMb);
   const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeFeedInjectionRevision, setHomeFeedInjectionRevision] = useState(0);
   const [homeFeedInjectionFrequencies, setHomeFeedInjectionFrequencies] = useState<{
@@ -684,6 +702,21 @@ function App() {
         addLog(`Object storage GC failed after changing the storage limit: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
+    return true;
+  }, [addLog]);
+
+  const handleSaveExternalImageLimit = useCallback((limitMb: number): boolean => {
+    if (!Number.isFinite(limitMb) || limitMb < 0 || limitMb > MAX_EXTERNAL_IMAGE_LIMIT_MB) {
+      addLog(`External image display limit must be between 0 and ${MAX_EXTERNAL_IMAGE_LIMIT_MB} MB.`);
+      return false;
+    }
+    try {
+      localStorage.setItem(EXTERNAL_IMAGE_LIMIT_STORAGE_KEY, String(limitMb));
+    } catch (error) {
+      addLog(`External image display limit could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    setExternalImageLimitMb(limitMb);
     return true;
   }, [addLog]);
 
@@ -1589,7 +1622,7 @@ function App() {
         }
         addLog(`Received verified object ${object.object_id} from ${peer}`);
       },
-      async (peer: string, metadata: PeerMetadata) => {
+      async (peer: string, _metadata: PeerMetadata, packet?: MyceliumPacket) => {
         if (!isCurrentManager(peer)) return;
         if (!isValidPeerFingerprint(peer)) {
           addLog(`Ignoring profile metadata from invalid peer id: ${peer}`);
@@ -1599,7 +1632,14 @@ function App() {
           addLog(`Blocked peer ${peer} metadata ignored`);
           return;
         }
-        await handlePeerMetadata(peer, metadata);
+        const accepted = await dispatchAuthenticatedProfileMetadata(
+          peer,
+          packet,
+          (authenticatedMetadata) => handlePeerMetadata(peer, authenticatedMetadata)
+        );
+        if (!accepted) {
+          addLog(`Rejected unauthenticated profile metadata from ${peer}`);
+        }
       },
       async (peer: string, _since: string | null = null, limit = 100, after: FeedCursor | null = null, requestId?: string) => {
         if (!isCurrentManager(peer)) return;
@@ -2467,10 +2507,11 @@ function App() {
       }
     }
     const objectIdentity = createObjectIdentity(identity);
+    const imageSizes = await checkExternalImageSizes(content);
     const postObject = await createSignedObject({
       object_type: 'mycelium.post',
       created_at: new Date().toISOString(),
-      payload: createPostObjectPayload(content, tags, mentions, replyTo, replyTarget?.authorFingerprint),
+      payload: createPostObjectPayload(content, tags, mentions, replyTo, replyTarget?.authorFingerprint, imageSizes),
       replication_policy: {}
     }, objectIdentity) as PostObject;
     await objectStore.put(postObject);
@@ -3972,6 +4013,7 @@ function App() {
         )));
       }}
     >
+    <ExternalImageLimitContext.Provider value={externalImageLimitMb}>
     <div className="app-shell">
       <aside className="app-sidebar">
         <TabBar
@@ -4000,6 +4042,7 @@ function App() {
           syncStatus={syncStatus}
           myFingerprint={identity?.id}
           onPeerProfileClick={handleOpenPeerProfile}
+          onHomeClick={() => handlePageChange('home')}
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -4284,6 +4327,8 @@ function App() {
             objectStorageLimitMb={objectStorageLimitMb}
             objectStorageUsedBytes={objectStorageUsedBytes}
             onSaveObjectStorageLimit={handleSaveObjectStorageLimit}
+            externalImageLimitMb={externalImageLimitMb}
+            onSaveExternalImageLimit={handleSaveExternalImageLimit}
             onExportIdentity={handleExportIdentity}
             onImportIdentity={handleImportIdentity}
             onCreateIdentity={handleCreateIdentity}
@@ -4303,6 +4348,7 @@ function App() {
         </main>
       </div>
     </div>
+    </ExternalImageLimitContext.Provider>
     </DmUnreadProvider>
   );
 }

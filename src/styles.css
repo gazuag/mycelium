@@ -587,6 +587,11 @@ body, html, #root {
   align-items: center;
   gap: 0.75rem;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
 }
 
 .brand-logo {
@@ -1454,6 +1459,121 @@ body, html, #root {
 
 .post-content a {
   overflow-wrap: anywhere;
+}
+
+.markdown-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.markdown-content > :first-child,
+.markdown-content p:first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child,
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content p {
+  margin: 0.45rem 0;
+}
+
+.markdown-content blockquote {
+  margin: 0.55rem 0;
+  padding: 0.2rem 0 0.2rem 0.8rem;
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.markdown-external-link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.markdown-image-placeholder {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  max-width: 100%;
+  margin: 0.25rem 0;
+  vertical-align: middle;
+}
+
+.markdown-image-load {
+  max-width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-subtle);
+  color: var(--color-text-secondary);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.markdown-image-error {
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
+.markdown-external-image {
+  display: block;
+  max-width: min(100%, 40rem);
+  max-height: 32rem;
+  border-radius: var(--radius-lg);
+  object-fit: contain;
+}
+
+.external-link-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 60%);
+}
+
+.external-link-interstitial {
+  width: min(100%, 34rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: var(--shadow-card);
+}
+
+.external-link-interstitial h2,
+.external-link-interstitial p {
+  margin: 0;
+}
+
+.external-link-hostname {
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-lg);
+}
+
+.external-link-full-url {
+  display: block;
+  margin-top: 0.5rem;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.dm-message-content .markdown-content {
+  overflow-wrap: anywhere;
+}
+
+.dm-message-content .markdown-content p {
+  margin: 0.25rem 0;
 }
 
 .post-open-target.is-navigable {

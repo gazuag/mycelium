@@ -12,6 +12,7 @@ interface AppHeaderProps {
   syncStatus: string;
   myFingerprint?: string;
   onPeerProfileClick: (peerId: string) => void;
+  onHomeClick: () => void;
 }
 
 export function AppHeader({
@@ -23,7 +24,8 @@ export function AppHeader({
   connectedPeerIds,
   syncStatus,
   myFingerprint,
-  onPeerProfileClick
+  onPeerProfileClick,
+  onHomeClick
 }: AppHeaderProps) {
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
@@ -38,10 +40,10 @@ export function AppHeader({
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
       <div className="app-header-top">
-        <div className="brand-mark">
+        <button className="brand-mark" type="button" onClick={onHomeClick} aria-label="Go to Home feed">
           <BrandLogo variant="default" className="brand-logo app-brand-logo" size={32} />
           <p className="app-title">Mycelium - Private peer-to-peer social</p>
-        </div>
+        </button>
         <button
           className={`icon-btn header-menu-toggle ${tone}`}
           onClick={onToggleCollapse}

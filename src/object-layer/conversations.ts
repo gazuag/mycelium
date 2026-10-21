@@ -4,6 +4,7 @@ import * as dmInbox from './dm-inbox';
 import type { DmObjectIdentity } from './dm-object';
 import type { SenderEncryptionKeyResolver } from './dm-inbox';
 import type { DeletionTombstone, DistributedObject, ObjectStore } from './types';
+import { decodeMarkdownMessage, type ExternalImageSize } from '../markdown/external-content';
 
 export type ConversationDirection = 'in' | 'out';
 export type ConversationMessageStatus = 'ok' | 'unverified' | 'key_changed' | 'invalid';
@@ -22,6 +23,7 @@ export interface ConversationMessage {
   readonly createdAt: string;
   readonly status: ConversationMessageStatus;
   readonly text: string | null;
+  readonly imageSizes?: readonly ExternalImageSize[];
   readonly deleted?: true;
   readonly delivery?: 'pending' | 'attempted';
 }
@@ -285,12 +287,16 @@ async function buildMessage({
     opened = { status: 'invalid' };
   }
 
+  const markdownMessage = opened.status === 'ok'
+    ? decodeMarkdownMessage(opened.plaintext)
+    : null;
   const base: ConversationMessage = {
     objectId: object.object_id,
     direction,
     createdAt: object.created_at,
     status: opened.status,
-    text: opened.status === 'ok' ? opened.plaintext : null
+    text: markdownMessage?.content ?? null,
+    ...(markdownMessage ? { imageSizes: markdownMessage.imageSizes } : {})
   };
   if (direction === 'in') return base;
 

@@ -11,7 +11,7 @@ import {
   generateEncryptionKeyPair
 } from '../crypto/dm-crypto';
 import { decryptDmObject, type DmObjectIdentity } from './dm-object';
-import { sendDm, type DmRecipientContact } from './dm-send';
+import { MAX_DM_PLAINTEXT_LENGTH, sendDm, type DmRecipientContact } from './dm-send';
 import type { DistributedObject, ObjectStore } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
@@ -120,7 +120,7 @@ describe('sendDm', () => {
     expect(replicate).not.toHaveBeenCalled();
   });
 
-  it('rejects plaintext over 4000 characters', async () => {
+  it('rejects plaintext over the encrypted DM payload limit', async () => {
     const sender = await createIdentity('sender');
     const recipient = await createIdentity('recipient');
     const records: DistributedObject[] = [];
@@ -128,7 +128,7 @@ describe('sendDm', () => {
     const result = await sendDm({
       identity: sender,
       recipientContact: contactFor(recipient),
-      plaintext: 'x'.repeat(4001),
+      plaintext: 'x'.repeat(MAX_DM_PLAINTEXT_LENGTH + 1),
       store: createStore({ records }),
       replicate: async () => []
     });

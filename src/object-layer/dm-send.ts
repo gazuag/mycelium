@@ -15,6 +15,8 @@ export interface SendDmOptions {
   now?: () => Date;
 }
 
+export const MAX_DM_PLAINTEXT_LENGTH = 20_000;
+
 export type SendDmResult =
   | { status: 'sent'; object: DistributedObject; attemptedTo: string[]; keyChanged: boolean }
   | { status: 'no_key' | 'invalid' | 'store_failed'; attemptedTo: []; keyChanged: boolean };
@@ -28,7 +30,7 @@ export async function sendDm({
   now
 }: SendDmOptions): Promise<SendDmResult> {
   const keyChanged = recipientContact.encryptionKeyChanged === true;
-  if (!plaintext.trim() || plaintext.length > 4000) {
+  if (!plaintext.trim() || plaintext.length > MAX_DM_PLAINTEXT_LENGTH) {
     return { status: 'invalid', attemptedTo: [], keyChanged };
   }
 

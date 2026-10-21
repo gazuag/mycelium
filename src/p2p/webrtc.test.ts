@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
+import type { PeerMetadata } from '../types';
+import type { MyceliumPacket } from './protocol';
 import { configureIceServers, PeerConnectionManager, POST_REQUEST_LIMIT_MAX } from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
@@ -106,6 +108,7 @@ const fakeSocket = () => ({ send: vi.fn() } as unknown as WebSocket);
 function createManager(options: {
   localId?: string;
   onRequestPosts?: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
+  onMetadata?: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void;
   onEvent?: (peerId: string, event: string) => void;
   onObject?: (peerId: string, object: DistributedObject) => void;
   onObjectsBatch?: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void;
@@ -115,7 +118,7 @@ function createManager(options: {
     noop,
     noop,
     options.onObject ?? noop,
-    noop,
+    options.onMetadata ?? noop,
     options.onRequestPosts ?? noop,
     options.onObjectsBatch ?? noop,
     noop,
@@ -137,6 +140,37 @@ beforeEach(() => {
   FakePeerConnection.createDataChannelCalls = 0;
   Object.defineProperty(globalThis, 'RTCPeerConnection', { value: FakePeerConnection, configurable: true });
   Object.defineProperty(globalThis, 'window', { value: { setInterval, clearInterval, setTimeout, clearTimeout }, configurable: true });
+});
+
+describe('PROFILE_UPDATE metadata forwarding', () => {
+  it('preserves the original packet at the metadata callback boundary', () => {
+    const received: Array<{ peerId: string; metadata: PeerMetadata; packet?: MyceliumPacket }> = [];
+    const manager = createManager({
+      onMetadata: (peerId, metadata, packet) => received.push({ peerId, metadata, packet })
+    });
+    const metadata: PeerMetadata = {
+      author: 'peer-b',
+      publicKey: 'public-key',
+      displayName: 'Peer B',
+      following: false,
+      timestamp: new Date(0).toISOString()
+    };
+    const packet: MyceliumPacket = {
+      protocol: 'mycelium',
+      version: 1,
+      id: 'profile-update-1',
+      type: 'PROFILE_UPDATE',
+      timestamp: new Date(0).toISOString(),
+      sender: 'peer-b',
+      recipient: 'peer-a',
+      payload: { profile: metadata },
+      signature: 'packet-signature'
+    };
+
+    (manager as any).handleMyceliumPacket(packet);
+
+    expect(received).toEqual([{ peerId: 'peer-b', metadata, packet }]);
+  });
 });
 
 describe('POST_REQUEST limit handling', () => {

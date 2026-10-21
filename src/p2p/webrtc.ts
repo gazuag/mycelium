@@ -1,6 +1,6 @@
 import type { PeerSignalMessage, SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata } from '../types';
-import { buildPacket, createPacketId, isMyceliumPacket, type PacketSigner } from './protocol';
+import { buildPacket, createPacketId, isMyceliumPacket, type MyceliumPacket, type PacketSigner } from './protocol';
 import { MAX_FEED_PAGE_SIZE } from '../object-layer/feed-page';
 import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
@@ -65,7 +65,7 @@ export class PeerConnectionManager {
   private polite = false;
   private onState: (peerId: string, state: ConnectionState) => void;
   private onObject: (peerId: string, object: DistributedObject) => void;
-  private onMetadata: (peerId: string, metadata: PeerMetadata) => void;
+  private onMetadata: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void;
   private onRequestPosts: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
   private onObjectsBatch: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void;
   private onSignal: (message: SignalMessage) => void;
@@ -96,7 +96,7 @@ export class PeerConnectionManager {
     onState: (peerId: string, state: ConnectionState) => void,
     onSignal: (message: SignalMessage) => void,
     onObject: (peerId: string, object: DistributedObject) => void,
-    onMetadata: (peerId: string, metadata: PeerMetadata) => void,
+    onMetadata: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void,
     onRequestPosts: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void,
     onObjectsBatch: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void,
     onOpen: (peerId: string) => void,
@@ -363,7 +363,7 @@ export class PeerConnectionManager {
       case 'PROFILE_UPDATE': {
         const metadata = packet.payload?.profile ?? packet.payload?.metadata;
         if (metadata && typeof metadata === 'object') {
-          this.onMetadata(peerId, metadata as PeerMetadata);
+          this.onMetadata(peerId, metadata as PeerMetadata, packet as MyceliumPacket);
         }
         return;
       }
