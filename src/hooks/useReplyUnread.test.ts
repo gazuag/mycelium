@@ -116,9 +116,11 @@ describe('reply unread notifications', () => {
       ...post('feed-reply-post', 'alice-key', 'A normal feed reply'),
       payload: { content: 'A normal feed reply', reply_to: ownPostId }
     };
+    const legacyPost = post('legacy-post', 'alice-key', 'A post created before mention metadata');
     const { controller } = makeController([
       post(ownPostId, ownPublicKey, 'My post'),
-      feedReply
+      feedReply,
+      legacyPost
     ]);
 
     await controller.refresh();
@@ -155,6 +157,65 @@ describe('reply unread notifications', () => {
       replyContent: 'Canonical reply content',
       read: true
     });
+  });
+
+  it('indexes structured mentions by public key once across direct delivery and later discovery', async () => {
+    const mentionedPost = {
+      ...post('mention-post', 'alice-key', 'Hey @GreenRunningFox!'),
+      payload: {
+        content: 'Hey @GreenRunningFox!',
+        mentions: [
+          { handle: 'GreenRunningFox', peerId: 'my-peer-id', publicKey: ownPublicKey },
+          { handle: 'GreenRunningFox', peerId: 'my-peer-id', publicKey: ownPublicKey }
+        ]
+      }
+    };
+    const { controller } = makeController([mentionedPost]);
+
+    await controller.discover([mentionedPost]);
+    controller.markRead(mentionedPost.object_id);
+    await controller.discover([mentionedPost]);
+    await controller.refresh();
+
+    expect(controller.getSnapshot().replies).toHaveLength(1);
+    expect(controller.getSnapshot().replies[0]).toMatchObject({
+      id: mentionedPost.object_id,
+      parentPostId: mentionedPost.object_id,
+      kind: 'mention',
+      mentionedHandle: 'GreenRunningFox',
+      replyContent: 'Mentioned you in a post',
+      parentContent: 'Hey @GreenRunningFox!',
+      read: true
+    });
+  });
+
+  it('does not treat a matching display handle as identity and keeps persisted mention references after source deletion', async () => {
+    const mentionedPost = {
+      ...post('mention-post', 'alice-key', 'Hey @GreenRunningFox!'),
+      payload: {
+        content: 'Hey @GreenRunningFox!',
+        mentions: [{ handle: 'GreenRunningFox', peerId: 'my-peer-id', publicKey: 'someone-else-key' }]
+      }
+    };
+    const { controller, storage } = makeController([mentionedPost]);
+    await controller.discover([mentionedPost]);
+    expect(controller.getSnapshot().replies).toEqual([]);
+
+    const matchingMention = {
+      ...mentionedPost,
+      payload: {
+        ...mentionedPost.payload,
+        mentions: [{ handle: 'AnotherHandle', peerId: 'my-peer-id', publicKey: ownPublicKey }]
+      }
+    };
+    await controller.discover([matchingMention]);
+    expect(controller.getSnapshot().replies).toHaveLength(1);
+
+    const afterDeletion = makeController([], storage).controller;
+    afterDeletion.start();
+    expect(afterDeletion.getSnapshot().replies).toMatchObject([
+      { id: 'mention-post', kind: 'mention', parentPostId: 'mention-post' }
+    ]);
   });
 
   it('reports storage-query failures rather than silently treating them as an empty inbox', async () => {

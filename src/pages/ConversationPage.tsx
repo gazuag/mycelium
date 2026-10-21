@@ -241,6 +241,7 @@ export function ConversationPage({
           replyCount={replyCounts?.get(objectId) ?? 0}
           likeCount={recommendationSummary.active_recommender_count}
           authorName={authorName}
+          authorDisplayName={matchingContact?.displayName}
           authorId={matchingContact?.fingerprint ?? currentPost.authorFingerprint}
           authorOnline={
             currentPost.object.author !== myPublicKey

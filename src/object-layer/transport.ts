@@ -505,6 +505,21 @@ export async function validateFindResponseObjects(
   return [...valid.values()];
 }
 
+export async function filterTombstonedObjects(
+  objects: readonly DistributedObject[],
+  store: ObjectStore
+): Promise<DistributedObject[]> {
+  if (!isDeletionAwareObjectStore(store)) return [...objects];
+  const tombstones = await Promise.all(
+    objects.map((object) => typeof object?.object_id === 'string'
+      ? store.getDeletionTombstone(object.object_id)
+      : Promise.resolve(null))
+  );
+  return objects.filter((object, index) =>
+    typeof object?.object_id !== 'string' || tombstones[index] === null
+  );
+}
+
 export class FindAggregation {
   private readonly requestedObjectIds: Set<string>;
   private readonly objects = new Map<string, DistributedObject>();
@@ -838,6 +853,45 @@ export async function sendReplyToAuthor(
   }
   console.debug(`REPLY author connected - sent object_id=${replyObject.object_id} peer=${authorPeerId}`);
   return { ...result, sent: true };
+}
+
+export interface DirectObjectDeliveryResult {
+  readonly peerId: string;
+  readonly reachable: boolean;
+  readonly sent: boolean;
+  readonly error?: string;
+}
+
+export async function sendObjectToPeers(
+  sender: string,
+  object: DistributedObject,
+  peerIds: readonly string[],
+  transport: ObjectTransport,
+  signer?: PacketSigner
+): Promise<DirectObjectDeliveryResult[]> {
+  const connectedPeers = new Set(transport.connectedPeers());
+  const uniquePeerIds = [...new Set(peerIds)];
+  const results: DirectObjectDeliveryResult[] = [];
+
+  for (const peerId of uniquePeerIds) {
+    if (!connectedPeers.has(peerId)) {
+      results.push({ peerId, reachable: false, sent: false });
+      continue;
+    }
+    try {
+      const packet = await buildObjectStorePacket(sender, peerId, object, signer);
+      await transport.send(peerId, packet);
+      results.push({ peerId, reachable: true, sent: true });
+    } catch (error) {
+      results.push({
+        peerId,
+        reachable: true,
+        sent: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  return results;
 }
 
 /**

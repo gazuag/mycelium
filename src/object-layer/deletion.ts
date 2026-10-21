@@ -3,7 +3,8 @@ import {
   createSignedObject,
   isObjectExpired,
   validateDistributedObject,
-  verifyAuthorBoundObjectId
+  verifyAuthorBoundObjectId,
+  verifyV3ObjectProof
 } from './envelope';
 import type { DeletionAwareObjectStore, DeletionTombstone, DistributedObject, ObjectIdentity, ObjectStore } from './types';
 
@@ -18,6 +19,7 @@ export interface DeleteRequestPayload {
   readonly target_author: string;
   readonly target_created_at: string;
   readonly target_recipient?: string;
+  readonly target_object_id_version?: 2 | 3;
   readonly target_content_hash?: string;
   readonly target_author_proof?: string;
 }
@@ -35,15 +37,28 @@ export async function createDeleteRequest(
   }
 
   const createdAt = now();
-  let targetProof: Pick<DeleteRequestPayload, 'target_content_hash' | 'target_author_proof'> = {};
+  let targetProof: Pick<
+    DeleteRequestPayload,
+    'target_object_id_version' | 'target_content_hash' | 'target_author_proof'
+  > = {};
   if (target.object_id_version === 2
     && (typeof target.content_hash !== 'string' || typeof target.author_proof !== 'string')) {
     throw new Error('Version-2 target is missing its author proof');
   }
   if (target.object_id_version === 2) {
     targetProof = {
+      target_object_id_version: 2,
       target_content_hash: target.content_hash,
       target_author_proof: target.author_proof
+    };
+  } else if (target.object_id_version === 3) {
+    if (typeof target.content_hash !== 'string' || typeof target.signature !== 'string') {
+      throw new Error('Version-3 target is missing its authorship proof');
+    }
+    targetProof = {
+      target_object_id_version: 3,
+      target_content_hash: target.content_hash,
+      target_author_proof: target.signature
     };
   }
   return createSignedObject({
@@ -82,12 +97,19 @@ export async function acceptDeleteRequest(
 
   const authorized = payload.target_content_hash !== undefined
     && payload.target_author_proof !== undefined
-    ? await verifyAuthorBoundObjectId(
-      payload.target_author,
-      payload.target_content_hash,
-      payload.target_author_proof,
-      payload.target_object_id
-    )
+    ? payload.target_object_id_version === 3
+      ? await verifyV3ObjectProof(
+        payload.target_author,
+        payload.target_content_hash,
+        payload.target_author_proof,
+        payload.target_object_id
+      )
+      : await verifyAuthorBoundObjectId(
+        payload.target_author,
+        payload.target_content_hash,
+        payload.target_author_proof,
+        payload.target_object_id
+      )
     : await verifyLegacyTarget(request, payload, store);
   if (!authorized) return false;
 
@@ -126,11 +148,15 @@ function parseDeleteRequestPayload(value: unknown): DeleteRequestPayload | null 
     || typeof payload.target_created_at !== 'string' || !Number.isFinite(Date.parse(payload.target_created_at))
     || (payload.target_recipient !== undefined
       && (typeof payload.target_recipient !== 'string' || !payload.target_recipient))
+    || (payload.target_object_id_version !== undefined
+      && payload.target_object_id_version !== 2 && payload.target_object_id_version !== 3)
     || (payload.target_content_hash !== undefined
       && (typeof payload.target_content_hash !== 'string' || !/^[0-9a-f]{64}$/.test(payload.target_content_hash)))
     || (payload.target_author_proof !== undefined
       && (typeof payload.target_author_proof !== 'string' || !payload.target_author_proof))
-    || (payload.target_content_hash === undefined) !== (payload.target_author_proof === undefined)) return null;
+    || (payload.target_content_hash === undefined) !== (payload.target_author_proof === undefined)
+    || ((payload.target_object_id_version === 2 || payload.target_object_id_version === 3)
+      && payload.target_content_hash === undefined)) return null;
   if (payload.target_object_type === 'mycelium.dm' && typeof payload.target_recipient !== 'string') return null;
   if (payload.target_object_type === 'mycelium.post' && payload.target_recipient !== undefined) return null;
 
@@ -141,6 +167,9 @@ function parseDeleteRequestPayload(value: unknown): DeleteRequestPayload | null 
     target_author: payload.target_author,
     target_created_at: payload.target_created_at,
     ...(typeof payload.target_recipient === 'string' ? { target_recipient: payload.target_recipient } : {}),
+    ...(payload.target_object_id_version === 2 || payload.target_object_id_version === 3
+      ? { target_object_id_version: payload.target_object_id_version }
+      : {}),
     ...(typeof payload.target_content_hash === 'string' ? { target_content_hash: payload.target_content_hash } : {}),
     ...(typeof payload.target_author_proof === 'string' ? { target_author_proof: payload.target_author_proof } : {})
   };

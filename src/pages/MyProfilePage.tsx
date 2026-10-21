@@ -11,17 +11,9 @@ interface MyProfilePageProps {
   nickname: string;
   bio: string;
   blockedPeers: string[];
-  followedAuthorsRatio: number;
-  followedLikesRatio: number;
   onNicknameChange: (value: string) => void;
   onBioChange: (value: string) => void;
-  onFollowedAuthorsRatioChange: (value: number) => void;
-  onFollowedLikesRatioChange: (value: number) => void;
   onSaveProfile: () => void;
-  onExportIdentity: () => void;
-  onImportIdentity: () => void;
-  onCreateIdentity: () => void;
-  onClearIdentity: () => void;
   onUnblockPeer: (peerId: string) => void;
   onViewProfile?: (peerId: string) => void;
 }
@@ -34,17 +26,9 @@ export function MyProfilePage({
   nickname,
   bio,
   blockedPeers,
-  followedAuthorsRatio,
-  followedLikesRatio,
   onNicknameChange,
   onBioChange,
-  onFollowedAuthorsRatioChange,
-  onFollowedLikesRatioChange,
   onSaveProfile,
-  onExportIdentity,
-  onImportIdentity,
-  onCreateIdentity,
-  onClearIdentity,
   onUnblockPeer,
   onViewProfile
 }: MyProfilePageProps) {
@@ -57,10 +41,10 @@ export function MyProfilePage({
       </div>
 
       <div className="card profile-edit-card">
-        <label>
-          Generated handle
-          <input value={`@${generatedNickname}`} readOnly />
-        </label>
+        <div className="profile-display-field">
+          <span>Generated handle</span>
+          <span className="monospace">@{generatedNickname}</span>
+        </div>
         <label>
           Display Name
           <input
@@ -73,26 +57,8 @@ export function MyProfilePage({
           Bio
           <textarea value={bio} onChange={(e) => onBioChange(e.target.value)} placeholder="Write a short bio" />
         </label>
-        <h3>Home Feed Mix</h3>
-        <p className="note">Set how much of your home feed should come from people you follow; the rest comes from their recommendations.</p>
-        <label>
-          From people you follow: {followedAuthorsRatio}%
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={followedAuthorsRatio}
-            onChange={(e) => onFollowedAuthorsRatioChange(Number(e.target.value) || 0)}
-          />
-        </label>
         <div className="row">
           <button className="btn" onClick={onSaveProfile}>Save Profile</button>
-          <button className="btn secondary" onClick={onExportIdentity}>Export Identity</button>
-        </div>
-        <div className="row">
-          <button className="btn secondary" onClick={onImportIdentity}>Import Identity</button>
-          <button className="btn secondary" onClick={onCreateIdentity}>Create New Identity</button>
-          <button className="btn secondary destructive" onClick={onClearIdentity}>Clear Identity (Log Out)</button>
         </div>
       </div>
 

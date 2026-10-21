@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  filterTombstonedObjects,
   FindAggregation,
   forwardFindRequestToChild,
-  sendFindPacketToConnectedPeer
+  sendFindPacketToConnectedPeer,
+  validateFindResponseObjects
 } from './transport';
-import type { DistributedObject, FindResponsePacket, ObjectTransport } from './types';
+import type { DeletionAwareObjectStore, DeletionTombstone, DistributedObject, FindResponsePacket, ObjectIdentity, ObjectTransport } from './types';
+import { webcrypto } from 'node:crypto';
+import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair } from '../crypto/identity';
+import { createObjectIdentity } from './identity';
+import { createSignedObject } from './envelope';
+
+Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
 function object(objectId: string): DistributedObject {
   return {
@@ -41,7 +49,91 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+async function createValidObject(): Promise<DistributedObject> {
+  const keys = await generateIdentityKeyPair();
+  const identity: ObjectIdentity = createObjectIdentity({
+    id: 'find-tombstone-author',
+    publicKey: await exportPublicKey(keys.publicKey),
+    privateKey: await exportPrivateKey(keys.privateKey)
+  });
+  return createSignedObject({
+    object_type: 'mycelium.find-tombstone-test',
+    created_at: '2026-10-06T00:00:00.000Z',
+    payload: { value: 'valid stale payload' },
+    replication_policy: {}
+  }, identity);
+}
+
+function deletionAwareStore(tombstones: ReadonlyMap<string, DeletionTombstone>): DeletionAwareObjectStore {
+  return {
+    put: async () => false,
+    get: async () => null,
+    delete: async () => undefined,
+    query: async () => [],
+    getDeletionTombstone: async (objectId) => tombstones.get(objectId) ?? null,
+    queryDeletionTombstones: async () => [...tombstones.values()],
+    applyDeletionTombstone: async () => false
+  };
+}
+
 describe('FIND aggregation completion', () => {
+  it('filters a stale child FIND result when a local tombstone exists', async () => {
+    const staleObject = await createValidObject();
+    const response = findResponse([staleObject]);
+    const tombstone: DeletionTombstone = {
+      target_object_id: staleObject.object_id,
+      target_object_type: 'mycelium.post',
+      target_author: staleObject.author,
+      target_created_at: staleObject.created_at,
+      delete_request_id: 'd'.repeat(64),
+      deleted_at: '2026-10-06T00:01:00.000Z'
+    };
+    const store = deletionAwareStore(new Map([[staleObject.object_id, tombstone]]));
+    const validated = await validateFindResponseObjects(
+      response,
+      'request-id',
+      new Set([staleObject.object_id])
+    );
+    const filtered = await filterTombstonedObjects(validated, store);
+    const returned: DistributedObject[][] = [];
+    const aggregation = new FindAggregation(
+      [staleObject.object_id],
+      Date.now() + 5000,
+      async (objects) => { returned.push(objects); }
+    );
+    aggregation.addChild('child-peer');
+
+    await aggregation.addChildObjects('child-peer', filtered);
+
+    expect(validated).toEqual([staleObject]);
+    expect(filtered).toEqual([]);
+    expect(returned).toEqual([[]]);
+  });
+
+  it('allows valid child FIND results through when no local tombstone exists', async () => {
+    const object = await createValidObject();
+    const response = findResponse([object]);
+    const store = deletionAwareStore(new Map());
+    const validated = await validateFindResponseObjects(
+      response,
+      'request-id',
+      new Set([object.object_id])
+    );
+    const filtered = await filterTombstonedObjects(validated, store);
+    const returned: DistributedObject[][] = [];
+    const aggregation = new FindAggregation(
+      [object.object_id],
+      Date.now() + 5000,
+      async (objects) => { returned.push(objects); }
+    );
+    aggregation.addChild('child-peer');
+
+    await aggregation.addChildObjects('child-peer', filtered);
+
+    expect(filtered).toEqual([object]);
+    expect(returned).toEqual([[object]]);
+  });
+
   it('catches onComplete rejection from the deadline and clears aggregation timers', async () => {
     vi.useFakeTimers();
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

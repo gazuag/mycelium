@@ -8,6 +8,7 @@ import { HideButton } from './HideButton';
 interface PostCardProps {
   post: LocalPostView;
   authorName: string;
+  authorDisplayName?: string;
   authorId: string;
   onAuthorClick: (peerId: string) => void;
   onLike: () => void;
@@ -32,6 +33,7 @@ interface PostCardProps {
 export function PostCard({
   post,
   authorName,
+  authorDisplayName,
   authorId,
   onAuthorClick,
   onLike,
@@ -70,7 +72,7 @@ export function PostCard({
             <IdentityAvatar seed={authorId} size={36} alt="" online={authorOnline} />
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
-            <strong><PeerName peerId={authorId} displayName={authorName} /></strong>
+            <strong><PeerName peerId={authorId} displayName={authorDisplayName ?? authorName} /></strong>
           </button>
         </div>
         <span className="note">{new Date(post.object.created_at).toLocaleString()}</span>

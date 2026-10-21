@@ -1,10 +1,21 @@
 import type { DeletionAwareObjectStore, DeletionTombstone, DistributedObject, LocalPostMetadata, LocalPostMetadataStore, ObjectCriteria, ObjectStore, RecommendationSequenceStore } from './types';
 import { isObjectExpired, validateDistributedObject } from './envelope';
+import {
+  DEFAULT_OBJECT_STORAGE_BYTES,
+  getObservationRecordByteSize,
+  getStoredObjectByteSize,
+  planObjectStorageGarbageCollection,
+  validateObjectStorageLimit,
+  validateObjectStorageGcOptions,
+  type ObjectStorageGcOptions,
+  type ObjectStorageGcPlan
+} from './storage-gc';
 
 const DATABASE_NAME = 'mycelium_objects';
-const DATABASE_VERSION = 6;
+const DATABASE_VERSION = 7;
 const OBJECT_STORE_NAME = 'objects';
 const DELETION_TOMBSTONE_STORE_NAME = 'deletion_tombstones';
+const OBJECT_OBSERVATION_STORE_NAME = 'object_observations';
 const RECIPIENT_CREATED_AT_INDEX = 'recipient_created_at';
 const LOCAL_POST_METADATA_STORE_NAME = 'local_post_metadata';
 const RECOMMENDATION_SEQUENCE_STORE_NAME = 'recommendation_sequences';
@@ -32,8 +43,20 @@ export interface OutboxStore {
   pruneExpired(now: Date): Promise<number>;
 }
 
+interface ObjectObservationRecord {
+  readonly object_id: string;
+  readonly observed_at: string;
+}
+
 export class IndexedDbObjectStore implements DeletionAwareObjectStore {
   private readonly getDatabase = createObjectDatabaseAccessor();
+  private readonly gcOptions: ObjectStorageGcOptions;
+
+  constructor(gcOptions: ObjectStorageGcOptions = {}) {
+    validateObjectStorageGcOptions(gcOptions);
+    this.gcOptions = gcOptions;
+  }
+
   private get databasePromise(): Promise<IDBDatabase> {
     return this.getDatabase();
   }
@@ -43,13 +66,15 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
       throw new Error('Invalid distributed object');
     }
     const database = await this.getDatabase();
-    return new Promise((resolve, reject) => {
+    const admitted = await new Promise<boolean>((resolve, reject) => {
+      const observedAt = (this.gcOptions.now?.() ?? new Date()).toISOString();
       const transaction = database.transaction(
-        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME, OBJECT_OBSERVATION_STORE_NAME],
         'readwrite'
       );
       const store = transaction.objectStore(OBJECT_STORE_NAME);
       const tombstones = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      const observations = transaction.objectStore(OBJECT_OBSERVATION_STORE_NAME);
       let admitted = false;
       const targetTombstone = tombstones.get(object.object_id);
       targetTombstone.onsuccess = () => {
@@ -77,10 +102,16 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
           if (existing.result !== undefined) return;
           admitted = true;
           store.put(object);
+          observations.put({
+            object_id: object.object_id,
+            observed_at: observedAt
+          } satisfies ObjectObservationRecord);
         };
         existing.onerror = () => reject(existing.error);
       }
     });
+    if (admitted) await this.collectGarbage();
+    return admitted;
   }
 
   async get(objectId: string): Promise<DistributedObject | null> {
@@ -111,7 +142,14 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
 
   async delete(objectId: string): Promise<void> {
     const database = await this.getDatabase();
-    await runTransaction(database, 'readwrite', (store) => store.delete(objectId));
+    const transaction = database.transaction(
+      [OBJECT_STORE_NAME, OBJECT_OBSERVATION_STORE_NAME],
+      'readwrite'
+    );
+    transaction.objectStore(OBJECT_STORE_NAME).delete(objectId);
+    transaction.objectStore(OBJECT_OBSERVATION_STORE_NAME).delete(objectId);
+    await transactionDone(transaction);
+    await this.collectGarbage();
   }
 
   async query(criteria: ObjectCriteria = {}): Promise<DistributedObject[]> {
@@ -194,13 +232,14 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
   async applyDeletionTombstone(tombstone: DeletionTombstone): Promise<boolean> {
     if (!isValidDeletionTombstone(tombstone)) throw new Error('Invalid deletion tombstone');
     const database = await this.getDatabase();
-    return new Promise((resolve, reject) => {
+    const applied = await new Promise<boolean>((resolve, reject) => {
       const transaction = database.transaction(
-        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME],
+        [OBJECT_STORE_NAME, DELETION_TOMBSTONE_STORE_NAME, OBJECT_OBSERVATION_STORE_NAME],
         'readwrite'
       );
       const objectStore = transaction.objectStore(OBJECT_STORE_NAME);
       const tombstoneStore = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      const observationStore = transaction.objectStore(OBJECT_OBSERVATION_STORE_NAME);
       const existing = tombstoneStore.get(tombstone.target_object_id);
       let applied = false;
       existing.onsuccess = () => {
@@ -208,11 +247,13 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
         applied = true;
         tombstoneStore.put(tombstone);
         objectStore.delete(tombstone.target_object_id);
+        observationStore.delete(tombstone.target_object_id);
         const relatedReplies = objectStore.getAll();
         relatedReplies.onsuccess = () => {
           for (const object of relatedReplies.result as DistributedObject[]) {
             if (getReplyPostId(object) === tombstone.target_object_id) {
               objectStore.delete(object.object_id);
+              observationStore.delete(object.object_id);
             }
           }
         };
@@ -223,6 +264,109 @@ export class IndexedDbObjectStore implements DeletionAwareObjectStore {
       transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
     });
+    if (applied) await this.collectGarbage();
+    return applied;
+  }
+
+  async collectGarbage(): Promise<ObjectStorageGcPlan> {
+    const database = await this.getDatabase();
+    const now = this.gcOptions.now?.() ?? new Date();
+    const localAuthor = this.gcOptions.getLocalAuthor?.();
+    const followedAuthors = this.gcOptions.getFollowedAuthors?.() ?? new Set<string>();
+    const maxStorageBytes = this.gcOptions.getMaxStorageBytes?.()
+      ?? this.gcOptions.maxStorageBytes
+      ?? DEFAULT_OBJECT_STORAGE_BYTES;
+    validateObjectStorageLimit(maxStorageBytes);
+    const result = await new Promise<ObjectStorageGcPlan>((resolve, reject) => {
+      const transaction = database.transaction(
+        [
+          OBJECT_STORE_NAME,
+          DELETION_TOMBSTONE_STORE_NAME,
+          OBJECT_OBSERVATION_STORE_NAME
+        ],
+        'readwrite'
+      );
+      const objectStore = transaction.objectStore(OBJECT_STORE_NAME);
+      const tombstoneStore = transaction.objectStore(DELETION_TOMBSTONE_STORE_NAME);
+      const observationStore = transaction.objectStore(OBJECT_OBSERVATION_STORE_NAME);
+      const objectsRequest = objectStore.getAll();
+      const tombstonesRequest = tombstoneStore.getAll();
+      const observationsRequest = observationStore.getAll();
+      let objects: DistributedObject[] | undefined;
+      let tombstones: DeletionTombstone[] | undefined;
+      let observations: ObjectObservationRecord[] | undefined;
+      let plan: ObjectStorageGcPlan | undefined;
+
+      const prepareCollection = () => {
+        if (!objects || !tombstones || !observations || plan) return;
+        const timestamp = now.toISOString();
+        const observationById = new Map(observations.map((record) => [record.object_id, record]));
+        const retainedIds = new Set(objects.map((object) => object.object_id));
+        const gcObjects = objects.map((object) => {
+          const storedObservation = observationById.get(object.object_id);
+          const observedAt = storedObservation && Number.isFinite(Date.parse(storedObservation.observed_at))
+            ? storedObservation.observed_at
+            : timestamp;
+          const observationRecord = { object_id: object.object_id, observed_at: observedAt };
+          if (!storedObservation || storedObservation.observed_at !== observedAt) {
+            observationStore.put(observationRecord);
+          }
+          return {
+            object,
+            observedAt,
+            byteSize: getStoredObjectByteSize(object) + getObservationRecordByteSize(object.object_id, observedAt)
+          };
+        });
+        const existingObservationIds = new Set(gcObjects.map(({ object }) => object.object_id));
+        for (const observation of observations) {
+          if (!existingObservationIds.has(observation.object_id)) observationStore.delete(observation.object_id);
+        }
+        const currentBytes = gcObjects.reduce((total, entry) => total + entry.byteSize, 0)
+          + tombstones.reduce((total, tombstone) => total + getStoredObjectByteSize(tombstone), 0);
+        const planResult = planObjectStorageGarbageCollection({
+          currentBytes,
+          maxStorageBytes,
+          highWaterRatio: this.gcOptions.highWaterRatio,
+          lowWaterRatio: this.gcOptions.lowWaterRatio,
+          now,
+          objects: gcObjects,
+          tombstones: tombstones.map((tombstone) => ({
+            tombstone,
+            byteSize: getStoredObjectByteSize(tombstone),
+            targetIsRetained: retainedIds.has(tombstone.target_object_id)
+          })),
+          context: {
+            localAuthor,
+            followedAuthors,
+            ...getLocalRecommendationState(objects, localAuthor)
+          }
+        });
+        for (const objectId of planResult.removedObjectIds) {
+          objectStore.delete(objectId);
+          observationStore.delete(objectId);
+        }
+        for (const tombstoneId of planResult.removedTombstoneIds) tombstoneStore.delete(tombstoneId);
+        plan = planResult;
+      };
+
+      objectsRequest.onsuccess = () => { objects = objectsRequest.result as DistributedObject[]; prepareCollection(); };
+      tombstonesRequest.onsuccess = () => { tombstones = tombstonesRequest.result as DeletionTombstone[]; prepareCollection(); };
+      observationsRequest.onsuccess = () => { observations = observationsRequest.result as ObjectObservationRecord[]; prepareCollection(); };
+      objectsRequest.onerror = () => reject(objectsRequest.error);
+      tombstonesRequest.onerror = () => reject(tombstonesRequest.error);
+      observationsRequest.onerror = () => reject(observationsRequest.error);
+      transaction.oncomplete = () => {
+        if (!plan) {
+          reject(new Error('Object storage garbage collection did not produce a plan'));
+          return;
+        }
+        resolve(plan);
+      };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error('Object storage GC transaction aborted'));
+    });
+    this.gcOptions.onStorageUsageChange?.(result.bytesAfter);
+    return result;
   }
 
 }
@@ -380,6 +524,9 @@ function openObjectDatabase(onConnectionClosed: () => void): Promise<IDBDatabase
       if (!request.result.objectStoreNames.contains(DELETION_TOMBSTONE_STORE_NAME)) {
         request.result.createObjectStore(DELETION_TOMBSTONE_STORE_NAME, { keyPath: 'target_object_id' });
       }
+      if (!request.result.objectStoreNames.contains(OBJECT_OBSERVATION_STORE_NAME)) {
+        request.result.createObjectStore(OBJECT_OBSERVATION_STORE_NAME, { keyPath: 'object_id' });
+      }
     };
     request.onblocked = () => {
       console.warn('IndexedDB upgrade is blocked by another open connection.');
@@ -406,6 +553,41 @@ function getReplyPostId(object: DistributedObject): string | null {
   return typeof postId === 'string' && /^[0-9a-f]{64}$/.test(postId) ? postId : null;
 }
 
+function getLocalRecommendationState(
+  objects: readonly DistributedObject[],
+  localAuthor: string | undefined
+): { likedPostIds: Set<string>; explicitlyValuableObjectIds: Set<string> } {
+  if (!localAuthor) return { likedPostIds: new Set(), explicitlyValuableObjectIds: new Set() };
+  const latestByPost = new Map<string, {
+    objectId: string;
+    sequence: number;
+    action: 'recommend' | 'withdraw';
+  }>();
+  for (const object of objects) {
+    if (object.object_type !== 'mycelium.recommendation' || object.author !== localAuthor
+      || !object.payload || typeof object.payload !== 'object' || Array.isArray(object.payload)) continue;
+    const payload = object.payload as Record<string, unknown>;
+    if (typeof payload.post_id !== 'string'
+      || (payload.action !== 'recommend' && payload.action !== 'withdraw')) continue;
+    const sequence = typeof object.sequence === 'number' && Number.isFinite(object.sequence)
+      ? object.sequence
+      : 0;
+    const existing = latestByPost.get(payload.post_id);
+    if (existing && existing.sequence >= sequence) continue;
+    latestByPost.set(payload.post_id, {
+      objectId: object.object_id,
+      sequence,
+      action: payload.action
+    });
+  }
+  return {
+    likedPostIds: new Set([...latestByPost]
+      .filter(([, recommendation]) => recommendation.action === 'recommend')
+      .map(([postId]) => postId)),
+    explicitlyValuableObjectIds: new Set([...latestByPost.values()].map(({ objectId }) => objectId))
+  };
+}
+
 function isValidDeletionTombstone(value: DeletionTombstone): boolean {
   return /^[0-9a-f]{64}$/.test(value.target_object_id)
     && /^[0-9a-f]{64}$/.test(value.delete_request_id)
@@ -415,6 +597,14 @@ function isValidDeletionTombstone(value: DeletionTombstone): boolean {
     && Number.isFinite(Date.parse(value.deleted_at))
     && (value.target_recipient === undefined
       || (typeof value.target_recipient === 'string' && value.target_recipient.length > 0));
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new Error('IndexedDB transaction aborted'));
+  });
 }
 
 function runRequest<T = unknown>(database: IDBDatabase, mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest, storeName = OBJECT_STORE_NAME): Promise<T> {

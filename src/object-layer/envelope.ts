@@ -1,4 +1,4 @@
-import { canonicalize } from '../p2p/protocol';
+import { canonicalize, canonicalizeV3 } from '../p2p/protocol';
 import { sha256, verifySignedString } from '../crypto/identity';
 import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity, ObjectSignatureVerifier, RecommendationAction, RecommendationObject } from './types';
 
@@ -24,6 +24,13 @@ export function canonicalizeObjectContent(content: ImmutableObjectContent | Dist
   return canonicalize(immutableContent);
 }
 
+export function canonicalizeV3ObjectContent(content: ImmutableObjectContent | DistributedObject): string {
+  const immutableContent = 'object_id' in content || 'signature' in content
+    ? immutableObjectContent(content as DistributedObject)
+    : content;
+  return canonicalizeV3(immutableContent);
+}
+
 export async function calculateObjectId(content: ImmutableObjectContent | DistributedObject): Promise<string> {
   return sha256(canonicalizeObjectContent(content));
 }
@@ -37,23 +44,31 @@ export async function createSignedObject(content: ObjectContent, identity: Objec
     throw new Error('Invalid distributed object content');
   }
 
-  const canonicalContent = canonicalizeObjectContent(unsigned);
+  const canonicalContent = canonicalizeV3ObjectContent(unsigned);
   const contentHash = await sha256(canonicalContent);
-  const authorProof = await identity.sign(canonicalize({
-    domain: 'mycelium.object-author-proof.v2',
-    author: identity.publicKey,
-    content_hash: contentHash
-  }));
-  const objectId = await calculateAuthorBoundObjectId(identity.publicKey, contentHash);
-  const signature = await identity.sign(canonicalContent);
+  const objectId = generateRandomObjectId();
+  const signature = await identity.sign(canonicalizeV3ObjectSignaturePayload(objectId, contentHash));
   return {
     ...unsigned,
     object_id: objectId,
     signature,
-    object_id_version: 2,
-    content_hash: contentHash,
-    author_proof: authorProof
+    object_id_version: 3,
+    content_hash: contentHash
   };
+}
+
+export function generateRandomObjectId(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function canonicalizeV3ObjectSignaturePayload(objectId: string, contentHash: string): string {
+  return canonicalizeV3({
+    domain: 'mycelium.object-signature.v3',
+    object_id: objectId,
+    content_hash: contentHash
+  });
 }
 
 export async function calculateAuthorBoundObjectId(
@@ -65,6 +80,25 @@ export async function calculateAuthorBoundObjectId(
     author,
     content_hash: contentHash
   }));
+}
+
+export async function verifyV3ObjectProof(
+  author: string,
+  contentHash: string,
+  signature: string,
+  objectId: string,
+  verifySignature: ObjectSignatureVerifier = verifySignedString
+): Promise<boolean> {
+  if (!isHexSha256(objectId) || !isHexSha256(contentHash) || !author || !signature) return false;
+  try {
+    return await verifySignature(
+      author,
+      canonicalizeV3ObjectSignaturePayload(objectId, contentHash),
+      signature
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function verifyAuthorBoundObjectId(
@@ -160,9 +194,23 @@ export async function validateDistributedObject(
         validatedObject.object_id,
         verifySignature
       ))) return false;
+  } else if (validatedObject.object_id_version === 3) {
+    if (!isHexSha256(validatedObject.content_hash) || validatedObject.author_proof !== undefined) return false;
+    const canonicalContent = canonicalizeV3ObjectContent(validatedObject);
+    const contentHash = await sha256(canonicalContent);
+    if (contentHash !== validatedObject.content_hash
+      || !(await verifyV3ObjectProof(
+        validatedObject.author,
+        validatedObject.content_hash,
+        validatedObject.signature,
+        validatedObject.object_id,
+        verifySignature
+      ))) return false;
   } else {
     return false;
   }
+
+  if (validatedObject.object_id_version === 3) return true;
 
   try {
     return await verifySignature(validatedObject.author, canonicalizeObjectContent(validatedObject), validatedObject.signature);

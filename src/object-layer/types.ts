@@ -17,12 +17,18 @@ export interface DistributedObject {
   readonly payload: JsonValue;
   readonly signature: string;
   readonly replication_policy: ReplicationPolicy;
-  readonly object_id_version?: 2;
+  readonly object_id_version?: 2 | 3;
   readonly content_hash?: string;
   readonly author_proof?: string;
 }
 
 export type PostObject = DistributedObject & { readonly object_type: 'mycelium.post' };
+
+export interface PostMention {
+  readonly handle: string;
+  readonly peerId: string;
+  readonly publicKey: string;
+}
 
 export type RecommendationObject = DistributedObject & { readonly object_type: 'mycelium.recommendation' };
 

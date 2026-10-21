@@ -10,16 +10,18 @@ import {
 import { createObjectIdentity } from './identity';
 import { createDeleteRequest, acceptDeleteRequest } from './deletion';
 import {
+  calculateAuthorBoundObjectId,
   calculateObjectId,
   canonicalizeObjectContent,
   createSignedObject,
   isObjectExpired,
   validateDistributedObject
 } from './envelope';
+import { canonicalize } from '../p2p/protocol';
 import { IndexedDbObjectStore, IndexedDbOutboxStore } from './local-store';
 import { createOutboxService } from './outbox-service';
 import { buildFindResponsePacket, findObject, receiveAndReplicate, receiveFindResponsePacket } from './transport';
-import type { DistributedObject, ObjectIdentity, ObjectTransport } from './types';
+import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity, ObjectTransport } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -65,6 +67,39 @@ async function createPost(
   return createSignedObject({
     object_type: 'mycelium.post',
     created_at: createdAt,
+    payload: { content },
+    replication_policy: {}
+  }, identity);
+}
+
+async function createV2Object(
+  content: ObjectContent,
+  identity: ObjectIdentity
+): Promise<DistributedObject> {
+  const immutableContent = { ...content, author: identity.publicKey };
+  const contentHash = await calculateObjectId(immutableContent);
+  const objectId = await calculateAuthorBoundObjectId(identity.publicKey, contentHash);
+  return {
+    ...immutableContent,
+    object_id: objectId,
+    object_id_version: 2,
+    content_hash: contentHash,
+    author_proof: await identity.sign(canonicalize({
+      domain: 'mycelium.object-author-proof.v2',
+      author: identity.publicKey,
+      content_hash: contentHash
+    })),
+    signature: await identity.sign(canonicalizeObjectContent(immutableContent))
+  };
+}
+
+async function createV2Post(
+  identity: ObjectIdentity,
+  content: string
+): Promise<DistributedObject> {
+  return createV2Object({
+    object_type: 'mycelium.post',
+    created_at: NOW.toISOString(),
     payload: { content },
     replication_policy: {}
   }, identity);
@@ -156,6 +191,138 @@ describe('decentralized deletion', () => {
     const requestForAbsent = await createDeleteRequest(targetAbsent, author, () => NOW);
     expect(await acceptDeleteRequest(requestForAbsent, store, NOW)).toBe(false);
     expect(await store.getDeletionTombstone(targetAbsent.object_id)).toBeNull();
+  });
+
+  it('authorizes absent v3 targets using the target object signature', async () => {
+    const author = await createIdentity('v3-delete-author');
+    const store = new IndexedDbObjectStore();
+    const target = await createPost(author, 'target not stored locally');
+    const request = await createDeleteRequest(target, author, () => NOW);
+
+    expect(request.payload).toMatchObject({
+      target_object_id_version: 3,
+      target_object_id: target.object_id,
+      target_content_hash: target.content_hash,
+      target_author_proof: target.signature
+    });
+    expect(await acceptDeleteRequest(request, store, NOW)).toBe(true);
+    expect(await store.get(target.object_id)).toBeNull();
+    expect(await store.getDeletionTombstone(target.object_id)).not.toBeNull();
+  });
+
+  it('rejects v3 deletion by another author and forged target proofs or IDs', async () => {
+    const author = await createIdentity('v3-delete-owner');
+    const attacker = await createIdentity('v3-delete-attacker');
+    const target = await createPost(author, 'protected target');
+    const validRequest = await createDeleteRequest(target, author, () => NOW);
+    const store = new IndexedDbObjectStore();
+    const requestPayload = validRequest.payload as { [key: string]: JsonValue };
+
+    const attackerRequest = await createSignedObject({
+      object_type: 'mycelium.delete-request',
+      created_at: NOW.toISOString(),
+      expires_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      payload: requestPayload,
+      replication_policy: { replication_budget: Number.MAX_SAFE_INTEGER }
+    }, attacker);
+    const forgedProofRequest = await createSignedObject({
+      object_type: 'mycelium.delete-request',
+      created_at: NOW.toISOString(),
+      expires_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      payload: { ...requestPayload, target_author_proof: 'forged-target-proof' },
+      replication_policy: { replication_budget: Number.MAX_SAFE_INTEGER }
+    }, author);
+    const modifiedIdRequest = await createSignedObject({
+      object_type: 'mycelium.delete-request',
+      created_at: NOW.toISOString(),
+      expires_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      payload: { ...requestPayload, target_object_id: '0'.repeat(64) },
+      replication_policy: { replication_budget: Number.MAX_SAFE_INTEGER }
+    }, author);
+
+    expect(await acceptDeleteRequest(attackerRequest, store, NOW)).toBe(false);
+    expect(await acceptDeleteRequest(forgedProofRequest, store, NOW)).toBe(false);
+    expect(await acceptDeleteRequest(modifiedIdRequest, store, NOW)).toBe(false);
+    expect(await store.getDeletionTombstone(target.object_id)).toBeNull();
+    expect(await store.getDeletionTombstone('0'.repeat(64))).toBeNull();
+  });
+
+  it('preserves version-2 target deletion proofs when the target is absent', async () => {
+    const author = await createIdentity('v2-delete-author');
+    const target = await createV2Post(author, 'version-2 target');
+    const request = await createDeleteRequest(target, author, () => NOW);
+    const store = new IndexedDbObjectStore();
+
+    expect(request.payload).toMatchObject({ target_object_id_version: 2 });
+    expect(await acceptDeleteRequest(request, store, NOW)).toBe(true);
+    expect(await store.getDeletionTombstone(target.object_id)).not.toBeNull();
+  });
+
+  it('accepts existing version-2 Delete Requests without a target-version marker', async () => {
+    const author = await createIdentity('legacy-v2-delete-author');
+    const target = await createV2Post(author, 'version-2 target');
+    if (!target.content_hash || !target.author_proof) throw new Error('Version-2 fixture lacks its target proof');
+    const oldRequest = await createV2Object({
+      object_type: 'mycelium.delete-request',
+      created_at: NOW.toISOString(),
+      expires_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      payload: {
+        command: 'delete',
+        target_object_id: target.object_id,
+        target_object_type: target.object_type,
+        target_author: target.author,
+        target_created_at: target.created_at,
+        target_content_hash: target.content_hash,
+        target_author_proof: target.author_proof
+      },
+      replication_policy: { replication_budget: Number.MAX_SAFE_INTEGER }
+    }, author);
+    const store = new IndexedDbObjectStore();
+
+    expect(oldRequest.object_id_version).toBe(2);
+    expect(await acceptDeleteRequest(oldRequest, store, NOW)).toBe(true);
+    expect(await store.getDeletionTombstone(target.object_id)).not.toBeNull();
+  });
+
+  it('continues to accept legacy-target Delete Requests only when the target is locally verifiable', async () => {
+    const author = await createIdentity('legacy-v2-delete-request-author');
+    const target = await createLegacyPost(author, 'legacy target');
+    const oldRequest = await createV2Object({
+      object_type: 'mycelium.delete-request',
+      created_at: NOW.toISOString(),
+      expires_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      payload: {
+        command: 'delete',
+        target_object_id: target.object_id,
+        target_object_type: target.object_type,
+        target_author: target.author,
+        target_created_at: target.created_at
+      },
+      replication_policy: { replication_budget: Number.MAX_SAFE_INTEGER }
+    }, author);
+    const store = new IndexedDbObjectStore();
+
+    expect(await acceptDeleteRequest(oldRequest, store, NOW)).toBe(false);
+    expect(await store.put(target)).toBe(true);
+    expect(await acceptDeleteRequest(oldRequest, store, NOW)).toBe(true);
+    expect(await store.getDeletionTombstone(target.object_id)).not.toBeNull();
+  });
+
+  it('stores legacy, version-2, and version-3 objects together without changing their IDs', async () => {
+    const author = await createIdentity('mixed-version-author');
+    const legacy = await createLegacyPost(author, 'legacy');
+    const version2 = await createV2Post(author, 'version 2');
+    const version3 = await createPost(author, 'version 3');
+    const store = new IndexedDbObjectStore();
+    const ids = [legacy.object_id, version2.object_id, version3.object_id];
+
+    expect(await store.put(legacy)).toBe(true);
+    expect(await store.put(version2)).toBe(true);
+    expect(await store.put(version3)).toBe(true);
+    expect((await store.query()).map((object) => object.object_id).sort()).toEqual([...ids].sort());
+    expect(await store.get(legacy.object_id)).toEqual(legacy);
+    expect(await store.get(version2.object_id)).toEqual(version2);
+    expect(await store.get(version3.object_id)).toEqual(version3);
   });
 
   it('removes a present target and keeps later copies suppressed', async () => {

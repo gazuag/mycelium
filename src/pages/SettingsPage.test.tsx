@@ -20,7 +20,14 @@ describe('SettingsPage', () => {
         syncStatus="synced"
         recommendationFrequency={2}
         discoveryFrequency={6}
-        onInjectionFrequencyChange={vi.fn()}
+        onSaveInjectionFrequencies={vi.fn()}
+        objectStorageLimitMb={500}
+        objectStorageUsedBytes={12_345_678}
+        onSaveObjectStorageLimit={vi.fn(() => true)}
+        onExportIdentity={vi.fn()}
+        onImportIdentity={vi.fn()}
+        onCreateIdentity={vi.fn()}
+        onClearIdentity={vi.fn()}
       />
     );
 
@@ -40,6 +47,24 @@ describe('SettingsPage', () => {
     expect(markup).toContain('Set to 0 to disable recommendation injections.');
     expect(markup).toContain('Set to 0 to disable Discovery injections.');
     expect(markup.match(/type="number" min="0" step="1"/g)).toHaveLength(2);
+    expect(markup).toContain('aria-label="Decrease Recommendations frequency"');
+    expect(markup).toContain('aria-label="Increase Recommendations frequency"');
+    expect(markup).toContain('aria-label="Decrease Discovery frequency"');
+    expect(markup).toContain('aria-label="Increase Discovery frequency"');
+    expect(markup).toContain('>Save Settings</button>');
+    expect(markup).toContain('<h3>Object storage</h3>');
+    expect(markup).toContain('aria-label="Maximum object storage (MB)"');
+    expect(markup).toContain('value="500"');
+    expect(markup).toContain('type="number" min="100" max=');
+    expect(markup).toContain('>Save Storage Limit</button>');
+    expect(markup).toContain('Storage used: 12.35 MB of 500 MB (2.5%).');
+    expect(markup).toContain('Identity management');
+    expect(markup).toContain('aria-label="Export passphrase"');
+    expect(markup).toContain('aria-label="Import passphrase"');
+    expect(markup).toContain('>Export Identity</button>');
+    expect(markup).toContain('>Import Identity</button>');
+    expect(markup).toContain('>Create New Identity</button>');
+    expect(markup).toContain('>Clear Identity (Log Out)</button>');
 
     const settingsPanelEnd = markup.indexOf('</div><div class="card">', markup.indexOf('<h3>Settings</h3>'));
     expect(settingsPanelEnd).toBeGreaterThan(markup.indexOf('<h3>Settings</h3>'));

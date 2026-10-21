@@ -1,6 +1,6 @@
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { replicateObject, sendReplyToAuthor } from './transport';
+import { replicateObject, sendObjectToPeers, sendReplyToAuthor } from './transport';
 import type { DistributedObject, ObjectPacket, ObjectTransport } from './types';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
@@ -45,5 +45,34 @@ describe('object send failure handling', () => {
 
     await expect(sendReplyToAuthor('local-peer', object, transport, 'author-peer'))
       .resolves.toMatchObject({ reachable: true, sent: false });
+  });
+
+  it('sends a direct object once per unique reachable peer and reports failures without rejecting', async () => {
+    const attempts: string[] = [];
+    const transport: ObjectTransport = {
+      connectedPeers: () => ['peer-a', 'peer-fails'],
+      onPacket: () => () => {},
+      send: vi.fn(async (peerId: string) => {
+        attempts.push(peerId);
+        if (peerId === 'peer-fails') throw new Error('transport failure');
+      })
+    };
+
+    await expect(sendObjectToPeers('local-peer', object, ['peer-a', 'peer-a', 'peer-fails', 'offline'], transport))
+      .resolves.toEqual([
+        { peerId: 'peer-a', reachable: true, sent: true },
+        { peerId: 'peer-fails', reachable: true, sent: false, error: 'transport failure' },
+        { peerId: 'offline', reachable: false, sent: false }
+      ]);
+    expect(attempts).toEqual(['peer-a', 'peer-fails']);
+    expect(transport.send).toHaveBeenNthCalledWith(
+      1,
+      'peer-a',
+      expect.objectContaining({
+        type: 'OBJECT_STORE',
+        recipient: 'peer-a',
+        payload: { object }
+      })
+    );
   });
 });

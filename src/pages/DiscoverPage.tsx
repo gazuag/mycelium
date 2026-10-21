@@ -198,6 +198,7 @@ export function DiscoverPage({
                   replyCount={replyCounts?.get(post.object.object_id) ?? 0}
                   likeCount={recommendationSummary.active_recommender_count}
                   authorName={authorName}
+                  authorDisplayName={matchedContact?.displayName}
                   authorId={authorFingerprint}
                   authorOnline={matchedContact?.online === true}
                   onAuthorClick={() => onAuthorClick(authorFingerprint)}

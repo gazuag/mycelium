@@ -1,6 +1,6 @@
 import { webcrypto } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { assessSecretStrength, importPrivateKeysNonExtractable, VAULT_MIN_ITERATIONS, unwrapKeyBundle, wrapKeyBundle, type KeyBundle, type VaultBlob } from './key-vault';
+import { assessSecretStrength, decryptJsonPayload, encryptJsonPayload, importPrivateKeysNonExtractable, VAULT_MIN_ITERATIONS, unwrapKeyBundle, wrapKeyBundle, type KeyBundle, type VaultBlob } from './key-vault';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -67,6 +67,26 @@ describe('key vault primitives', () => {
 
     expect(second.salt).not.toBe(first.salt);
     expect(second.nonce).not.toBe(first.nonce);
+  });
+
+  it('encrypts and decrypts a complete JSON backup payload', async () => {
+    const backup = {
+      identity: { publicKey: 'public-key', privateKey: 'private-key' },
+      profile: { displayName: 'Example', bio: 'Hello' },
+      contacts: [{ fingerprint: 'peer-id' }]
+    };
+    const blob = await encryptJsonPayload(backup, TEST_SECRET, { iterations: TEST_ITERATIONS });
+
+    expect(JSON.stringify(blob)).not.toContain('private-key');
+    await expect(decryptJsonPayload(blob, TEST_SECRET)).resolves.toEqual(backup);
+  });
+
+  it('rejects an incorrect passphrase for an encrypted JSON payload', async () => {
+    const blob = await encryptJsonPayload({ identity: { privateKey: 'private-key' } }, TEST_SECRET, {
+      iterations: TEST_ITERATIONS
+    });
+
+    await expect(decryptJsonPayload(blob, 'wrong passphrase')).rejects.toThrow(/^Unable to unlock$/);
   });
 
   it('rejects a wrong secret with the generic unlock error', async () => {

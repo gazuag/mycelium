@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Contact } from '../types';
-import type { LocalPostView } from '../object-layer';
+import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
+import { PeerRecipientPicker, filterPeersByHandlePrefix, relationshipContacts, peerMentionHandle } from '../components/PeerRecipientPicker';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { activeMentionAt, insertMention, mentionsPresentInText, type ActiveMention } from '../utils/postMentions';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
 import {
@@ -20,10 +22,12 @@ interface HomePageProps {
   onDiagnosticLog?: (entry: string) => void;
   replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
+  mentionContacts?: Contact[];
+  myPublicKey?: string;
   contactsLoaded?: boolean;
   postText: string;
   onPostTextChange: (value: string) => void;
-  onSubmitPost: (publish: boolean) => void;
+  onSubmitPost: (publish: boolean, mentions: PostMention[]) => void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   myPeerId?: string;
@@ -37,11 +41,15 @@ interface HomePageProps {
   onFollowPeer?: (peerId: string) => void;
 }
 
+const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
 export function HomePage({
   posts,
   onDiagnosticLog,
   replyCounts,
   contacts,
+  mentionContacts = contacts,
+  myPublicKey = '',
   contactsLoaded = true,
   postText,
   onPostTextChange,
@@ -63,6 +71,8 @@ export function HomePage({
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
+  const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
+  const [selectedMentions, setSelectedMentions] = useState<PostMention[]>([]);
   const followedCount = contacts.filter((contact) => contact.followed).length;
   const allSuggestedPeersFollowed = popularPeers.length > 0 && popularPeers.every(({ peer_id: peerId }) =>
     contacts.some((contact) =>
@@ -81,6 +91,50 @@ export function HomePage({
   );
   const [autoLoadAvailable, setAutoLoadAvailable] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const pendingCaret = useRef<number | null>(null);
+  const mentionPeers = useMemo(
+    () => relationshipContacts(mentionContacts, myPublicKey, myPeerId ?? ''),
+    [mentionContacts, myPeerId, myPublicKey]
+  );
+  const matchingMentionPeers = activeMention
+    ? filterPeersByHandlePrefix(mentionPeers, activeMention.query)
+    : [];
+
+  useBrowserLayoutEffect(() => {
+    if (pendingCaret.current === null || !composerRef.current) return;
+    composerRef.current.focus();
+    composerRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
+    pendingCaret.current = null;
+  }, [postText]);
+
+  useEffect(() => {
+    if (!postText) setSelectedMentions([]);
+  }, [postText]);
+
+  const updateActiveMention = (text: string, caret: number) => {
+    setActiveMention(activeMentionAt(text, caret));
+  };
+
+  const selectMention = (contact: Contact) => {
+    if (!activeMention) return;
+    const handle = peerMentionHandle(contact);
+    if (!handle) return;
+    const composer = composerRef.current;
+    const caret = composer?.selectionStart ?? postText.length;
+    const insertion = insertMention(postText, caret, activeMention, handle);
+    const mention: PostMention = {
+      handle,
+      peerId: contact.fingerprint,
+      publicKey: contact.publicKey
+    };
+    setSelectedMentions((current) => current.some((item) => item.publicKey === mention.publicKey)
+      ? current
+      : [...current, mention]);
+    pendingCaret.current = insertion.caret;
+    onPostTextChange(insertion.text);
+    setActiveMention(activeMentionAt(insertion.text, insertion.caret));
+  };
 
   const visiblePosts = useMemo(
     () => [...posts]
@@ -155,11 +209,32 @@ export function HomePage({
             <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" />
           </button>
           <textarea
+            ref={composerRef}
             value={postText}
-            onChange={(event) => onPostTextChange(event.target.value)}
+            onChange={(event) => {
+              onPostTextChange(event.target.value);
+              updateActiveMention(event.target.value, event.currentTarget.selectionStart);
+            }}
+            onClick={(event) => updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart)}
+            onKeyUp={(event) => {
+              if (event.key === 'Escape') {
+                setActiveMention(null);
+                return;
+              }
+              updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart);
+            }}
             placeholder="Share what is happening..."
           />
         </div>
+        {activeMention ? (
+          <PeerRecipientPicker
+            contacts={matchingMentionPeers}
+            mode="mention"
+            ariaLabel="Mention a peer"
+            emptyMessage="No peers match that handle prefix."
+            onSelect={selectMention}
+          />
+        ) : null}
         <label className="checkbox-row">
           <input
             type="checkbox"
@@ -172,7 +247,7 @@ export function HomePage({
           <button
             className="btn"
             type="button"
-            onClick={() => onSubmitPost(publishToDiscovery)}
+            onClick={() => onSubmitPost(publishToDiscovery, mentionsPresentInText(postText, selectedMentions))}
             disabled={!canCreatePost || !postText.trim()}
           >
             Send
@@ -180,7 +255,7 @@ export function HomePage({
         </div>
       </div>
 
-      {popularPeerSuggestionsState === 'active' && !allSuggestedPeersFollowed ? (
+      {popularPeerSuggestionsState === 'active' && !allSuggestedPeersFollowed && popularPeers.length > 0 ? (
         <div className="popular-posters-banner">
           <div className="popular-posters-heading">
             <strong>Popular posters right now.</strong>
@@ -269,6 +344,7 @@ export function HomePage({
                 replyCount={replyCounts?.get(objectId) ?? 0}
                 likeCount={recommendationSummary?.active_recommender_count ?? 0}
                 authorName={authorName}
+                authorDisplayName={matchingContact?.displayName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 authorOnline={matchingContact?.online === true}
                 onAuthorClick={onAuthorClick}

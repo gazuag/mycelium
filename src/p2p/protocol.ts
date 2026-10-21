@@ -73,6 +73,10 @@ export function canonicalize(value: unknown): string {
   return JSON.stringify(sortObject(value));
 }
 
+export function canonicalizeV3(value: unknown): string {
+  return serializeCanonicalV3(value);
+}
+
 function sortObject(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(sortObject);
@@ -84,6 +88,20 @@ function sortObject(value: unknown): unknown {
     return Object.fromEntries(entries);
   }
   return value;
+}
+
+function serializeCanonicalV3(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(serializeCanonicalV3).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, nested]) =>
+      `${JSON.stringify(key)}:${serializeCanonicalV3(nested)}`
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export async function buildPacket(

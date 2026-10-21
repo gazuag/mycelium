@@ -4,6 +4,7 @@ import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 import { BlockButton } from './BlockButton';
+import { PeerProfileQr } from './PeerProfileQr';
 
 interface ProfileHeaderProps {
   contact: Contact;
@@ -32,13 +33,16 @@ export function ProfileHeader({
     <section className="profile-header card">
       <div className="profile-title">
         <div className="profile-title-main">
-          {onAvatarClick ? (
-            <button className="profile-avatar-link" type="button" onClick={onAvatarClick} aria-label={`View ${displayName}'s profile`}>
-              <IdentityAvatar seed={contact.fingerprint} size={42} alt="" online={showOnlineIndicator && contact.online === true} />
-            </button>
-          ) : (
-            <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} />
-          )}
+          <span className="profile-avatar-tools">
+            {onAvatarClick ? (
+              <button className="profile-avatar-link" type="button" onClick={onAvatarClick} aria-label={`View ${displayName}'s profile`}>
+                <IdentityAvatar seed={contact.fingerprint} size={42} alt="" online={showOnlineIndicator && contact.online === true} />
+              </button>
+            ) : (
+              <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} />
+            )}
+            <PeerProfileQr peerId={contact.fingerprint || contact.publicKey} displayName={displayName} />
+          </span>
           <div className="profile-title-name">
             <strong>
               <CompactUsername

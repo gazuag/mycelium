@@ -32,7 +32,32 @@ export async function wrapKeyBundle(
   options: WrapKeyBundleOptions = {}
 ): Promise<VaultBlob> {
   try {
-    if (!isKeyBundle(bundle) || typeof secret !== 'string') throw new Error(UNLOCK_ERROR);
+    if (!isKeyBundle(bundle)) throw new Error(UNLOCK_ERROR);
+    return await encryptJsonPayload(bundle, secret, options);
+  } catch {
+    throw new Error(UNLOCK_ERROR);
+  }
+}
+
+export async function unwrapKeyBundle(blob: VaultBlob, secret: string): Promise<KeyBundle> {
+  try {
+    const bundle = await decryptJsonPayload(blob, secret);
+    if (!isKeyBundle(bundle)) throw new Error(UNLOCK_ERROR);
+    return bundle;
+  } catch {
+    throw new Error(UNLOCK_ERROR);
+  }
+}
+
+export async function encryptJsonPayload(
+  payload: unknown,
+  secret: string,
+  options: WrapKeyBundleOptions = {}
+): Promise<VaultBlob> {
+  try {
+    if (typeof secret !== 'string') throw new Error(UNLOCK_ERROR);
+    const serialized = JSON.stringify(payload);
+    if (serialized === undefined) throw new Error(UNLOCK_ERROR);
     const iterations = options.iterations ?? VAULT_DEFAULT_ITERATIONS;
     validateIterations(iterations);
 
@@ -44,7 +69,7 @@ export async function wrapKeyBundle(
       name: 'AES-GCM',
       iv: toArrayBuffer(nonce),
       additionalData: toArrayBuffer(createAdditionalData(iterations, saltBase64))
-    }, wrappingKey, new TextEncoder().encode(JSON.stringify(bundle)));
+    }, wrappingKey, new TextEncoder().encode(serialized));
 
     return {
       v: VAULT_VERSION,
@@ -59,7 +84,7 @@ export async function wrapKeyBundle(
   }
 }
 
-export async function unwrapKeyBundle(blob: VaultBlob, secret: string): Promise<KeyBundle> {
+export async function decryptJsonPayload(blob: VaultBlob, secret: string): Promise<unknown> {
   try {
     if (!isVaultBlob(blob) || typeof secret !== 'string') throw new Error(UNLOCK_ERROR);
     validateIterations(blob.iterations);
@@ -76,9 +101,7 @@ export async function unwrapKeyBundle(blob: VaultBlob, secret: string): Promise<
       iv: toArrayBuffer(nonce),
       additionalData: toArrayBuffer(createAdditionalData(blob.iterations, blob.salt))
     }, wrappingKey, toArrayBuffer(ciphertext));
-    const bundle: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
-    if (!isKeyBundle(bundle)) throw new Error(UNLOCK_ERROR);
-    return bundle;
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)) as unknown;
   } catch {
     throw new Error(UNLOCK_ERROR);
   }

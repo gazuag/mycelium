@@ -166,6 +166,7 @@ export function ProfilePage({
                   authorContact?.displayName,
                   post.authorFingerprint
                 )}
+                authorDisplayName={authorContact?.displayName}
                 authorId={post.authorFingerprint}
                 authorOnline={
                   (postAuthorContact?.online === true && !isProfileAuthor)

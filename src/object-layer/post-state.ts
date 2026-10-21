@@ -1,4 +1,4 @@
-import type { LocalPostMetadata, LocalPostMetadataStore, LocalPostView, ObjectStore, PostObject } from './types';
+import type { JsonValue, LocalPostMetadata, LocalPostMetadataStore, LocalPostView, ObjectStore, PostMention, PostObject } from './types';
 
 export function postPayload(view: LocalPostView): Record<string, unknown> {
   return typeof view.object.payload === 'object' && view.object.payload !== null && !Array.isArray(view.object.payload)
@@ -117,5 +117,26 @@ export function createReplyObjectPayload(
     ...(replyToAuthor ? { reply_to_author: replyToAuthor } : {}),
     ...(replyPostId ? { reply_post_id: replyPostId } : {}),
     ...(content ? { content } : {})
+  };
+}
+
+export function createPostObjectPayload(
+  content: string,
+  tags: readonly string[],
+  mentions: readonly PostMention[] = [],
+  replyTo?: string,
+  replyToAuthor?: string
+): JsonValue {
+  return {
+    content,
+    tags: [...tags],
+    ...(mentions.length > 0 ? {
+      mentions: mentions.map((mention) => ({
+        handle: mention.handle,
+        peerId: mention.peerId,
+        publicKey: mention.publicKey
+      }))
+    } : {}),
+    ...(replyTo ? { reply_to: replyTo, ...(replyToAuthor ? { reply_to_author: replyToAuthor } : {}) } : {})
   };
 }

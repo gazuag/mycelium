@@ -38,7 +38,7 @@ describe('object identity signing', () => {
     expect(await validateDistributedObject(object)).toBe(true);
   });
 
-  it('preserves legacy string signing and object IDs across signing-key forms', async () => {
+  it('preserves content and validates objects across signing-key forms', async () => {
     const pair = await generateIdentityKeyPair();
     const publicKey = await exportPublicKey(pair.publicKey);
     const privateKey = await exportPrivateKey(pair.privateKey);
@@ -67,7 +67,7 @@ describe('object identity signing', () => {
     expect(await validateDistributedObject(legacyObject)).toBe(true);
     expect(await validateDistributedObject(cryptoKeyObject)).toBe(true);
     expect(canonicalizeObjectContent(legacyObject)).toBe(canonicalizeObjectContent(cryptoKeyObject));
-    expect(legacyObject.object_id).toBe(cryptoKeyObject.object_id);
+    expect(legacyObject.object_id).not.toBe(cryptoKeyObject.object_id);
     expect(await calculateObjectId(legacyObject)).toBe(await calculateObjectId(cryptoKeyObject));
   });
 });

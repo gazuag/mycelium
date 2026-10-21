@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
+import { decryptJsonPayload, encryptJsonPayload, type VaultBlob } from './crypto/key-vault';
 import { connectToSignalling, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
@@ -16,7 +17,7 @@ import { useReplyUnreadController } from './hooks/useReplyUnread';
 import { listConversations, previewConversation, type ConversationSummary } from './object-layer/conversations';
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
-import { getFindQueryCriteria, prepareFindQueryPage } from './object-layer/transport';
+import { filterTombstonedObjects, getFindQueryCriteria, prepareFindQueryPage } from './object-layer/transport';
 import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, saveProfile, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject, validateDiscoveryObjects } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
@@ -35,12 +36,20 @@ import { BlockedPeerList } from './components/BlockedPeerList';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { canonicalize, type PacketSigner } from './p2p/protocol';
-import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
+import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { parsePeerId } from './utils/peerId';
 import { parseAddPeerInvitePath } from './utils/addPeerInvite';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
+import { mentionsPresentInText } from './utils/postMentions';
+import {
+  BYTES_PER_MB,
+  DEFAULT_OBJECT_STORAGE_BYTES,
+  MIN_OBJECT_STORAGE_BYTES,
+  OBJECT_STORAGE_LIMIT_STORAGE_KEY,
+  parseObjectStorageLimitMb
+} from './object-layer/storage-gc';
 import {
   DEFAULT_HOME_FEED_INJECTION_THRESHOLDS,
   HomeFeedInjectionScheduler,
@@ -80,6 +89,14 @@ function classifyLogEntry(entry: string): LogCategory {
   if (/\b(OBJECT|FIND|generic object)\b|PHASE ?[67]/i.test(entry)) return 'objectStorage';
   if (/\b(post|posts|feed|recommendation|home updates)\b/i.test(entry)) return 'postRequests';
   return 'general';
+}
+
+function loadObjectStorageLimitMb(): number {
+  try {
+    return parseObjectStorageLimitMb(localStorage.getItem(OBJECT_STORAGE_LIMIT_STORAGE_KEY));
+  } catch {
+    return DEFAULT_OBJECT_STORAGE_BYTES / BYTES_PER_MB;
+  }
 }
 
 type PageKey = 'home' | 'messages' | 'relationships' | 'discover' | 'profile' | 'myProfile' | 'chat' | 'settings';
@@ -226,6 +243,9 @@ function App() {
   const [conversationListError, setConversationListError] = useState<string | null>(null);
   const [conversationPreviewError, setConversationPreviewError] = useState<string | null>(null);
   const [contactsLoaded, setContactsLoaded] = useState(false);
+  const [objectStorageLimitMb, setObjectStorageLimitMb] = useState(loadObjectStorageLimitMb);
+  const objectStorageLimitBytesRef = useRef(objectStorageLimitMb * BYTES_PER_MB);
+  const [objectStorageUsedBytes, setObjectStorageUsedBytes] = useState<number | null>(null);
   const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeFeedInjectionRevision, setHomeFeedInjectionRevision] = useState(0);
   const [homeFeedInjectionFrequencies, setHomeFeedInjectionFrequencies] = useState<{
@@ -287,7 +307,14 @@ function App() {
   const suppressPhase6FindResponsesRef = useRef(false);
 
   if (!objectStoreRef.current) {
-    objectStoreRef.current = new IndexedDbObjectStore();
+    objectStoreRef.current = new IndexedDbObjectStore({
+      getMaxStorageBytes: () => objectStorageLimitBytesRef.current,
+      onStorageUsageChange: setObjectStorageUsedBytes,
+      getLocalAuthor: () => identityRef.current?.publicKey,
+      getFollowedAuthors: () => new Set(contactsRef.current
+        .filter((contact) => contact.followed)
+        .flatMap((contact) => [contact.publicKey, contact.fingerprint]))
+    });
   }
   if (!outboxStoreRef.current) {
     outboxStoreRef.current = new IndexedDbOutboxStore();
@@ -561,6 +588,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const store = objectStoreRef.current;
+    if (!(store instanceof IndexedDbObjectStore) || !contactsLoaded) return;
+    void store.collectGarbage().then((result) => {
+      if (result.triggered) {
+        addLog(`Object storage GC removed ${result.removedObjectIds.length} objects and ${result.removedTombstoneIds.length} deletion records`);
+        if (!result.targetReached) {
+          addLog('Object storage GC could not reach its low-water target; remaining storage is protected or ineligible for eviction');
+        }
+      }
+    }).catch((error: unknown) => {
+      addLog(`Object storage GC failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [addLog, contactsLoaded, identity?.publicKey]);
+
+  useEffect(() => {
     if (!identity) {
       homeFeedInjectionSchedulerRef.current = null;
       setHomeFeedInjectionFrequencies({
@@ -591,9 +633,9 @@ function App() {
     }
   }, [identity?.id, addLog]);
 
-  const handleInjectionFrequencyChange = useCallback((
-    source: 'recommendation' | 'discovery',
-    value: number
+  const handleSaveInjectionFrequencies = useCallback((
+    recommendationFrequency: number,
+    discoveryFrequency: number
   ) => {
     const scheduler = homeFeedInjectionSchedulerRef.current;
     if (!scheduler) {
@@ -601,11 +643,7 @@ function App() {
       return;
     }
     try {
-      const current = scheduler.getState();
-      const changed = scheduler.setThresholds(
-        source === 'recommendation' ? value : current.recommendationThreshold,
-        source === 'discovery' ? value : current.discoveryThreshold
-      );
+      const changed = scheduler.setThresholds(recommendationFrequency, discoveryFrequency);
       if (!changed) return;
       const next = scheduler.getState();
       setHomeFeedInjectionFrequencies({
@@ -614,8 +652,39 @@ function App() {
       });
       setHomeFeedInjectionRevision((revision) => revision + 1);
     } catch (error) {
-      addLog(`Home feed injection setting update failed: ${error instanceof Error ? error.message : String(error)}`);
+      addLog(`Home feed injection settings could not be saved: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }, [addLog]);
+
+  const handleSaveObjectStorageLimit = useCallback((limitMb: number): boolean => {
+    const limitBytes = limitMb * BYTES_PER_MB;
+    if (!Number.isSafeInteger(limitMb) || limitBytes < MIN_OBJECT_STORAGE_BYTES
+      || !Number.isSafeInteger(limitBytes)) {
+      addLog('Object storage limit must be a whole number of megabytes and at least 100 MB.');
+      return false;
+    }
+    try {
+      localStorage.setItem(OBJECT_STORAGE_LIMIT_STORAGE_KEY, String(limitMb));
+    } catch (error) {
+      addLog(`Object storage limit could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    objectStorageLimitBytesRef.current = limitBytes;
+    setObjectStorageLimitMb(limitMb);
+    const store = objectStoreRef.current;
+    if (store instanceof IndexedDbObjectStore) {
+      void store.collectGarbage().then((result) => {
+        if (result.triggered) {
+          addLog(`Object storage GC removed ${result.removedObjectIds.length} objects and ${result.removedTombstoneIds.length} deletion records`);
+          if (!result.targetReached) {
+            addLog('Object storage GC could not reach its low-water target; remaining storage is protected or ineligible for eviction');
+          }
+        }
+      }).catch((error: unknown) => {
+        addLog(`Object storage GC failed after changing the storage limit: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    return true;
   }, [addLog]);
 
   const recordNewEligibleHomePosts = useCallback((incomingViews: LocalPostView[]) => {
@@ -1062,7 +1131,8 @@ function App() {
       addLog(`FIND_RESPONSE received: requestId=${requestId ?? 'unknown'} aggregationState=${aggregationState ? 'present' : 'absent'} route=${route?.upstreamPeer ?? 'none'} routePresent=${Boolean(route)}`);
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
-          const objects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          const validatedObjects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          const objects = await filterTombstonedObjects(validatedObjects, store);
           const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; page_before?: { created_at: string; object_id: string }; since?: string; limit?: number; order?: 'created_at_desc' };
           const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.page_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
           if (isPhase7Query) {
@@ -1091,12 +1161,16 @@ function App() {
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
       if (route && route.upstreamPeer !== peerId) {
         const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
+        const childObjects = Array.isArray(packet.payload.objects)
+          ? packet.payload.objects
+          : packet.payload.object ? [packet.payload.object] : [];
+        const relayObjects = await filterTombstonedObjects(childObjects, store);
         const relayed = Array.isArray(packet.payload.objects) && !packet.payload.object
           ? await buildFindResponseObjectsPacket(
             identityRef.current?.id ?? 'unknown',
             route.upstreamPeer,
             requestId!,
-            [...packet.payload.objects],
+            relayObjects,
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
             typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined,
@@ -1107,9 +1181,9 @@ function App() {
           : await buildFindResponsePacket(
             identityRef.current?.id ?? 'unknown',
             route.upstreamPeer,
-            packet.payload.object_id,
+            relayObjects[0]?.object_id ?? packet.payload.object_id,
             requestId!,
-            packet.payload.object,
+            relayObjects[0],
             undefined,
             typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
             typeof packet.payload.expiresAt === 'string' ? packet.payload.expiresAt : undefined,
@@ -2350,11 +2424,17 @@ function App() {
     await submitDeleteRequest(target);
   };
 
-  async function handleCreatePost(publishToDiscovery = false, replyTo?: string, replyContent?: string) {
+  async function handleCreatePost(
+    publishToDiscovery = false,
+    replyTo?: string,
+    replyContent?: string,
+    selectedMentions: readonly PostMention[] = []
+  ) {
     if (!identity) return;
     const isReply = Boolean(replyTo);
     const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
+    const mentions = isReply ? [] : mentionsPresentInText(content, selectedMentions);
     const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
     const objectStore = objectStoreRef.current;
     if (!objectStore) throw new Error('Object store is unavailable');
@@ -2390,11 +2470,7 @@ function App() {
     const postObject = await createSignedObject({
       object_type: 'mycelium.post',
       created_at: new Date().toISOString(),
-      payload: {
-        content,
-        tags,
-        ...(replyTo ? { reply_to: replyTo, ...(replyTarget ? { reply_to_author: replyTarget.authorFingerprint } : {}) } : {})
-      },
+      payload: createPostObjectPayload(content, tags, mentions, replyTo, replyTarget?.authorFingerprint),
       replication_policy: {}
     }, objectIdentity) as PostObject;
     await objectStore.put(postObject);
@@ -2433,9 +2509,12 @@ function App() {
     }
 
     const objectTransport = objectTransportRef.current;
+    const directlySharedMentionPeers = new Set<string>();
     for (const peerId of objectTransport?.connectedPeers() ?? []) {
       const contact = contacts.find((c) => c.fingerprint === peerId);
-      if (contact?.followed && contact.connected && objectTransport) {
+      const isMentionTarget = mentions.some((mention) => mention.peerId === peerId);
+      if (((contact?.followed && contact.connected) || isMentionTarget) && objectTransport) {
+        if (isMentionTarget) directlySharedMentionPeers.add(peerId);
         try {
           const sentCount = await sendObjectBatches(
             identity.id,
@@ -2444,10 +2523,27 @@ function App() {
             objectTransport,
             (packet) => signString(identity.privateKey, canonicalize(packet))
           );
-          addLog(`Shared canonical post chain (${sentCount} objects) ending ${postObject.object_id} with connected followed peer ${peerId}`);
+          addLog(`Shared canonical post chain (${sentCount} objects) ending ${postObject.object_id} with connected ${isMentionTarget ? 'mentioned peer' : 'followed peer'} ${peerId}`);
         } catch (error) {
           addLog(`Failed to share post chain ending ${postObject.object_id} with ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
         }
+      }
+    }
+    const directMentionTargets = [...new Set(mentions
+      .map((mention) => mention.peerId)
+      .filter((peerId) => !directlySharedMentionPeers.has(peerId)))];
+    if (objectTransport && directMentionTargets.length > 0) {
+      const results = await sendObjectToPeers(
+        identity.id,
+        postObject,
+        directMentionTargets,
+        objectTransport,
+        (packet) => signString(identity.privateKey, canonicalize(packet))
+      );
+      for (const result of results) {
+        addLog(result.sent
+          ? `Pushed mentioned post ${postObject.object_id} directly to ${result.peerId}`
+          : `Mentioned post ${postObject.object_id} direct delivery ${result.reachable ? `failed: ${result.error ?? 'unknown transport error'}` : 'skipped: peer is not connected'} for ${result.peerId}`);
       }
     }
 
@@ -2966,15 +3062,43 @@ function App() {
     setIdentity(identityRecord as IdentityRecord);
   }
 
-  async function handleExportIdentity() {
+  async function handleExportIdentity(passphrase: string) {
     if (!identity) return;
 
+    let encryptedPayload: VaultBlob | undefined;
+    if (passphrase.length > 0) {
+      try {
+        encryptedPayload = await encryptJsonPayload(createIdentityBackupPayload(identity), passphrase);
+      } catch (error) {
+        addLog(`Identity backup encryption failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error('Could not encrypt the identity backup.');
+      }
+    }
+
     const exportPayload = {
+      ...(encryptedPayload
+        ? { format: 'mycelium-encrypted-identity-backup', encryptedPayload }
+        : createIdentityBackupPayload(identity))
+    };
+
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'mycelium-identity-backup.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function createIdentityBackupPayload(identityRecord: IdentityRecord) {
+    return {
       version: 1,
       exportedAt: new Date().toISOString(),
-      identity: identityBackupFields(identity),
+      identity: identityBackupFields(identityRecord),
       profile: {
-        displayName: myProfile.displayName.trim() || fingerprintToHumanName(identity.id),
+        displayName: myProfile.displayName.trim() || fingerprintToHumanName(identityRecord.id),
         bio: myProfile.bio.trim(),
         feedMix: myProfile.feedMix,
         blockedPeers: myProfile.blockedPeers,
@@ -3001,33 +3125,23 @@ function App() {
           : undefined
       }))
     };
-
-    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'mycelium-identity-backup.json';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
   }
 
-  async function handleImportIdentity() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json';
-    input.onchange = async (event) => {
-      const file = (event.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      const text = await file.text();
-      try {
-        const imported = JSON.parse(text);
-        const importedIdentity = imported?.identity ?? imported;
+  async function handleImportIdentity(file: File, passphrase: string) {
+    try {
+      let imported = JSON.parse(await file.text());
+      if (imported?.format === 'mycelium-encrypted-identity-backup') {
+        try {
+          imported = await decryptJsonPayload(imported.encryptedPayload as VaultBlob, passphrase);
+        } catch {
+          throw new Error('Unable to unlock the encrypted backup. Check the passphrase or backup file.');
+        }
+      }
+      const importedIdentity = imported?.identity ?? imported;
 
-        if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
-          await ensureTurnIceServers();
-          const nextIdentity = await ensureIdentityEncryptionKeyPair({
+      if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
+        await ensureTurnIceServers();
+        const nextIdentity = await ensureIdentityEncryptionKeyPair({
             key: importedIdentity.key ?? 'local',
             publicKey: importedIdentity.publicKey,
             privateKey: importedIdentity.privateKey,
@@ -3090,15 +3204,14 @@ function App() {
           setContacts(restoredContacts);
           await Promise.all(restoredContacts.map(async (contact) => saveContact(contact)));
 
-          addLog('Identity imported successfully');
-        } else {
-          addLog('Identity import failed: invalid file format');
-        }
-      } catch {
-        addLog('Identity import failed: invalid JSON');
+        addLog('Identity imported successfully');
+      } else {
+        throw new Error('Invalid identity backup file format.');
       }
-    };
-    input.click();
+    } catch (error) {
+      addLog(`Identity import failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
   async function handleClearIdentity() {
@@ -3939,12 +4052,16 @@ function App() {
             onDiagnosticLog={addLog}
             replyCounts={locallyKnownReplyCounts}
             contacts={contacts}
+            mentionContacts={visibleContacts}
+            myPublicKey={identity.publicKey}
             contactsLoaded={contactsLoaded}
             popularPeers={popularPeers}
             onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
-            onSubmitPost={handleCreatePost}
+            onSubmitPost={(publishToDiscovery, mentions) => {
+              void handleCreatePost(publishToDiscovery, undefined, undefined, mentions);
+            }}
             canCreatePost={Boolean(identity)}
             onAuthorClick={handleOpenPeerProfile}
             myPeerId={identity.id}
@@ -4063,10 +4180,10 @@ function App() {
             onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}
             profileSettings={
               <div className="card profile-edit-card">
-                <label>
-                  Generated handle
-                  <input value={`@${fingerprintToHumanName(identity.id)}`} readOnly />
-                </label>
+                <div className="profile-display-field">
+                  <span>Generated handle</span>
+                  <span className="monospace">@{fingerprintToHumanName(identity.id)}</span>
+                </div>
                 <label>
                   Display Name
                   <input
@@ -4079,8 +4196,6 @@ function App() {
                   Bio
                   <textarea value={myProfile.bio} onChange={(e) => setMyProfile((prev) => ({ ...prev, bio: e.target.value }))} placeholder="Write a short bio" />
                 </label>
-                <h3>Home Feed Mix</h3>
-                <p className="note">The feed is composed of 70% followed posts, 20% recommendations, and 10% Discovery posts ranked by replies.</p>
                 <div className="row">
                   <button className="btn" onClick={() => {
                     const nextDisplayName = myProfile.displayName.trim();
@@ -4104,12 +4219,6 @@ function App() {
                       }
                     });
                   }}>Save Profile</button>
-                  <button className="btn secondary" onClick={handleExportIdentity}>Export Identity</button>
-                </div>
-                <div className="row">
-                  <button className="btn secondary" onClick={handleImportIdentity}>Import Identity</button>
-                  <button className="btn secondary" onClick={handleCreateIdentity}>Create New Identity</button>
-                  <button className="btn secondary destructive" onClick={handleClearIdentity}>Clear Identity (Log Out)</button>
                 </div>
                 <div className="blocked-peers-settings">
                   <CollapsibleSection
@@ -4171,7 +4280,14 @@ function App() {
             syncStatus={syncStatus}
             recommendationFrequency={homeFeedInjectionFrequencies.recommendation}
             discoveryFrequency={homeFeedInjectionFrequencies.discovery}
-            onInjectionFrequencyChange={handleInjectionFrequencyChange}
+            onSaveInjectionFrequencies={handleSaveInjectionFrequencies}
+            objectStorageLimitMb={objectStorageLimitMb}
+            objectStorageUsedBytes={objectStorageUsedBytes}
+            onSaveObjectStorageLimit={handleSaveObjectStorageLimit}
+            onExportIdentity={handleExportIdentity}
+            onImportIdentity={handleImportIdentity}
+            onCreateIdentity={handleCreateIdentity}
+            onClearIdentity={handleClearIdentity}
             onAddPeerAddress={handleAddPeerByAddress}
             onResetApp={() => {
               setHiddenPostIds(new Set());

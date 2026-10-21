@@ -6,6 +6,9 @@ import { useDmUnread } from '../hooks/useDmUnread';
 import type { ReplyNotification } from '../hooks/useReplyUnread';
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { PeerRecipientPicker, relationshipContacts } from '../components/PeerRecipientPicker';
+
+export { relationshipContacts } from '../components/PeerRecipientPicker';
 
 interface MessagesPageProps {
   contacts: Contact[];
@@ -22,21 +25,6 @@ interface MessagesPageProps {
   onOpenReply?: (parentPostId: string, replyPostId?: string) => void;
   onMarkReplyRead?: (replyId: string) => void;
   onMarkAllRepliesRead?: () => void;
-}
-
-export function relationshipContacts(
-  contacts: Contact[],
-  myPublicKey: string,
-  myPeerId: string
-): Contact[] {
-  const selfIds = new Set([myPublicKey, myPeerId]);
-  const unique = new Map<string, Contact>();
-  for (const contact of contacts) {
-    if (selfIds.has(contact.publicKey) || selfIds.has(contact.fingerprint)) continue;
-    if (!contact.followed && !contact.follower) continue;
-    if (!unique.has(contact.publicKey)) unique.set(contact.publicKey, contact);
-  }
-  return [...unique.values()].sort((left, right) => Number(right.online === true) - Number(left.online === true));
 }
 
 export function conversationMatchesSearch(
@@ -220,35 +208,13 @@ export function MessagesPage({
 
       {selectingPeer ? (
         visiblePeers.length > 0 ? (
-          <div className="messages-list" aria-label="People to message">
-            {visiblePeers.map((contact) => {
-              const name = displayNameOrFallback(contact.displayName, contact.fingerprint);
-              return (
-                <div
-                  className="message-list-row"
-                  key={contact.publicKey}
-                >
-                  <button
-                    className="message-list-row-open"
-                    type="button"
-                    onClick={() => onOpenChat(contact.fingerprint || contact.publicKey)}
-                    aria-label={`Start conversation with ${name}`}
-                  />
-                  <IdentityAvatar seed={contact.fingerprint} size={42} alt={name} online={contact.online === true} />
-                  <span className="message-row-content">
-                    <strong>
-                      <CompactUsername
-                        peerId={contact.fingerprint || contact.publicKey}
-                        displayName={name}
-                        onProfileClick={onViewProfile}
-                      />
-                    </strong>
-                  </span>
-                  <span className="message-row-action" aria-hidden="true">›</span>
-                </div>
-              );
-            })}
-          </div>
+          <PeerRecipientPicker
+            contacts={visiblePeers}
+            mode="message"
+            ariaLabel="People to message"
+            onSelect={(contact) => onOpenChat(contact.fingerprint || contact.publicKey)}
+            onViewProfile={onViewProfile}
+          />
         ) : (
           <p className="note messages-empty">
             {search ? 'No people match your search.' : 'No followed or follower contacts are available to message.'}
@@ -275,28 +241,35 @@ export function MessagesPage({
             visibleReplies.length > 0 ? (
               <div className="messages-list" aria-label="Replies">
                 {visibleReplies.map((reply) => {
+                  const isMention = reply.kind === 'mention';
                   const contact = contacts.find((candidate) => (
                     candidate.publicKey === reply.authorPublicKey || candidate.fingerprint === reply.authorFingerprint
                   ));
                   const name = displayNameOrFallback(contact?.displayName, reply.authorFingerprint);
                   const time = formatActivityTime(reply.createdAt);
                   return (
-                    <div className={`message-list-row reply-list-row${reply.read ? '' : ' unread'}`} key={reply.id}>
+                    <div className={`message-list-row reply-list-row${reply.read ? '' : ' unread'}${isMention ? ' mention-list-row' : ''}`} key={reply.id}>
                       <button
                         className="message-list-row-open"
                         type="button"
                         onClick={() => {
                           onMarkReplyRead?.(reply.id);
-                          onOpenReply?.(reply.parentPostId, reply.replyPostId);
+                          onOpenReply?.(reply.parentPostId, isMention ? undefined : reply.replyPostId);
                         }}
-                        aria-label={`Open reply from ${name} to your post${reply.read ? '' : ', unread'}`}
+                        aria-label={isMention
+                          ? `Open post mentioning you from ${name}${reply.read ? '' : ', unread'}`
+                          : `Open reply from ${name} to your post${reply.read ? '' : ', unread'}`}
                       />
                       <IdentityAvatar seed={reply.authorFingerprint} size={42} alt={name} online={contact?.online === true} />
                       <span className="message-row-content">
                         <strong className="reply-row-author">{name}</strong>
-                        <span className="reply-row-body">{reply.replyContent || 'Replied to your post'}</span>
+                        <span className="reply-row-body">
+                          {isMention
+                            ? `Mentioned you${reply.mentionedHandle ? ` as @${reply.mentionedHandle}` : ''} in a post`
+                            : reply.replyContent || 'Replied to your post'}
+                        </span>
                         {reply.parentContent ? (
-                          <span className="reply-parent-context">Your post: {reply.parentContent}</span>
+                          <span className="reply-parent-context">{isMention ? 'Post: ' : 'Your post: '}{reply.parentContent}</span>
                         ) : null}
                       </span>
                       <span className="message-row-trailing">

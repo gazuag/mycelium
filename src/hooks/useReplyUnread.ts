@@ -11,6 +11,8 @@ export interface ReplyNotification {
   readonly replyContent: string;
   readonly parentContent: string;
   readonly read: boolean;
+  readonly kind?: 'reply' | 'mention';
+  readonly mentionedHandle?: string;
 }
 
 export interface ReplyUnreadState {
@@ -138,6 +140,33 @@ export function createReplyUnreadController({
         if (object.object_type !== 'mycelium.reply' && object.object_type !== 'mycelium.post') return null;
         if (object.author === myPublicKey) return null;
         const payload = replyPayload(object);
+        if (object.object_type === 'mycelium.post' && Array.isArray(payload?.mentions)) {
+          const mention = payload.mentions.find((item) => (
+            typeof item === 'object'
+            && item !== null
+            && !Array.isArray(item)
+            && typeof (item as Record<string, unknown>).handle === 'string'
+            && typeof (item as Record<string, unknown>).peerId === 'string'
+            && (item as Record<string, unknown>).publicKey === myPublicKey
+          )) as Record<string, unknown> | undefined;
+          if (mention) {
+            const content = payload && typeof payload.content === 'string' ? payload.content : '';
+            const notification: ReplyNotification = {
+              id: object.object_id,
+              parentPostId: object.object_id,
+              authorPublicKey: object.author,
+              authorFingerprint: await resolveAuthorFingerprint(object.author),
+              createdAt: object.created_at,
+              replyContent: 'Mentioned you in a post',
+              parentContent: content,
+              read: false,
+              kind: 'mention',
+              mentionedHandle: mention.handle as string
+            };
+            return { notification, isCanonicalPost: true };
+          }
+        }
+        if (object.object_type !== 'mycelium.reply') return null;
         const parentPostId = payload?.reply_to;
         if (typeof parentPostId !== 'string' || !/^[0-9a-f]{64}$/.test(parentPostId)) return null;
         const parent = await store.get(parentPostId);
@@ -147,19 +176,26 @@ export function createReplyUnreadController({
           && /^[0-9a-f]{64}$/.test(payload.reply_post_id)
           ? payload.reply_post_id
           : undefined;
-        const canonicalReplyId = object.object_type === 'mycelium.post' ? object.object_id : signalReplyPostId;
+        const canonicalPost = signalReplyPostId ? await store.get(signalReplyPostId) : null;
+        const hasCanonicalPost = canonicalPost?.object_type === 'mycelium.post'
+          && canonicalPost.author === object.author;
+        const canonicalContent = canonicalPost ? replyPayload(canonicalPost)?.content : undefined;
+        const canonicalReplyId = signalReplyPostId;
         const notification: ReplyNotification = {
           id: canonicalReplyId ?? object.object_id,
           parentPostId,
           ...(canonicalReplyId ? { replyPostId: canonicalReplyId } : {}),
           authorPublicKey: object.author,
           authorFingerprint: await resolveAuthorFingerprint(object.author),
-          createdAt: object.created_at,
-          replyContent: payload ? replyContent(payload) : '',
+          createdAt: hasCanonicalPost ? canonicalPost.created_at : object.created_at,
+          replyContent: hasCanonicalPost && typeof canonicalContent === 'string'
+            ? canonicalContent
+            : payload ? replyContent(payload) : '',
           parentContent: parentContent(parent),
-          read: false
+          read: false,
+          kind: 'reply'
         };
-        return { notification, isCanonicalPost: object.object_type === 'mycelium.post' };
+        return { notification, isCanonicalPost: hasCanonicalPost };
       }));
 
       let changed = false;
@@ -202,8 +238,9 @@ export function createReplyUnreadController({
     const currentRevision = ++revision;
     try {
       const objects = await store.query({ object_type: 'mycelium.reply' });
+      const posts = await store.query({ object_type: 'mycelium.post' });
       if (currentRevision !== revision) return;
-      await discover(objects);
+      await discover([...objects, ...posts]);
     } catch (error) {
       onError(new Error(`Could not refresh replies: ${error instanceof Error ? error.message : String(error)}`));
     }

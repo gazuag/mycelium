@@ -41,6 +41,8 @@ Every object has an envelope containing metadata and a payload.
 Conceptually:
 
     object_id
+    object_id_version
+    content_hash
     object_type
     author
     created_at
@@ -49,10 +51,11 @@ Conceptually:
     payload
     signature
     replication_policy
+    author_proof (version 2 only)
 
-The exact serialization format should be canonical and deterministic so that signatures and hashes are reproducible.
+The exact serialization format should be canonical and deterministic so that signatures and hashes are reproducible. Every object carries an explicit `object_id_version` for versioned formats; absence of that field denotes a legacy object.
 
-`object_id` uniquely identifies the object. It should be derived from the object's immutable content or otherwise be cryptographically collision-resistant.
+`object_id` uniquely identifies the object instance and is an opaque reference. Its generation depends on the object-ID version described below.
 
 `object_type` identifies the application-level object type. The transport layer should not need to understand the meaning of the type.
 
@@ -66,23 +69,21 @@ The exact serialization format should be canonical and deterministic so that sig
 
 `payload` contains the actual object data.
 
-`signature` is a cryptographic signature made by the author's private key over the canonical object contents.
+`signature` is a cryptographic signature made by the author's private key. Its exact signed bytes are generation-specific as described below.
 
 `replication_policy` describes how aggressively the object should be replicated and how long temporary replicas should be retained.
 
-The object ID and signature use the same canonical immutable content, excluding both `object_id` and `signature`:
+The canonical immutable object content includes `object_type`, `author`, optional `recipient`, `created_at`, optional `expires_at`, optional `sequence`, `payload`, and `replication_policy`. The `content_hash` is SHA-256 of this canonical content for versioned objects. It identifies exact immutable content, not an object instance. The signature and ID algorithms vary by generation:
 
-    object content
-        -> canonical serialization
-        -> SHA-256 -> object_id
+- **Legacy (no `object_id_version`):** `object_id` is SHA-256 of the canonical immutable content. The author's signature covers that canonical content. Existing IDs and signatures retain this meaning.
+- **Version 2 (`object_id_version: 2`):** `content_hash` is SHA-256 of canonical immutable content. `object_id` is SHA-256 of the canonical, domain-separated record `{ domain: "mycelium.object-id.v2", author, content_hash }`. `author_proof` is the author's signature over `{ domain: "mycelium.object-author-proof.v2", author, content_hash }`; the regular signature covers canonical immutable content. This generation is deterministic for identical authored content.
+- **Version 3 (`object_id_version: 3`):** `object_id` is generated once from 32 bytes supplied by the cryptographically secure random generator and represented as 64 lowercase hexadecimal characters. It is independent of all object fields. V3 canonical JSON recursively sorts object property names in ascending lexicographic UTF-16 code-unit order, preserves array order, and uses the protocol's JSON serialization encoded as UTF-8. This ordering is locale-independent. `content_hash` is SHA-256 of this canonical immutable content. The author signature covers the canonical v3 JSON, encoded as UTF-8, of the domain-separated record `{ domain: "mycelium.object-signature.v3", object_id, content_hash }`. Thus the signature binds this particular object instance to its immutable content and author. Identical content may have different IDs.
 
-    object content
-        -> canonical serialization
-        -> author signature -> signature
+Receivers must select validation rules from the explicit version, verify the content hash where present, and verify the generation-specific signature/proof. They must not reinterpret or regenerate existing IDs. Storage and references use `object_id`; content hashes are not interchangeable with object identity.
 
-Legacy objects use the content hash directly as their object ID. New objects use object-ID version 2: `content_hash` is the hash of the canonical immutable content, and `object_id` is the hash of a domain-separated record containing the author public key and `content_hash`. The author also signs a domain-separated author proof over that same author and content hash. Receivers validate the proof, ID, content hash, and normal object signature. The proof is carried in the envelope as `author_proof`, but is not part of the ID, so signatures with randomized encodings do not make identical authored content acquire different IDs.
+Legacy and version-2 objects continue to use the canonicalization rules in effect when those formats were defined; their signatures and IDs must not be rewritten during migration. The explicit locale-independent ordering rule above applies to version 3.
 
-Legacy IDs do not independently prove authorship when the target content is unavailable. A legacy object can be deleted only when the receiver has the target locally and can validate its author and signature. Version-2 objects can be authorized for deletion before the target arrives by verifying the author proof included in the Delete Request.
+Legacy IDs do not independently prove authorship when the target content is unavailable. A legacy object can be deleted only when the receiver has the target locally and can validate its author and signature. Version-2 objects can be authorized for deletion before the target arrives by verifying the author proof included in the Delete Request. Version-3 requests carry the target content hash and target v3 signature; a receiver verifies that signature against the target author and domain-separated target ID/content-hash record.
 
 ## Object Transport (Initial)
 
@@ -147,15 +148,15 @@ This makes deduplication and caching straightforward.
 
 ## Delete Requests and tombstones
 
-`mycelium.delete-request` is a signed generic object with the command `delete`. Its payload identifies the target ID, object type, author, creation time, and (for direct messages) recipient. For version-2 targets it also carries the target content hash and author proof. The Delete Request itself has an expiry no more than three days after its creation and a high replication budget; receivers reject requests with longer lifetimes. It uses the existing object transport, replication, object store, and outbox paths rather than a separate deletion network.
+`mycelium.delete-request` is a signed generic object with the command `delete`. Its payload identifies the target ID, object type, author, creation time, and (for direct messages) recipient. For version-2 targets it carries the target content hash and author proof. For version-3 targets it carries `target_object_id_version: 3`, the target content hash, and the target v3 signature as `target_author_proof`. The Delete Request itself has an expiry no more than three days after its creation and a high replication budget; receivers reject requests with longer lifetimes. It uses the existing object transport, replication, object store, and outbox paths rather than a separate deletion network.
 
-A receiver validates the Delete Request signature and expiry, then verifies that its signer is the target author. For version-2 targets, the author proof must validate the target ID; for legacy targets, the stored target object must be present and independently validate. Requests that fail any of these checks are not authoritative.
+A receiver validates the Delete Request signature and expiry, then verifies that its signer is the target author. For version-2 targets, the author proof must validate the target ID; for version-3 targets, the target signature must verify the target ID and content hash under the target author's public key; for legacy targets, the stored target object must be present and independently validate. Requests that fail any of these checks are not authoritative.
 
 On first acceptance, a peer stores a minimal local tombstone keyed by the target object ID and removes the target from ordinary object storage. Admission checks tombstones before storing an object, so a later copy cannot resurrect it. FIND and local object queries also suppress tombstoned targets. A repeated copy of the same request is deduplicated by its object ID and existing tombstone; it does not trigger repeated deletion or forwarding.
 
 The tombstone is local deletion state, not the Delete Request's propagation lease. Expiry of the request stops active replication and removes the request through ordinary lazy object expiry, but does not remove the tombstone. Tombstones contain only the target ID, type, author, timestamp, optional recipient, and deletion-request metadata; they do not retain the deleted payload. The UI may derive a subdued post or chat placeholder from a tombstone and surviving reply/conversation references, without creating another replicated placeholder object.
 
-There is no capacity-based object garbage collector or tombstone collection policy in the current implementation. Tombstones therefore remain authoritative indefinitely during normal operation; expiration of the Delete Request does not remove them. No age-based tombstone timer or tombstone collector exists. A future normal garbage collector may explicitly collect tombstones according to its own storage-pressure and safety policy. If a tombstone is eventually collected, old circulating copies may reappear; deletion is not globally guaranteed, and peers that never receive or honor a request are unaffected.
+The object store runs capacity-based garbage collection when storage reaches its configured high-water mark, evicting candidates until the low-water mark is reached. A tombstone is eligible only if its target object is no longer retained and its age reaches the grace period (30 days for another author's target, 365 days for the local author's target). Eligible remote-target tombstones are ordinary, low-retention candidates; local-author-target tombstones are protected candidates and are considered only if ordinary candidates do not reclaim enough space. The Delete Request's three-day expiry is not the tombstone's collection rule. Until GC actually removes a tombstone, it remains authoritative. If a tombstone is eventually collected, old circulating copies may reappear; deletion is not globally guaranteed, and peers that never receive or honor a request are unaffected.
 
 If a tombstone is explicitly collected by a future GC policy, the local system no longer has authoritative evidence to render a deletion placeholder or reject a later copy. A missing parent then appears as unavailable rather than deleted, and an old target copy may be admitted again.
 

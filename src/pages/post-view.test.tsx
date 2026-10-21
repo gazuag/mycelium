@@ -11,6 +11,7 @@ import { PersonRow } from '../components/PersonRow';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { createLocalPostView, upsertLocalPostView, type DeletionTombstone, type LocalPostView, type PostObject } from '../object-layer';
 import type { Contact } from '../types';
+import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { ConversationPage } from './ConversationPage';
 
 const contact: Contact = {
@@ -154,7 +155,8 @@ describe('LocalPostView UI migration', () => {
     );
 
     expect(markup).toContain('placeholder="Share what is happening..."');
-    expect(markup.indexOf('home-composer')).toBeLessThan(markup.indexOf('popular-posters-banner'));
+    expect(markup.indexOf('home-composer')).toBeLessThan(markup.indexOf('empty-state'));
+    expect(markup).not.toContain('popular-posters-banner');
     expect(markup).not.toContain('<h2>Home</h2>');
     expect(markup).not.toContain('<h3>Create Post</h3>');
     expect(markup).not.toContain('>Hide</button>');
@@ -421,23 +423,21 @@ describe('LocalPostView UI migration', () => {
         nickname="Author"
         bio=""
         blockedPeers={[]}
-        followedAuthorsRatio={60}
-        followedLikesRatio={40}
         onNicknameChange={noop}
         onBioChange={noop}
-        onFollowedAuthorsRatioChange={noop}
-        onFollowedLikesRatioChange={noop}
         onSaveProfile={noop}
-        onExportIdentity={noop}
-        onImportIdentity={noop}
-        onCreateIdentity={noop}
-        onClearIdentity={noop}
         onUnblockPeer={noop}
       />
     );
     expect(myProfile).toContain('Generated handle');
-    expect(myProfile).toContain('readonly=""');
+    expect(myProfile).toMatch(/profile-display-field"><span>Generated handle<\/span><span class="monospace">@[^<]+<\/span>/);
+    expect(myProfile).not.toContain('readonly=""');
     expect(myProfile).toContain('Display Name');
+    expect(myProfile).not.toContain('Home Feed Mix');
+    expect(myProfile).not.toContain('Export Identity');
+    expect(myProfile).not.toContain('Import Identity');
+    expect(myProfile).not.toContain('Create New Identity');
+    expect(myProfile).not.toContain('Clear Identity (Log Out)');
     const discover = renderToStaticMarkup(
       <DiscoverPage
         discoveryPosts={[view]}
@@ -464,6 +464,41 @@ describe('LocalPostView UI migration', () => {
     expect(home).not.toContain('Refresh posts');
     expect(discover).not.toContain('Discover - Explore public posts from the wider network.');
     expect(discover).not.toContain('Refresh discovery');
+  });
+
+  it('shows display names above generated handles in Home and Discovery feeds', () => {
+    const view = makeView();
+    const expectedName = `<span class="peer-name-primary">Author</span><span class="peer-name-handle">@${fingerprintToHumanName(contact.fingerprint)}</span>`;
+    const home = renderToStaticMarkup(
+      <HomePage
+        posts={[view]}
+        contacts={[contact]}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+    const discovery = renderToStaticMarkup(
+      <DiscoverPage
+        discoveryPosts={[view]}
+        contacts={[contact]}
+        onAuthorClick={noop}
+        onFollow={noop}
+        onLike={noop}
+        onDislike={noop}
+        onBlock={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+
+    expect(home).toContain(expectedName);
+    expect(discovery).toContain(expectedName);
   });
 
   it('keeps inbox content out of the removed People page destination', () => {
@@ -675,6 +710,16 @@ describe('relationship and discovery people UI', () => {
     expect(offline).not.toContain('identity-avatar-online');
   });
 
+  it('shows a QR-code action over the profile avatar', () => {
+    const markup = renderToStaticMarkup(
+      <ProfileHeader contact={contact} showActions={false} />
+    );
+
+    expect(markup).toContain('aria-label="Show Author&#x27;s profile QR code"');
+    expect(markup).toContain('class="profile-qr-button"');
+    expect(markup).toContain('<svg');
+  });
+
   it('uses the shared online indicator in reusable relationship/person rows', () => {
     const onlineContact: Contact = { ...contact, online: true };
     const offlineContact: Contact = { ...contact, online: false };
@@ -831,6 +876,29 @@ describe('relationship and discovery people UI', () => {
     expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
     expect(markup).not.toContain('New posts from people you follow.');
     expect(markup).not.toContain('Refresh posts');
+  });
+
+  it('does not show popular peer suggestions when there are no suggestions', () => {
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[]}
+        popularPeers={[]}
+        onFollowPeer={noop}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).not.toContain('Popular posters right now.');
+    expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
   });
 
   it('shows Stage 3 popular posters on Home when the user follows nobody', () => {
