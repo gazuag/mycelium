@@ -1,5 +1,6 @@
 import { deriveFingerprint, verifySignedString } from '../crypto/identity';
 import type { PeerMetadata } from '../types';
+import { isWebPushCapability } from '../services/web-push';
 import { canonicalize, isMyceliumPacket, type MyceliumPacket } from './protocol';
 
 export async function authenticateProfileMetadata(
@@ -17,6 +18,9 @@ export async function authenticateProfileMetadata(
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
   const publicKey = (metadata as Partial<PeerMetadata>).publicKey;
   if (typeof publicKey !== 'string' || !publicKey.trim()) return null;
+  const candidate = metadata as Partial<PeerMetadata>;
+  if (candidate.webPush !== undefined
+    && (packet.type !== 'PROFILE_UPDATE' || !isWebPushCapability(candidate.webPush))) return null;
 
   const { signature, ...unsignedPacket } = packet;
   try {

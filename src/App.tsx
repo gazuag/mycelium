@@ -38,6 +38,7 @@ import { CollapsibleSection } from './components/CollapsibleSection';
 import { ExternalImageLimitContext } from './components/MarkdownContent';
 import { canonicalize, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
+import { webPushManager } from './services/web-push';
 import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { parsePeerId } from './utils/peerId';
@@ -1338,6 +1339,7 @@ function App() {
     const p = myProfileRef.current;
     const id = identityRef.current;
     const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
+    const webPush = await webPushManager.getPublishedCapability();
     const metadata = {
       author: id?.id ?? '',
       publicKey: id?.publicKey,
@@ -1345,13 +1347,27 @@ function App() {
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
       bio: p.bio.trim() || `Peer id: ${id?.id ?? 'unknown'}`,
-      tags: []
+      tags: [],
+      ...(webPush ? { webPush } : {})
     };
     return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;
   };
 
   const sendPeerMetadata = async (manager: PeerConnectionManager, peerId: string, followingOverride?: boolean) => {
     manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
+  };
+
+  const refreshConnectedPeerProfiles = async () => {
+    const connectedPeers = objectTransportRef.current?.connectedPeers() ?? [];
+    await Promise.all(connectedPeers.map(async (peerId) => {
+      const manager = peerManagersRef.current[peerId];
+      if (!manager) return;
+      try {
+        await sendPeerMetadata(manager, peerId);
+      } catch (error) {
+        addLog(`Failed to refresh profile for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }));
   };
 
   const handlePeerMetadata = async (peerId: string, metadata: PeerMetadata) => {
@@ -1391,6 +1407,7 @@ function App() {
             ...bindingUpdate.contactFields,
             publicKey: metadataPublicKey ?? existing.publicKey,
             displayName: metadata.displayName,
+            webPush: metadata.webPush,
             profile: normalizedProfile,
             follower: metadata.following,
             online: true,
@@ -1401,6 +1418,7 @@ function App() {
             fingerprint: peerId,
             ...bindingUpdate.contactFields,
             displayName: metadata.displayName,
+            webPush: metadata.webPush,
             profile: normalizedProfile,
             addedAt: new Date().toISOString(),
             followed: false,
@@ -4329,6 +4347,7 @@ function App() {
             onSaveObjectStorageLimit={handleSaveObjectStorageLimit}
             externalImageLimitMb={externalImageLimitMb}
             onSaveExternalImageLimit={handleSaveExternalImageLimit}
+            onWebPushChanged={refreshConnectedPeerProfiles}
             onExportIdentity={handleExportIdentity}
             onImportIdentity={handleImportIdentity}
             onCreateIdentity={handleCreateIdentity}

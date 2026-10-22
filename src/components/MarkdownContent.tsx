@@ -19,14 +19,23 @@ export const ExternalImageLimitContext = createContext(DEFAULT_EXTERNAL_IMAGE_LI
 interface MarkdownContentProps {
   source: string;
   imageSizes?: unknown;
+  className?: string;
 }
 
-export function MarkdownContent({ source, imageSizes }: MarkdownContentProps) {
+export function MarkdownContent({ source, imageSizes, className = 'markdown-content' }: MarkdownContentProps) {
   const tokens = lexMarkdown(source);
   return (
-    <div className="markdown-content">
+    <div className={className}>
       {renderTokens(tokens, imageSizes)}
     </div>
+  );
+}
+
+export function MarkdownPreview({ source }: { source: string }) {
+  return (
+    <ExternalImageLimitContext.Provider value={0}>
+      <MarkdownContent source={source} className="markdown-content markdown-preview" />
+    </ExternalImageLimitContext.Provider>
   );
 }
 

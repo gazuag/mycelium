@@ -1264,6 +1264,20 @@ body, html, #root {
   white-space: nowrap;
 }
 
+.reply-row-body .markdown-preview,
+.message-row-activity .markdown-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: inherit;
+}
+
+.reply-row-body .markdown-content p,
+.reply-parent-context .markdown-content p,
+.message-row-activity .markdown-content p {
+  display: inline;
+  margin: 0;
+}
+
 .reply-parent-context {
   display: -webkit-box;
   overflow: hidden;
@@ -1272,6 +1286,13 @@ body, html, #root {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+
+.message-row-content .markdown-external-link,
+.message-row-content .markdown-image-load {
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
 }
 
 .message-row-trailing {

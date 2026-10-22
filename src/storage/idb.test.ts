@@ -226,6 +226,30 @@ describe('inbox cursor IndexedDB persistence', () => {
     }));
   });
 
+  it('persists and clears an authenticated peer Web Push capability with its contact', async () => {
+    const contact = {
+      publicKey: 'push-capability-key',
+      fingerprint: 'push-capability-peer',
+      addedAt: '2026-10-01T00:00:00.000Z',
+      followed: false,
+      webPush: {
+        endpoint: 'https://push.example.test/subscription/1',
+        p256dh: 'public-key',
+        auth: 'auth-secret'
+      }
+    };
+    await saveContact(contact);
+
+    await expect(loadContacts()).resolves.toContainEqual(expect.objectContaining({
+      publicKey: contact.publicKey,
+      webPush: contact.webPush
+    }));
+
+    await saveContact({ ...contact, webPush: undefined });
+    const savedContact = (await loadContacts()).find(({ publicKey }) => publicKey === contact.publicKey);
+    expect(savedContact?.webPush).toBeUndefined();
+  });
+
   it('rejects a non-ISO or unparseable cursor', async () => {
     await expect(saveInboxCursor('invalid-cursor-identity', 'not-a-date')).rejects.toThrow('ISO timestamp');
     await expect(saveInboxCursor('invalid-calendar-identity', '2026-02-30T10:00:00.000Z')).rejects.toThrow('ISO timestamp');

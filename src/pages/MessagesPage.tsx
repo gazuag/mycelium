@@ -7,6 +7,7 @@ import type { ReplyNotification } from '../hooks/useReplyUnread';
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { PeerRecipientPicker, relationshipContacts } from '../components/PeerRecipientPicker';
+import { MarkdownPreview } from '../components/MarkdownContent';
 
 export { relationshipContacts } from '../components/PeerRecipientPicker';
 
@@ -261,17 +262,25 @@ export function MessagesPage({
                           : `Open reply from ${name} to your post${reply.read ? '' : ', unread'}`}
                       />
                       <IdentityAvatar seed={reply.authorFingerprint} size={42} alt={name} online={contact?.online === true} />
-                      <span className="message-row-content">
+                      <div className="message-row-content">
                         <strong className="reply-row-author">{name}</strong>
-                        <span className="reply-row-body">
-                          {isMention
-                            ? `Mentioned you${reply.mentionedHandle ? ` as @${reply.mentionedHandle}` : ''} in a post`
-                            : reply.replyContent || 'Replied to your post'}
-                        </span>
+                        {isMention ? (
+                          <div className="reply-row-body">
+                            {`Mentioned you${reply.mentionedHandle ? ` as @${reply.mentionedHandle}` : ''} in a post`}
+                            {reply.replyContent ? <MarkdownPreview source={reply.replyContent} /> : null}
+                          </div>
+                        ) : (
+                          <div className="reply-row-body">
+                            <MarkdownPreview source={reply.replyContent || 'Replied to your post'} />
+                          </div>
+                        )}
                         {reply.parentContent ? (
-                          <span className="reply-parent-context">{isMention ? 'Post: ' : 'Your post: '}{reply.parentContent}</span>
+                          <div className="reply-parent-context">
+                            <span>{isMention ? 'Post: ' : 'Your post: '}</span>
+                            <MarkdownPreview source={reply.parentContent} />
+                          </div>
                         ) : null}
-                      </span>
+                      </div>
                       <span className="message-row-trailing">
                         {time ? <time dateTime={reply.createdAt}>{time}</time> : null}
                         {!reply.read ? <span className="message-unread-dot" aria-label="Unread reply" /> : null}
@@ -316,7 +325,7 @@ export function MessagesPage({
                       alt={name}
                       online={contact?.online === true}
                     />
-                    <span className="message-row-content">
+                    <div className="message-row-content">
                       <strong>
                         <CompactUsername
                           peerId={contact?.fingerprint ?? conversation.counterparty}
@@ -324,8 +333,10 @@ export function MessagesPage({
                           onProfileClick={onViewProfile}
                         />
                       </strong>
-                      <span className="message-row-activity">{activity}</span>
-                    </span>
+                      <div className="message-row-activity">
+                        <MarkdownPreview source={activity} />
+                      </div>
+                    </div>
                     <span className="message-row-trailing">
                       {time ? <time dateTime={conversation.lastAt}>{time}</time> : null}
                       {unread ? <span className="message-unread-dot" aria-hidden="true" /> : null}

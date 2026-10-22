@@ -26,6 +26,7 @@ describe('SettingsPage', () => {
         onSaveObjectStorageLimit={vi.fn(() => true)}
         externalImageLimitMb={5}
         onSaveExternalImageLimit={vi.fn(() => true)}
+        onWebPushChanged={vi.fn(async () => {})}
         onExportIdentity={vi.fn()}
         onImportIdentity={vi.fn()}
         onCreateIdentity={vi.fn()}

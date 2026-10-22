@@ -30,6 +30,7 @@ interface SettingsPageProps {
   onSaveObjectStorageLimit: (limitMb: number) => boolean;
   externalImageLimitMb: number;
   onSaveExternalImageLimit: (limitMb: number) => boolean;
+  onWebPushChanged: () => Promise<void>;
   onExportIdentity: (passphrase: string) => Promise<void>;
   onImportIdentity: (file: File, passphrase: string) => Promise<void>;
   onCreateIdentity: () => void;
@@ -63,6 +64,7 @@ export function SettingsPage({
   onSaveObjectStorageLimit,
   externalImageLimitMb,
   onSaveExternalImageLimit,
+  onWebPushChanged,
   onExportIdentity,
   onImportIdentity,
   onCreateIdentity,
@@ -195,6 +197,7 @@ export function SettingsPage({
     setWebPushError('');
     try {
       setWebPushStatus(await webPushManager.enable());
+      await onWebPushChanged();
     } catch (error) {
       setWebPushError(error instanceof Error ? error.message : String(error));
       await refreshWebPushStatus();
@@ -213,6 +216,7 @@ export function SettingsPage({
       setWebPushError(error instanceof Error ? error.message : String(error));
       await refreshWebPushStatus();
     } finally {
+      await onWebPushChanged();
       setWebPushBusy(false);
     }
   };

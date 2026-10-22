@@ -1,3 +1,5 @@
+import type { WebPushCapability } from '../types';
+
 export const WEB_PUSH_ENABLED_STORAGE_KEY = 'mycelium:web-push-enabled';
 const SERVICE_WORKER_URL = '/service-worker.js';
 const APPLICATION_SERVER_KEY = import.meta.env.VITE_WEB_PUSH_PUBLIC_KEY as string | undefined;
@@ -28,6 +30,7 @@ interface WebPushPlatform {
 
 export interface WebPushManager {
   getStatus(): Promise<WebPushStatus>;
+  getPublishedCapability(): Promise<WebPushCapability | null>;
   enable(): Promise<WebPushStatus>;
   disable(): Promise<void>;
 }
@@ -53,6 +56,27 @@ export function registerMyceliumServiceWorker(): Promise<ServiceWorkerRegistrati
 }
 
 export function createWebPushManager(platform: WebPushPlatform): WebPushManager {
+  const getPublishedCapability = async (): Promise<WebPushCapability | null> => {
+    try {
+      if (!platform.supported
+        || !platform.applicationServerKey?.trim()
+        || platform.getPermission() !== 'granted'
+        || platform.storage.getItem(WEB_PUSH_ENABLED_STORAGE_KEY) !== 'true') return null;
+      const registration = await platform.getRegistration();
+      const subscription = registration ? await registration.pushManager.getSubscription() : null;
+      if (!subscription) return null;
+      const serialized = subscription.toJSON();
+      const capability = {
+        endpoint: serialized.endpoint ?? subscription.endpoint,
+        p256dh: serialized.keys?.p256dh,
+        auth: serialized.keys?.auth
+      };
+      return isWebPushCapability(capability) ? capability : null;
+    } catch {
+      return null;
+    }
+  };
+
   const getStatus = async (): Promise<WebPushStatus> => {
     if (!platform.supported) return { state: 'unsupported', subscribed: false };
     const permission = platform.getPermission();
@@ -121,7 +145,22 @@ export function createWebPushManager(platform: WebPushPlatform): WebPushManager 
     if (unsubscribeError) throw unsubscribeError;
   };
 
-  return { getStatus, enable, disable };
+  return { getStatus, getPublishedCapability, enable, disable };
+}
+
+export function isWebPushCapability(value: unknown): value is WebPushCapability {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const capability = value as Partial<WebPushCapability>;
+  if (typeof capability.endpoint !== 'string'
+    || typeof capability.p256dh !== 'string'
+    || typeof capability.auth !== 'string'
+    || !capability.p256dh.trim()
+    || !capability.auth.trim()) return false;
+  try {
+    return new URL(capability.endpoint).protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 export const webPushManager = createWebPushManager({

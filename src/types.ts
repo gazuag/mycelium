@@ -17,6 +17,13 @@ export interface Contact {
   lastReadAt?: string;
   encryptionPublicKey?: string;
   encryptionKeyChanged?: boolean;
+  webPush?: WebPushCapability;
+}
+
+export interface WebPushCapability {
+  readonly endpoint: string;
+  readonly p256dh: string;
+  readonly auth: string;
 }
 
 export interface PeerMetadata {
@@ -28,6 +35,7 @@ export interface PeerMetadata {
   bio?: string;
   tags?: string[];
   encryptionKeyBinding?: EncryptionKeyBinding;
+  webPush?: WebPushCapability;
 }
 
 export interface SignedProfile {

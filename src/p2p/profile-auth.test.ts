@@ -70,4 +70,69 @@ describe('profile metadata authentication', () => {
 
     expect(updatePeerProfile).not.toHaveBeenCalled();
   });
+
+  it('accepts a well-formed Web Push capability in an authenticated profile update', async () => {
+    const capability = {
+      endpoint: 'https://push.example.test/subscription/1',
+      p256dh: 'public-key',
+      auth: 'auth-secret'
+    };
+    const { metadata, packet, peerId } = await createSignedProfileUpdate({ webPush: capability });
+
+    await expect(authenticateProfileMetadata(peerId, packet)).resolves.toEqual(metadata);
+  });
+
+  it('passes authenticated capability updates and omissions through for storage and clearing', async () => {
+    const capability = {
+      endpoint: 'https://push.example.test/subscription/1',
+      p256dh: 'public-key',
+      auth: 'auth-secret'
+    };
+    const receivedCapabilityUpdates: Array<PeerMetadata['webPush']> = [];
+    const onAuthenticated = vi.fn((metadata: PeerMetadata) => {
+      receivedCapabilityUpdates.push(metadata.webPush);
+    });
+    const withCapability = await createSignedProfileUpdate({ webPush: capability });
+    const withoutCapability = await createSignedProfileUpdate();
+
+    await expect(dispatchAuthenticatedProfileMetadata(
+      withCapability.peerId,
+      withCapability.packet,
+      onAuthenticated
+    )).resolves.toBe(true);
+    await expect(dispatchAuthenticatedProfileMetadata(
+      withoutCapability.peerId,
+      withoutCapability.packet,
+      onAuthenticated
+    )).resolves.toBe(true);
+
+    expect(receivedCapabilityUpdates).toEqual([capability, undefined]);
+  });
+
+  it('rejects malformed Web Push capability metadata before it reaches profile persistence', async () => {
+    const { packet, peerId } = await createSignedProfileUpdate({
+      webPush: {
+        endpoint: 'http://push.example.test/subscription/1',
+        p256dh: '',
+        auth: 'auth-secret'
+      }
+    });
+    const updatePeerProfile = vi.fn();
+
+    await expect(dispatchAuthenticatedProfileMetadata(peerId, packet, updatePeerProfile)).resolves.toBe(false);
+    expect(updatePeerProfile).not.toHaveBeenCalled();
+  });
+
+  it('does not let an authenticated profile response publish a Web Push capability', async () => {
+    const { packet, peerId } = await createSignedProfileUpdate({
+      webPush: {
+        endpoint: 'https://push.example.test/subscription/1',
+        p256dh: 'public-key',
+        auth: 'auth-secret'
+      }
+    });
+    const responsePacket = { ...packet, type: 'PROFILE_RESPONSE' as const };
+
+    await expect(authenticateProfileMetadata(peerId, responsePacket)).resolves.toBeNull();
+  });
 });

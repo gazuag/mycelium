@@ -52,6 +52,7 @@ function createHarness({
     registration,
     subscribe,
     unsubscribe,
+    setSubscription: (value: PushSubscription | null) => { subscription = value; },
     requestPermission,
     getRegistration,
     register
@@ -140,6 +141,59 @@ describe('Web Push subscription management', () => {
     await expect(harness.manager.getStatus()).resolves.toEqual({
       state: 'subscription-unavailable',
       subscribed: false
+    });
+  });
+
+  it('publishes only the current enabled, configured browser subscription', async () => {
+    const harness = createHarness();
+    const subscription = {
+      endpoint: 'https://push.example.test/subscription/one',
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/subscription/one',
+        keys: { p256dh: 'public-key', auth: 'auth-secret' }
+      })
+    } as unknown as PushSubscription;
+    harness.setSubscription(subscription);
+    harness.values.set(WEB_PUSH_ENABLED_STORAGE_KEY, 'true');
+
+    await expect(harness.manager.getPublishedCapability()).resolves.toEqual({
+      endpoint: 'https://push.example.test/subscription/one',
+      p256dh: 'public-key',
+      auth: 'auth-secret'
+    });
+
+    harness.values.delete(WEB_PUSH_ENABLED_STORAGE_KEY);
+    await expect(harness.manager.getPublishedCapability()).resolves.toBeNull();
+  });
+
+  it('omits unavailable or malformed subscriptions and reads replacements afresh', async () => {
+    const harness = createHarness();
+    harness.values.set(WEB_PUSH_ENABLED_STORAGE_KEY, 'true');
+
+    await expect(harness.manager.getPublishedCapability()).resolves.toBeNull();
+
+    harness.setSubscription({
+      endpoint: 'https://push.example.test/subscription/old',
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/subscription/old',
+        keys: { p256dh: 'old-key', auth: 'old-auth' }
+      })
+    } as unknown as PushSubscription);
+    await expect(harness.manager.getPublishedCapability()).resolves.toMatchObject({
+      endpoint: 'https://push.example.test/subscription/old'
+    });
+
+    harness.setSubscription({
+      endpoint: 'https://push.example.test/subscription/new',
+      toJSON: () => ({
+        endpoint: 'https://push.example.test/subscription/new',
+        keys: { p256dh: 'new-key', auth: 'new-auth' }
+      })
+    } as unknown as PushSubscription);
+    await expect(harness.manager.getPublishedCapability()).resolves.toEqual({
+      endpoint: 'https://push.example.test/subscription/new',
+      p256dh: 'new-key',
+      auth: 'new-auth'
     });
   });
 });
