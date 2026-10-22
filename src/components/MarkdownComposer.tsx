@@ -94,8 +94,13 @@ export function MarkdownComposer({
 
     const marker = action === 'bold' ? '**' : action === 'italic' ? '*' : '__';
     const insertion = `${marker}${selected}${marker}`;
-    const cursor = start + (selected ? insertion.length : marker.length);
-    updateValue(`${value.slice(0, start)}${insertion}${value.slice(end)}`, cursor);
+    const contentStart = start + marker.length;
+    const contentEnd = contentStart + selected.length;
+    updateValue(
+      `${value.slice(0, start)}${insertion}${value.slice(end)}`,
+      contentStart,
+      selected ? contentEnd : contentStart
+    );
   };
 
   const openLinkForm = (kind: LinkKind) => {

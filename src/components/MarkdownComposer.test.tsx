@@ -64,16 +64,15 @@ describe('MarkdownComposer', () => {
     ['Bold', '**', 2],
     ['Italic', '*', 1],
     ['Underline', '__', 2]
-  ])('wraps selected text with %s and restores the caret', async (label, marker, offset) => {
+  ])('wraps selected text with %s and keeps the content selected', async (label, marker) => {
     await mount('before text after');
     const textarea = container!.querySelector('textarea')!;
     select(textarea, 7, 11);
     await act(async () => button(label).click());
 
     expect(textarea.value).toBe(`before ${marker}text${marker} after`);
-    expect(textarea.selectionStart).toBe(7 + marker.length + 4 + marker.length);
-    expect(textarea.selectionEnd).toBe(textarea.selectionStart);
-    expect(offset).toBe(marker.length);
+    expect(textarea.selectionStart).toBe(7 + marker.length);
+    expect(textarea.selectionEnd).toBe(7 + marker.length + 4);
   });
 
   it.each([
@@ -88,6 +87,20 @@ describe('MarkdownComposer', () => {
 
     expect(textarea.value).toBe(`start${template} end`);
     expect(textarea.selectionStart).toBe(5 + cursor);
+  });
+
+  it('preserves the selection for repeated formatting actions', async () => {
+    await mount('hello world');
+    const textarea = container!.querySelector('textarea')!;
+    select(textarea, 0, 5);
+
+    await act(async () => button('Bold').click());
+    expect(textarea.value).toBe('**hello** world');
+    expect(textarea.value.slice(textarea.selectionStart, textarea.selectionEnd)).toBe('hello');
+
+    await act(async () => button('Italic').click());
+    expect(textarea.value).toBe('***hello*** world');
+    expect(textarea.value.slice(textarea.selectionStart, textarea.selectionEnd)).toBe('hello');
   });
 
   it('quotes selected multiline text without changing surrounding text or trailing newlines', async () => {
