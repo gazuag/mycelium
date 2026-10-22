@@ -45,6 +45,7 @@ than the remaining allowance before the client can abort it.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.
 - `src/services/web-push-encryption.ts` — browser-side RFC 8291 Web Push payload encryption.
 - `src/services/web-push-sender.ts` — optional authenticated request to the Web Push sender.
+- `public/service-worker.js` — registered PWA worker, including bounded untrusted Web Push staging.
 - `src/markdown/external-content.ts` — safe URL handling, Markdown image-size metadata, and bounded raster image loading.
 - `server.py` — Python WebSocket server handling signalling and discovery over one WebSocket endpoint.
 - `server_push.py` — separate TLS-only authenticated Web Push sender; it does not persist objects or subscriptions.
@@ -113,6 +114,8 @@ The sender is a separate process and TLS listener; it does not change the WebSoc
 The sender accepts one short-lived, identity-signed encrypted request at `POST /v1/push`. Its canonical request format is `mycelium-web-push-request-v1` and signs the method, path, public key, fingerprint, exact destination endpoint, timestamp, nonce, TTL, content headers, and SHA-256 hash of the exact encrypted body. Replay protection is in-memory, bounded, per process, and resets on restart. Requests are rate- and size-limited; DNS answers are checked and pinned for the connection, redirects are disabled, and upstream TLS verification remains enabled. The server sees the destination endpoint, request timing/size, source IP, and sender public identity, but not plaintext. It stores no subscription, message, ciphertext, or queue.
 
 Identity signatures show possession of a Mycelium key; identities are permissionless and do not establish a unique person or recipient consent. Rate limits therefore cannot fully prevent Sybil abuse. Push acceptance is best-effort and is not proof that a recipient received, authenticated, stored, or processed a Mycelium object. The sender does not retry.
+
+Incoming push payloads are currently accepted only in the versioned JSON forms `{ "version": 1, "type": "object", "object": <signed Mycelium object> }` and `{ "version": 1, "type": "reference", "object_id": "<64 lowercase hex characters>" }`. The service worker places at most 32 envelopes (each no larger than 3,900 UTF-8 bytes) in a dedicated Cache API staging cache, expiring entries after seven days; this staging is untrusted and is not the authoritative object store. When the app is open, inline objects are passed through the existing object receive and signature-verification path. References are looked up through existing FIND requests to currently connected peers and remain staged if unresolved. Ordinary posts and unverified push metadata do not generate notifications. Incoming push handling does not yet guarantee delivery, background retrieval, or notifications.
 
 ## What travels through the signalling server
 

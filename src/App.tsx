@@ -39,6 +39,12 @@ import { ExternalImageLimitContext } from './components/MarkdownContent';
 import { canonicalize, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import { webPushManager } from './services/web-push';
+import {
+  envelopeObjectId,
+  parseIncomingWebPushEnvelope,
+  WEB_PUSH_STAGED_MESSAGE_TYPE,
+  WEB_PUSH_STAGING_MAX_ENTRIES
+} from './services/web-push-inbox';
 import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, hydratePostViews, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { parsePeerId } from './utils/peerId';
@@ -324,6 +330,7 @@ function App() {
   const peerPostReceptionTimesRef = useRef<Map<string, number>>(new Map());
   const postParentLookupRef = useRef<Map<string, { attemptedAt: number; promise: Promise<DistributedObject | null> }>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
+  const webPushProcessingIdsRef = useRef(new Set<string>());
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore({
@@ -1298,6 +1305,133 @@ function App() {
     resolveAuthorFingerprint: resolvePostAuthorFingerprint,
     onError: (error) => addLog(error instanceof Error ? error.message : String(error))
   });
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    let disposed = false;
+
+    const acknowledge = (source: MessageEventSource | null, ids: string[]) => {
+      if (ids.length === 0) return;
+      const message = { type: 'MYCELIUM_PUSH_ACK_V1', ids };
+      try {
+        if (source && 'postMessage' in source) {
+          source.postMessage(message);
+        } else {
+          navigator.serviceWorker.controller?.postMessage(message);
+        }
+      } catch {
+        return;
+      }
+    };
+
+    const processItem = async (id: string, value: unknown): Promise<boolean> => {
+      const envelope = parseIncomingWebPushEnvelope(value);
+      if (!envelope || envelopeObjectId(envelope) !== id) return true;
+      const store = objectStoreRef.current;
+      const localIdentity = identityRef.current;
+      if (!store || !localIdentity) return false;
+
+      if (envelope.type === 'object') {
+        if (!(await validateObject(envelope.object))) return true;
+        const packet = await buildObjectStorePacket(localIdentity.id, localIdentity.id, envelope.object);
+        await handleObjectPacket('web-push', packet);
+        const stored = await store.get(id);
+        return stored !== null
+          || (isDeletionAwareObjectStore(store) && Boolean(await store.getDeletionTombstone(id)));
+      }
+
+      const existing = await store.get(id);
+      if (existing && await validateObject(existing)) return true;
+      if (isDeletionAwareObjectStore(store) && await store.getDeletionTombstone(id)) return true;
+
+      const transport = objectTransportRef.current;
+      const peers = transport?.connectedPeers()
+        .filter((peerId) => !blockedPeersRef.current.has(peerId))
+        .slice(0, 4) ?? [];
+      for (const peerId of peers) {
+        if (!transport) break;
+        try {
+          const found = await findObject(
+            localIdentity.id,
+            peerId,
+            id,
+            transport,
+            store,
+            2,
+            (request) => handleAcceptedDeleteRequest(request, false)
+          );
+          if (!found) continue;
+          if (found.object_type === 'mycelium.post' && await validateObject(found)) {
+            const authorFingerprint = await resolvePostAuthorFingerprint(found.author);
+            recordNewEligibleHomePosts([
+              createLocalPostView(found as PostObject, authorFingerprint, { source: 'peer' })
+            ]);
+            await cachePostChain(found);
+          }
+          if (found.object_type === 'mycelium.dm') inboxServiceRef.current?.notifyObjectStored(found);
+          if (found.object_type === 'mycelium.reply' || found.object_type === 'mycelium.post') {
+            void replyUnread.discover([found]);
+          }
+          await refreshObjectStore();
+          return true;
+        } catch {
+          addLog('Web Push reference retrieval failed; it remains staged for a later attempt');
+        }
+      }
+      return false;
+    };
+
+    const handleMessage = (event: MessageEvent<unknown>) => {
+      const message = event.data;
+      if (!message || typeof message !== 'object' || Array.isArray(message)
+        || (message as { type?: unknown }).type !== WEB_PUSH_STAGED_MESSAGE_TYPE) return;
+      const items = (message as { items?: unknown }).items;
+      if (!Array.isArray(items) || items.length > WEB_PUSH_STAGING_MAX_ENTRIES) return;
+      const source = event.source;
+      void (async () => {
+        const acknowledged: string[] = [];
+        for (const item of items) {
+          if (disposed || !item || typeof item !== 'object' || Array.isArray(item)) continue;
+          const candidate = item as { id?: unknown; envelope?: unknown };
+          if (typeof candidate.id !== 'string' || !/^[0-9a-f]{64}$/.test(candidate.id)) continue;
+          const id = candidate.id;
+          if (webPushProcessingIdsRef.current.has(id)) continue;
+          webPushProcessingIdsRef.current.add(id);
+          try {
+            if (await processItem(id, candidate.envelope)) acknowledged.push(id);
+          } catch {
+            addLog('Web Push staged item processing failed; it remains staged for a later attempt');
+          } finally {
+            webPushProcessingIdsRef.current.delete(id);
+          }
+        }
+        acknowledge(source, acknowledged);
+      })();
+    };
+
+    const requestDrain = () => {
+      void navigator.serviceWorker.ready.then((registration) => {
+        if (!disposed) {
+          (navigator.serviceWorker.controller ?? registration.active)?.postMessage({
+            type: 'MYCELIUM_PUSH_DRAIN_V1'
+          });
+        }
+      }).catch(() => {
+        if (!disposed) addLog('Web Push staging is unavailable in this browser session');
+      });
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleMessage);
+    window.addEventListener('focus', requestDrain);
+    window.addEventListener('online', requestDrain);
+    requestDrain();
+    return () => {
+      disposed = true;
+      navigator.serviceWorker.removeEventListener('message', handleMessage);
+      window.removeEventListener('focus', requestDrain);
+      window.removeEventListener('online', requestDrain);
+    };
+  }, [identity?.id, connectedPeerIds.join(',')]);
 
   const logPostChainResult = (postId: string, result: PostChainResult) => {
     if (result.complete && result.storageFailures.length === 0) {
