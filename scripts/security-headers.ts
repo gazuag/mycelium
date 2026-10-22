@@ -2,6 +2,7 @@ export interface SecurityHeadersOptions {
   signalOrigins: string[];
   meteredDomain: string;
   enforce: boolean;
+  webPushSenderUrl?: string;
 }
 
 function normalizeHostname(domain: string): string {
@@ -42,10 +43,25 @@ function normalizeSignalOrigin(origin: string): string {
   return url.origin;
 }
 
+function normalizeWebPushSenderOrigin(rawUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid VITE_WEB_PUSH_SENDER_URL: expected an HTTPS origin.');
+  }
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password
+    || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('Invalid VITE_WEB_PUSH_SENDER_URL: expected an HTTPS origin without path, credentials, query, or fragment.');
+  }
+  return url.origin;
+}
+
 export function buildSecurityHeaders({
   signalOrigins,
   meteredDomain,
-  enforce
+  enforce,
+  webPushSenderUrl
 }: SecurityHeadersOptions): string {
   if (!meteredDomain.trim()) {
     throw new Error('VITE_METERED_APP_DOMAIN is required to build Cloudflare security headers.');
@@ -53,7 +69,15 @@ export function buildSecurityHeaders({
 
   const hostname = normalizeHostname(meteredDomain);
   const connectOrigins = [...new Set(signalOrigins.map(normalizeSignalOrigin))];
-  const connectSources = ["'self'", ...connectOrigins, `https://${hostname}`].join(' ');
+  const webPushSenderOrigin = webPushSenderUrl?.trim()
+    ? normalizeWebPushSenderOrigin(webPushSenderUrl.trim())
+    : null;
+  const connectSources = [
+    "'self'",
+    ...connectOrigins,
+    `https://${hostname}`,
+    ...(webPushSenderOrigin ? [webPushSenderOrigin] : [])
+  ].join(' ');
   const csp = [
     "default-src 'self'",
     "base-uri 'none'",

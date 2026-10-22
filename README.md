@@ -43,8 +43,11 @@ than the remaining allowance before the client can abort it.
 - `src/p2p/signalling.ts` — WebSocket signalling connection.
 - `src/p2p/webrtc.ts` — WebRTC peer connection and data channel.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.
+- `src/services/web-push-encryption.ts` — browser-side RFC 8291 Web Push payload encryption.
+- `src/services/web-push-sender.ts` — optional authenticated request to the Web Push sender.
 - `src/markdown/external-content.ts` — safe URL handling, Markdown image-size metadata, and bounded raster image loading.
 - `server.py` — Python WebSocket server handling signalling and discovery over one WebSocket endpoint.
+- `server_push.py` — separate TLS-only authenticated Web Push sender; it does not persist objects or subscriptions.
 
 ## Install dependencies
 
@@ -91,11 +94,25 @@ The server listens for peer signalling and discovery on port `8443`. The deploye
 - The build generates `dist/_headers` with a report-only Content Security Policy by default. Set `VITE_CSP_ENFORCE=true` for a production build to enforce it. Check the browser DevTools Console for CSP violation reports before enabling enforcement; inspect the document response headers in the Network panel to confirm the policy was served.
 - CSP cannot restrict WebRTC ICE/STUN traffic. The `connect-src` policy covers signalling and Metered HTTPS requests, not peer-connection ICE/STUN activity.
 - Set `VITE_METERED_APP_DOMAIN` to the Metered app hostname when building. An optional `VITE_EXTRA_SIGNAL_ORIGIN` may add one additional `wss://` origin to `connect-src`.
+- To enable the optional sender client, set `VITE_WEB_PUSH_PUBLIC_KEY` to the VAPID public key and `VITE_WEB_PUSH_SENDER_URL` to the HTTPS sender origin before building. The generated CSP adds only that exact sender origin. Leave the sender URL unset to keep the client sending path unavailable.
 
 ## Server configuration
 
 - The frontend defaults to `wss://discover.unfilter.ing:8443` for all server communication (signalling and discovery).
 - Although the runtime supports a `globalThis.VITE_SIGNAL_SERVER_URL` override, Vite does not automatically expose a `VITE_SIGNAL_SERVER_URL` environment variable as that global. Setting it in a Vite `.env` file alone therefore does not override the server URL.
+
+### Optional Web Push sender
+
+The sender is a separate process and TLS listener; it does not change the WebSocket signaling/discovery listener. Run it with `python3 server_push.py` only after setting the `WEB_PUSH_*` variables shown in `.env.example`. It requires:
+
+- `WEB_PUSH_TLS_CERT_PATH` and `WEB_PUSH_TLS_KEY_PATH` for its HTTPS listener. The repository does not define the VPS certificate or deployment topology; configure these paths and expose the listener only in the deployment environment. The sender refuses to start without TLS.
+- `WEB_PUSH_VAPID_PRIVATE_KEY` (URL-safe base64 P-256 private scalar), `WEB_PUSH_VAPID_PUBLIC_KEY` (matching URL-safe base64 uncompressed P-256 public point), and `WEB_PUSH_VAPID_SUBJECT` (`mailto:` or HTTPS contact URI). Keep the private key exclusively in server-side secret configuration. The public key must match build-time `VITE_WEB_PUSH_PUBLIC_KEY`.
+- `WEB_PUSH_ALLOWED_ORIGINS`, a comma-separated exact list of push-service HTTPS origins, and `WEB_PUSH_CORS_ORIGINS`, a comma-separated exact list of application HTTPS origins. Both are required and fail closed when empty. Do not use wildcard values.
+- `WEB_PUSH_BIND_HOST` and `WEB_PUSH_PORT` for the listener. The defaults are loopback and port 8444; bind/expose them according to the actual TLS deployment, not by assuming the signaling server’s certificate, address, or port.
+
+The sender accepts one short-lived, identity-signed encrypted request at `POST /v1/push`. Its canonical request format is `mycelium-web-push-request-v1` and signs the method, path, public key, fingerprint, exact destination endpoint, timestamp, nonce, TTL, content headers, and SHA-256 hash of the exact encrypted body. Replay protection is in-memory, bounded, per process, and resets on restart. Requests are rate- and size-limited; DNS answers are checked and pinned for the connection, redirects are disabled, and upstream TLS verification remains enabled. The server sees the destination endpoint, request timing/size, source IP, and sender public identity, but not plaintext. It stores no subscription, message, ciphertext, or queue.
+
+Identity signatures show possession of a Mycelium key; identities are permissionless and do not establish a unique person or recipient consent. Rate limits therefore cannot fully prevent Sybil abuse. Push acceptance is best-effort and is not proof that a recipient received, authenticated, stored, or processed a Mycelium object. The sender does not retry.
 
 ## What travels through the signalling server
 

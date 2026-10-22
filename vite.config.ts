@@ -19,11 +19,13 @@ function cloudflareSecurityHeaders(): Plugin {
       const signalOrigins = ['wss://discover.unfilter.ing:8443'];
       const extraSignalOrigin = env.VITE_EXTRA_SIGNAL_ORIGIN?.trim();
       if (extraSignalOrigin) signalOrigins.push(extraSignalOrigin);
+      const webPushSenderUrl = env.VITE_WEB_PUSH_SENDER_URL?.trim();
 
       headers = buildSecurityHeaders({
         signalOrigins,
         meteredDomain,
-        enforce: env.VITE_CSP_ENFORCE === 'true'
+        enforce: env.VITE_CSP_ENFORCE === 'true',
+        webPushSenderUrl
       });
     },
     generateBundle() {

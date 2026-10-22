@@ -56,6 +56,29 @@ describe('Cloudflare security headers', () => {
     )).toBe(true);
   });
 
+  it('adds only the configured HTTPS Web Push sender origin', () => {
+    const headers = buildSecurityHeaders({
+      ...options,
+      webPushSenderUrl: 'https://push-api.example.net:9443'
+    });
+    const csp = headers.split('\n').find((line) => line.includes('Content-Security-Policy'))!;
+    const connectSrc = csp.match(/connect-src ([^;]+)/)?.[1];
+
+    expect(connectSrc?.split(' ')).toContain('https://push-api.example.net:9443');
+    expect(connectSrc).not.toContain('*');
+  });
+
+  it('rejects an insecure or non-origin Web Push sender URL', () => {
+    for (const webPushSenderUrl of [
+      'http://push-api.example.net',
+      'https://user:password@push-api.example.net',
+      'https://push-api.example.net/path',
+      'https://push-api.example.net?query=1'
+    ]) {
+      expect(() => buildSecurityHeaders({ ...options, webPushSenderUrl })).toThrow(/VITE_WEB_PUSH_SENDER_URL/);
+    }
+  });
+
   it('uses the correct CSP header name for report-only and enforce modes', () => {
     expect(buildSecurityHeaders(options)).toContain('Content-Security-Policy-Report-Only:');
     expect(buildSecurityHeaders({ ...options, enforce: true })).toContain('Content-Security-Policy:');
