@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Contact } from '../types';
 import { postReplyTo, type DeletionTombstone, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
+import { MarkdownComposer } from '../components/MarkdownComposer';
 import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
@@ -56,7 +57,7 @@ export function ConversationPage({
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [publishToDiscovery, setPublishToDiscovery] = useState(true);
-  const selectedReplyTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [selectedReplyTextarea, setSelectedReplyTextarea] = useState<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (!focusedPostId) return;
@@ -92,8 +93,8 @@ export function ConversationPage({
 
   useEffect(() => {
     if (replyingToPostId !== post.object.object_id) return;
-    selectedReplyTextareaRef.current?.focus();
-  }, [replyingToPostId, post.object.object_id]);
+    selectedReplyTextarea?.focus();
+  }, [replyingToPostId, post.object.object_id, selectedReplyTextarea]);
 
   const toggleReplyComposer = (objectId: string) => {
     setReplyingToPostId((previous) => previous === objectId ? null : objectId);
@@ -169,12 +170,12 @@ export function ConversationPage({
     );
     const textarea = (
       <div className="markdown-compose-field">
-        <textarea
-          ref={objectId === post.object.object_id ? selectedReplyTextareaRef : undefined}
+        <MarkdownComposer
+          textareaRef={objectId === post.object.object_id ? setSelectedReplyTextarea : undefined}
           value={replyText}
-          onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
+          onChange={(value) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: value }))}
           placeholder={`Reply to ${authorName}...`}
-          aria-label={`Reply to ${authorName}`}
+          ariaLabel={`Reply to ${authorName}`}
         />
         <MarkdownHelp />
       </div>

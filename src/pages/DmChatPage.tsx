@@ -9,6 +9,7 @@ import type { DmConversationOutbox, DmConversationService } from '../hooks/useDm
 import { useDmConversation } from '../hooks/useDmConversation';
 import type { SenderEncryptionKeyResolver } from '../object-layer/dm-inbox';
 import type { ObjectStore } from '../object-layer/types';
+import { MarkdownComposer } from '../components/MarkdownComposer';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { MarkdownHelp } from '../components/MarkdownHelp';
 import { checkExternalImageSizes, encodeMarkdownMessage } from '../markdown/external-content';
@@ -193,17 +194,17 @@ export function DmChatPage({
 
       <div className="chat-input-row dm-compose">
         <div className="dm-compose-main">
-          <textarea
+          <MarkdownComposer
             value={draft}
-            onChange={(event) => {
-              setDraft(event.target.value);
+            onChange={(value) => {
+              setDraft(value);
               setOfflineNote('');
             }}
             onKeyDown={handleKeyDown}
             placeholder={noKey ? 'Connect to exchange encryption keys' : 'Message…'}
             autoComplete="off"
             disabled={!canSend}
-            aria-label="Message"
+            ariaLabel="Message"
           />
           <MarkdownHelp />
           <span className={draft.length > MAX_MESSAGE_LENGTH ? 'dm-character-count over-limit' : 'dm-character-count'}>

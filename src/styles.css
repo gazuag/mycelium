@@ -1347,6 +1347,117 @@ body, html, #root {
   width: 100%;
 }
 
+.markdown-composer {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.markdown-composer > textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.markdown-composer-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.markdown-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.markdown-toolbar button {
+  display: inline-flex;
+  min-width: 2rem;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.markdown-toolbar button:hover,
+.markdown-toolbar button.active {
+  border-color: var(--color-border);
+  background: var(--color-surface-subtle);
+  color: var(--color-text);
+}
+
+.markdown-toolbar button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+.markdown-toolbar .markdown-preview-toggle {
+  width: auto;
+  margin-left: 0.25rem;
+  padding-inline: 0.55rem;
+  font-size: var(--font-size-sm);
+}
+
+.markdown-link-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-subtle);
+}
+
+.markdown-link-form label {
+  display: grid;
+  flex: 1 1 10rem;
+  gap: 0.2rem;
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.markdown-link-form input {
+  width: 100%;
+  min-width: 0;
+}
+
+.markdown-composer-preview {
+  width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-subtle);
+}
+
+.markdown-preview-link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview .markdown-image-placeholder {
+  display: inline-flex;
+}
+
 .markdown-help-link {
   display: inline-flex;
   align-items: center;

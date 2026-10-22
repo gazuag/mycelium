@@ -20,13 +20,19 @@ interface MarkdownContentProps {
   source: string;
   imageSizes?: unknown;
   className?: string;
+  preview?: boolean;
 }
 
-export function MarkdownContent({ source, imageSizes, className = 'markdown-content' }: MarkdownContentProps) {
+export function MarkdownContent({
+  source,
+  imageSizes,
+  className = 'markdown-content',
+  preview = false
+}: MarkdownContentProps) {
   const tokens = lexMarkdown(source);
   return (
     <div className={className}>
-      {renderTokens(tokens, imageSizes)}
+      {renderTokens(tokens, imageSizes, false, 0, preview)}
     </div>
   );
 }
@@ -43,30 +49,33 @@ function renderTokens(
   tokens: readonly Token[],
   imageSizes: unknown,
   stripUnderlineMarkers = false,
-  depth = 0
+  depth = 0,
+  preview = false
 ): ReactNode[] {
   if (depth > 32) return tokens.map((token) => token.raw);
   return tokens.map((token, index) => {
     const key = `${token.type}-${index}`;
     switch (token.type) {
       case 'paragraph':
-        return <p key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1)}</p>;
+        return <p key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</p>;
       case 'blockquote':
-        return <blockquote key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1)}</blockquote>;
+        return <blockquote key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</blockquote>;
       case 'strong':
         if (token.raw.includes('\uE000')) {
-          return <u key={key}>{renderTokens(token.tokens ?? [], imageSizes, true, depth + 1)}</u>;
+          return <u key={key}>{renderTokens(token.tokens ?? [], imageSizes, true, depth + 1, preview)}</u>;
         }
         if (token.raw.startsWith('__')) return token.raw;
-        return <strong key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1)}</strong>;
+        return <strong key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</strong>;
       case 'em':
         return token.raw.startsWith('_')
           ? token.raw
-          : <em key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1)}</em>;
+          : <em key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</em>;
       case 'link': {
         const destination = validateExternalUrl(token.href);
-        const label = renderTokens(token.tokens ?? [], imageSizes, false, depth + 1);
-        return destination
+        const label = renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview);
+        return destination && preview
+          ? <span key={key} className="markdown-preview-link" title={destination.href}>{label}</span>
+          : destination
           ? <InterstitialLink key={key} destination={destination.href}>{label}</InterstitialLink>
           : <span key={key}>{label}</span>;
       }

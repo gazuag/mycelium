@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
+import { MarkdownComposer } from '../components/MarkdownComposer';
 import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
@@ -92,7 +93,7 @@ export function HomePage({
   );
   const [autoLoadAvailable, setAutoLoadAvailable] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [composerElement, setComposerElement] = useState<HTMLTextAreaElement | null>(null);
   const pendingCaret = useRef<number | null>(null);
   const mentionPeers = useMemo(
     () => relationshipContacts(mentionContacts, myPublicKey, myPeerId ?? ''),
@@ -103,11 +104,11 @@ export function HomePage({
     : [];
 
   useBrowserLayoutEffect(() => {
-    if (pendingCaret.current === null || !composerRef.current) return;
-    composerRef.current.focus();
-    composerRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
+    if (pendingCaret.current === null || !composerElement) return;
+    composerElement.focus();
+    composerElement.setSelectionRange(pendingCaret.current, pendingCaret.current);
     pendingCaret.current = null;
-  }, [postText]);
+  }, [composerElement, postText]);
 
   useEffect(() => {
     if (!postText) setSelectedMentions([]);
@@ -121,7 +122,7 @@ export function HomePage({
     if (!activeMention) return;
     const handle = peerMentionHandle(contact);
     if (!handle) return;
-    const composer = composerRef.current;
+    const composer = composerElement;
     const caret = composer?.selectionStart ?? postText.length;
     const insertion = insertMention(postText, caret, activeMention, handle);
     const mention: PostMention = {
@@ -210,12 +211,12 @@ export function HomePage({
             <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" />
           </button>
           <div className="markdown-compose-field">
-            <textarea
-              ref={composerRef}
+            <MarkdownComposer
+              textareaRef={setComposerElement}
               value={postText}
-              onChange={(event) => {
-                onPostTextChange(event.target.value);
-                updateActiveMention(event.target.value, event.currentTarget.selectionStart);
+              onChange={(value, caretPosition) => {
+                onPostTextChange(value);
+                updateActiveMention(value, caretPosition ?? composerElement?.selectionStart ?? value.length);
               }}
               onClick={(event) => updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart)}
               onKeyUp={(event) => {
@@ -371,9 +372,9 @@ export function HomePage({
                 replyComposer={isReplying ? (
                   <>
                     <div className="markdown-compose-field">
-                      <textarea
+                      <MarkdownComposer
                         value={replyText}
-                        onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: event.target.value }))}
+                        onChange={(value) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: value }))}
                         placeholder="Write a reply..."
                       />
                       <MarkdownHelp />
