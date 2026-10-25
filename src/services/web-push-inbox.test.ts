@@ -169,6 +169,12 @@ describe('service-worker Web Push staging', () => {
       failStorage() {
         failStorage = true;
       },
+      addStagedEntry(id: string, response: Response) {
+        records.set(
+          new URL(`/__mycelium_push_staging_v1__/${id}`, 'https://mycelium.example').toString(),
+          response.clone()
+        );
+      },
       async dispatchPush(value: unknown) {
         const raw = JSON.stringify(value);
         let pending: Promise<unknown> = Promise.resolve();
@@ -219,6 +225,46 @@ describe('service-worker Web Push staging', () => {
     const staged = await [...harness.records.values()][0]?.json();
     expect(staged).toEqual({ version: 1, type: 'object', object: OBJECT });
     expect((staged as { object: DistributedObject }).object.signature).toBe('not-a-valid-signature');
+  });
+
+  it('discards malformed cached JSON and still hands later valid entries to normal verification', async () => {
+    const harness = createWorkerHarness();
+    const malformedId = '0'.repeat(64);
+    const validEnvelope = { version: 1, type: 'object', object: OBJECT };
+    const validId = OBJECT.object_id;
+    harness.addStagedEntry(malformedId, new Response('{ malformed json', {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Mycelium-Staged-At': String(Date.now())
+      }
+    }));
+    await harness.dispatchPush(validEnvelope);
+
+    const client = { postMessage: vi.fn((message) => harness.clientMessages.push(message)) };
+    await harness.dispatchDrain(client);
+
+    expect(harness.records.has(
+      new URL(`/__mycelium_push_staging_v1__/${malformedId}`, 'https://mycelium.example').toString()
+    )).toBe(false);
+    expect(harness.clientMessages[0]).toMatchObject({
+      type: WEB_PUSH_STAGED_MESSAGE_TYPE,
+      items: [{ id: validId, envelope: validEnvelope }]
+    });
+
+    const put = vi.fn(async () => true);
+    const accepted = await receiveObjectPacket({
+      protocol: 'mycelium',
+      version: 1,
+      id: 'push-stage-regression',
+      type: 'OBJECT_STORE',
+      timestamp: new Date().toISOString(),
+      sender: 'web-push',
+      recipient: null,
+      payload: { object: validEnvelope.object },
+      signature: 'untrusted-internal-handoff'
+    }, { put } as unknown as ObjectStore);
+    expect(accepted).toBe(false);
+    expect(put).not.toHaveBeenCalled();
   });
 
   it('deduplicates repeated deliveries by canonical object ID', async () => {

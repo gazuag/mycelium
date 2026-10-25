@@ -1332,7 +1332,7 @@ function App() {
       if (!store || !localIdentity) return false;
 
       if (envelope.type === 'object') {
-        if (!(await validateObject(envelope.object))) return true;
+        if (!(await validateObject(envelope.object))) return false;
         const packet = await buildObjectStorePacket(localIdentity.id, localIdentity.id, envelope.object);
         await handleObjectPacket('web-push', packet);
         const stored = await store.get(id);

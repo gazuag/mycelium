@@ -129,22 +129,42 @@ async function sendStagedItems(client) {
     const items = [];
     for (const key of keys.slice(0, PUSH_STAGING_MAX_ENTRIES)) {
       const id = new URL(key.url).pathname.slice(PUSH_STAGING_PATH.length);
-      if (!isObjectId(id)) continue;
-      const response = await cache.match(key);
+      if (!isObjectId(id)) {
+        await discardStagedEntry(cache, key);
+        continue;
+      }
+      let response;
+      try {
+        response = await cache.match(key);
+      } catch {
+        continue;
+      }
       if (!response) continue;
-      const stagedAt = Number(response.headers.get('X-Mycelium-Staged-At'));
-      if (!Number.isFinite(stagedAt) || Date.now() - stagedAt > PUSH_STAGING_TTL_MS) {
-        await cache.delete(key);
-        continue;
+      try {
+        const stagedAt = Number(response.headers.get('X-Mycelium-Staged-At'));
+        if (!Number.isFinite(stagedAt) || Date.now() - stagedAt > PUSH_STAGING_TTL_MS) {
+          await discardStagedEntry(cache, key);
+          continue;
+        }
+        const envelope = parseEnvelope(await response.json());
+        if (!envelope || (envelope.type === 'object' ? envelope.object.object_id : envelope.object_id) !== id) {
+          await discardStagedEntry(cache, key);
+          continue;
+        }
+        items.push({ id, envelope });
+      } catch {
+        await discardStagedEntry(cache, key);
       }
-      const envelope = parseEnvelope(await response.json());
-      if (!envelope || (envelope.type === 'object' ? envelope.object.object_id : envelope.object_id) !== id) {
-        await cache.delete(key);
-        continue;
-      }
-      items.push({ id, envelope });
     }
     client.postMessage({ type: PUSH_STAGED_MESSAGE_TYPE, items });
+  } catch {
+    return;
+  }
+}
+
+async function discardStagedEntry(cache, key) {
+  try {
+    await cache.delete(key);
   } catch {
     return;
   }
