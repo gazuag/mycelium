@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { SettingsPage } from './SettingsPage';
+import { DEFAULT_WEB_PUSH_NOTIFICATION_PREFERENCES } from '../services/web-push-notifications';
 
 describe('SettingsPage', () => {
   it('separates settings from diagnostics and keeps Add Peer in the Settings panel', () => {
@@ -21,11 +22,15 @@ describe('SettingsPage', () => {
         recommendationFrequency={2}
         discoveryFrequency={6}
         onSaveInjectionFrequencies={vi.fn()}
+        publishToDiscovery
+        onSavePublishToDiscovery={vi.fn(() => true)}
         objectStorageLimitMb={500}
         objectStorageUsedBytes={12_345_678}
         onSaveObjectStorageLimit={vi.fn(() => true)}
         externalImageLimitMb={5}
         onSaveExternalImageLimit={vi.fn(() => true)}
+        webPushNotificationPreferences={DEFAULT_WEB_PUSH_NOTIFICATION_PREFERENCES}
+        onSaveWebPushNotificationPreference={vi.fn(() => true)}
         onWebPushChanged={vi.fn(async () => {})}
         onExportIdentity={vi.fn()}
         onImportIdentity={vi.fn()}
@@ -35,7 +40,14 @@ describe('SettingsPage', () => {
     );
 
     expect(markup).toContain('<h3>Settings</h3>');
+    expect(markup).toContain('<h3 id="post-publishing-settings-heading">Post publishing</h3>');
+    expect(markup).toContain('>Publish to discovery</span>');
     expect(markup).toContain('<h3 id="web-push-settings-heading">Web Push</h3>');
+    expect(markup).toContain('Notification preferences');
+    expect(markup).toContain('>Direct messages</span>');
+    expect(markup).toContain('>Replies to your posts</span>');
+    expect(markup).toContain('>New posts from people you follow</span>');
+    expect(markup).toContain('never request notification permission or enable Web Push');
     expect(markup).toContain('Enable Web Push');
     expect(markup).toContain('requests notification permission only after you choose this action');
     expect(markup).toContain('<h3>Diagnostics</h3>');

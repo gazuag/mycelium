@@ -112,6 +112,14 @@ afterEach(() => {
 });
 
 describe('IndexedDbOutboxStore and outbox service', () => {
+  it('completes an opportunistic flush without work when the outbox is empty', async () => {
+    const { service, sendDirect, replicate } = createHarness();
+
+    await expect(service.flush()).resolves.toEqual({ processed: 0, completed: 0 });
+    expect(sendDirect).not.toHaveBeenCalled();
+    expect(replicate).not.toHaveBeenCalled();
+  });
+
   it('upgrades mycelium_objects v4 to v7 while preserving existing stores, indexes, and data', async () => {
     const request = indexedDB.open('mycelium_objects', 4);
     const database = await new Promise<IDBDatabase>((resolve, reject) => {

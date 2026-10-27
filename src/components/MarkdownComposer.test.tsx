@@ -178,6 +178,22 @@ describe('MarkdownComposer', () => {
     expect(textarea.value).toContain('https://example.com/image.png');
   });
 
+  it('places Markdown help after Preview and keeps an optional action beside the text box', async () => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(
+      <MarkdownComposer value="" onChange={vi.fn()} action={<button className="btn">Send</button>} />
+    ));
+
+    const inputRow = container.querySelector('.markdown-composer-input-row')!;
+    const toolbar = container.querySelector('.markdown-toolbar')!;
+    expect(inputRow.querySelector('textarea')).not.toBeNull();
+    expect(inputRow.querySelector('.btn')?.textContent).toBe('Send');
+    expect(Array.from(toolbar.children).indexOf(container.querySelector('.markdown-preview-toggle')!))
+      .toBeLessThan(Array.from(toolbar.children).indexOf(container.querySelector('.markdown-help-link')!));
+  });
+
   it('updates preview while typing and uses the published Markdown renderer', async () => {
     await mount('draft');
     const textarea = container!.querySelector('textarea')!;

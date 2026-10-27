@@ -21,18 +21,20 @@ interface MarkdownContentProps {
   imageSizes?: unknown;
   className?: string;
   preview?: boolean;
+  trailingContent?: ReactNode;
 }
 
 export function MarkdownContent({
   source,
   imageSizes,
   className = 'markdown-content',
-  preview = false
+  preview = false,
+  trailingContent
 }: MarkdownContentProps) {
   const tokens = lexMarkdown(source);
   return (
     <div className={className}>
-      {renderTokens(tokens, imageSizes, false, 0, preview)}
+      {renderTokens(tokens, imageSizes, false, 0, preview, trailingContent)}
     </div>
   );
 }
@@ -50,14 +52,20 @@ function renderTokens(
   imageSizes: unknown,
   stripUnderlineMarkers = false,
   depth = 0,
-  preview = false
+  preview = false,
+  trailingContent?: ReactNode
 ): ReactNode[] {
-  if (depth > 32) return tokens.map((token) => token.raw);
-  return tokens.map((token, index) => {
+  if (depth > 32) return [...tokens.map((token) => token.raw), trailingContent];
+  const renderedTokens = tokens.map((token, index) => {
     const key = `${token.type}-${index}`;
     switch (token.type) {
       case 'paragraph':
-        return <p key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</p>;
+        return (
+          <p key={key}>
+            {renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}
+            {index === tokens.length - 1 ? trailingContent : null}
+          </p>
+        );
       case 'blockquote':
         return <blockquote key={key}>{renderTokens(token.tokens ?? [], imageSizes, false, depth + 1, preview)}</blockquote>;
       case 'strong':
@@ -104,6 +112,10 @@ function renderTokens(
         return <span key={key}>{token.raw}</span>;
     }
   });
+  if (trailingContent && tokens[tokens.length - 1]?.type !== 'paragraph') {
+    renderedTokens.push(trailingContent);
+  }
+  return renderedTokens;
 }
 
 function InterstitialLink({ destination, children }: { destination: string; children: ReactNode }) {

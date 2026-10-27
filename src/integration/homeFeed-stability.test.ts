@@ -38,8 +38,8 @@ async function waitForSignalling(page: Page) {
   return identity!;
 }
 
-async function goTo(page: Page, destination: 'Home' | 'People') {
-  const heading = page.getByRole('heading', { name: destination, exact: true });
+async function goTo(page: Page, destination: 'Home' | 'People' | 'Settings') {
+  const heading = page.getByRole('heading', { name: destination, exact: true }).first();
   if (await heading.count()) return;
   await page.getByRole('button', { name: destination, exact: true }).click({ force: true });
   await expect(heading).toBeVisible();
@@ -167,14 +167,15 @@ async function createPeer(context: BrowserContext, label: string) {
 }
 
 async function submitPost(page: Page, content: string) {
+  await goTo(page, 'Settings');
+  const discoveryCheckbox = page.getByRole('checkbox', { name: 'Publish to discovery' });
+  if (await discoveryCheckbox.isChecked()) await discoveryCheckbox.uncheck({ force: true });
   await goTo(page, 'Home');
   const composer = page.getByPlaceholder('Share what is happening...');
   if (!(await composer.count())) {
     await page.getByRole('button', { name: 'Write', exact: true }).click();
   }
   await composer.fill(content);
-  const discoveryCheckbox = page.getByRole('checkbox', { name: 'Publish to discovery' });
-  if (await discoveryCheckbox.isChecked()) await discoveryCheckbox.uncheck({ force: true });
   await page.getByRole('button', { name: 'Send', exact: true }).click({ force: true });
 }
 

@@ -8,6 +8,7 @@ import {
 } from '../object-layer/storage-gc';
 import { DEFAULT_EXTERNAL_IMAGE_LIMIT_MB, MAX_EXTERNAL_IMAGE_LIMIT_MB } from '../markdown/external-content';
 import { webPushManager, type WebPushStatus } from '../services/web-push';
+import type { WebPushNotificationCategory, WebPushNotificationPreferences } from '../services/web-push-notifications';
 
 interface SettingsPageProps {
   identityId: string;
@@ -25,11 +26,15 @@ interface SettingsPageProps {
   recommendationFrequency: number;
   discoveryFrequency: number;
   onSaveInjectionFrequencies: (recommendationFrequency: number, discoveryFrequency: number) => void;
+  publishToDiscovery: boolean;
+  onSavePublishToDiscovery: (enabled: boolean) => boolean;
   objectStorageLimitMb: number;
   objectStorageUsedBytes: number | null;
   onSaveObjectStorageLimit: (limitMb: number) => boolean;
   externalImageLimitMb: number;
   onSaveExternalImageLimit: (limitMb: number) => boolean;
+  webPushNotificationPreferences: WebPushNotificationPreferences;
+  onSaveWebPushNotificationPreference: (category: WebPushNotificationCategory, enabled: boolean) => boolean;
   onWebPushChanged: () => Promise<void>;
   onExportIdentity: (passphrase: string) => Promise<void>;
   onImportIdentity: (file: File, passphrase: string) => Promise<void>;
@@ -59,11 +64,15 @@ export function SettingsPage({
   recommendationFrequency,
   discoveryFrequency,
   onSaveInjectionFrequencies,
+  publishToDiscovery,
+  onSavePublishToDiscovery,
   objectStorageLimitMb,
   objectStorageUsedBytes,
   onSaveObjectStorageLimit,
   externalImageLimitMb,
   onSaveExternalImageLimit,
+  webPushNotificationPreferences,
+  onSaveWebPushNotificationPreference,
   onWebPushChanged,
   onExportIdentity,
   onImportIdentity,
@@ -81,6 +90,7 @@ export function SettingsPage({
   const [discoveryFrequencyDraft, setDiscoveryFrequencyDraft] = useState(String(discoveryFrequency));
   const [frequencyError, setFrequencyError] = useState('');
   const [frequencySaveStatus, setFrequencySaveStatus] = useState('');
+  const [publishSettingError, setPublishSettingError] = useState('');
   const [objectStorageLimitDraft, setObjectStorageLimitDraft] = useState(String(objectStorageLimitMb));
   const [objectStorageLimitError, setObjectStorageLimitError] = useState('');
   const [objectStorageLimitSaveStatus, setObjectStorageLimitSaveStatus] = useState('');
@@ -90,6 +100,7 @@ export function SettingsPage({
   const [webPushStatus, setWebPushStatus] = useState<WebPushStatus | null>(null);
   const [webPushBusy, setWebPushBusy] = useState(false);
   const [webPushError, setWebPushError] = useState('');
+  const [notificationPreferenceError, setNotificationPreferenceError] = useState('');
   const [followConfirmation, setFollowConfirmation] = useState('');
   const followConfirmationTimer = useRef<number | undefined>(undefined);
   const [identityCopyStatus, setIdentityCopyStatus] = useState('');
@@ -246,6 +257,23 @@ export function SettingsPage({
           <h3>Settings</h3>
         </section>
 
+        <section aria-labelledby="post-publishing-settings-heading">
+          <h3 id="post-publishing-settings-heading">Post publishing</h3>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={publishToDiscovery}
+              onChange={(event) => {
+                const saved = onSavePublishToDiscovery(event.currentTarget.checked);
+                setPublishSettingError(saved ? '' : 'Publish to discovery setting could not be saved.');
+              }}
+            />
+            <span>Publish to discovery</span>
+          </label>
+          {publishSettingError ? <p className="note" role="alert">{publishSettingError}</p> : null}
+          <p className="note">When enabled, your posts and replies are shared with discovery.</p>
+        </section>
+
         <section aria-labelledby="web-push-settings-heading">
           <h3 id="web-push-settings-heading">Web Push</h3>
           <div className="add-peer-card">
@@ -275,6 +303,46 @@ export function SettingsPage({
             </div>
             <p className="note">Enabling requests notification permission only after you choose this action. Your subscription stays in browser-managed storage and is not shown or shared by this setting.</p>
           </div>
+          <h4>Notification preferences</h4>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={webPushNotificationPreferences.directMessages}
+              onChange={(event) => setNotificationPreferenceError(
+                onSaveWebPushNotificationPreference('directMessages', event.currentTarget.checked)
+                  ? ''
+                  : 'Notification preference could not be saved.'
+              )}
+            />
+            <span>Direct messages</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={webPushNotificationPreferences.replies}
+              onChange={(event) => setNotificationPreferenceError(
+                onSaveWebPushNotificationPreference('replies', event.currentTarget.checked)
+                  ? ''
+                  : 'Notification preference could not be saved.'
+              )}
+            />
+            <span>Replies to your posts</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={webPushNotificationPreferences.followedPosts}
+              onChange={(event) => setNotificationPreferenceError(
+                onSaveWebPushNotificationPreference('followedPosts', event.currentTarget.checked)
+                  ? ''
+                  : 'Notification preference could not be saved.'
+              )}
+            />
+            <span>New posts from people you follow</span>
+          </label>
+          {notificationPreferenceError ? <p className="note" role="alert">{notificationPreferenceError}</p> : null}
+          <p className="note">All three categories are enabled by default. These local preferences only control notifications; verification, storage, and P2P synchronization continue when a category is disabled. They never request notification permission or enable Web Push, and notifications are shown only if permission is already granted.</p>
+          <p className="note">The app verifies and classifies objects before notifying. iOS Home Screen apps require a visible notification for each push, so respecting a disabled category and verifying while the app is closed can make background push delivery unreliable. Mycelium does not show notifications against a disabled preference.</p>
         </section>
 
         <section>

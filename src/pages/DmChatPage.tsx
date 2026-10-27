@@ -11,7 +11,6 @@ import type { SenderEncryptionKeyResolver } from '../object-layer/dm-inbox';
 import type { ObjectStore } from '../object-layer/types';
 import { MarkdownComposer } from '../components/MarkdownComposer';
 import { MarkdownContent } from '../components/MarkdownContent';
-import { MarkdownHelp } from '../components/MarkdownHelp';
 import { checkExternalImageSizes, encodeMarkdownMessage } from '../markdown/external-content';
 
 const MAX_MESSAGE_LENGTH = 4000;
@@ -205,20 +204,21 @@ export function DmChatPage({
             autoComplete="off"
             disabled={!canSend}
             ariaLabel="Message"
+            action={
+              <button
+                className="btn"
+                onClick={() => void submit()}
+                type="button"
+                disabled={!isDmDraftSendable(draft, canSend) || sending || checkingImages}
+              >
+                {checkingImages ? 'Checking images…' : sending ? 'Sending…' : 'Send'}
+              </button>
+            }
           />
-          <MarkdownHelp />
           <span className={draft.length > MAX_MESSAGE_LENGTH ? 'dm-character-count over-limit' : 'dm-character-count'}>
             {draft.length}/{MAX_MESSAGE_LENGTH}
           </span>
         </div>
-        <button
-          className="btn"
-          onClick={() => void submit()}
-          type="button"
-          disabled={!isDmDraftSendable(draft, canSend) || sending || checkingImages}
-        >
-          {checkingImages ? 'Checking images…' : sending ? 'Sending…' : 'Send'}
-        </button>
       </div>
       {noKey && (
         <p className="dm-compose-note">

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { LocalPostView } from '../object-layer';
 import { postContent, postImageSizes, postTags } from '../object-layer';
 import { IdentityAvatar } from './IdentityAvatar';
@@ -5,6 +6,8 @@ import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
 import { MarkdownContent } from './MarkdownContent';
+
+const POST_PREVIEW_LENGTH = 300;
 
 interface PostCardProps {
   post: LocalPostView;
@@ -55,8 +58,11 @@ export function PostCard({
   isOwnPost = false,
   authorOnline = false
 }: PostCardProps) {
+  const [expanded, setExpanded] = useState(false);
   const isLiked = isLikedOverride ?? false;
   const content = postContent(post);
+  const isTruncated = !expanded && content.length > POST_PREVIEW_LENGTH;
+  const displayedContent = isTruncated ? `${content.slice(0, POST_PREVIEW_LENGTH)}…` : content;
 
   return (
     <article
@@ -84,7 +90,7 @@ export function PostCard({
         {...(onOpenPost ? {
           role: 'button',
           tabIndex: 0,
-          'aria-label': `Open conversation for post by ${authorName}: ${content}`,
+          'aria-label': `Open conversation for post by ${authorName}: ${displayedContent}${isTruncated ? ' More available.' : ''}`,
           onClick: (event: React.MouseEvent<HTMLDivElement>) => {
             const target = event.target;
             const interactiveTarget = target instanceof Element
@@ -110,7 +116,20 @@ export function PostCard({
         ) : null}
 
         <div className="post-content">
-          <MarkdownContent source={content} imageSizes={postImageSizes(post)} />
+          <MarkdownContent
+            source={displayedContent}
+            imageSizes={postImageSizes(post)}
+            trailingContent={isTruncated ? (
+              <button
+                className="post-content-more"
+                type="button"
+                aria-label="Show full post"
+                onClick={() => setExpanded(true)}
+              >
+                more...
+              </button>
+            ) : null}
+          />
         </div>
 
         {postTags(post).length > 0 ? (

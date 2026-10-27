@@ -78,6 +78,14 @@ python3 server.py
 
 The server listens for peer signalling and discovery on port `8443`. The deployed secure WebSocket endpoint is `wss://discover.unfilter.ing:8443`.
 
+### Standalone Python bootstrap peer
+
+The optional cache/relay peer under [`bot/`](./bot/) uses the existing WebRTC
+data-channel protocol and signalling endpoint. It has its own persistent
+identity and SQLite store; it does not use a browser identity or create social
+objects. See [`bot/README.md`](./bot/README.md) for installation, VPS
+configuration, and tests.
+
 ## Testing with two browser windows or devices
 
 1. Open the app in two browser windows or two devices.
@@ -115,7 +123,11 @@ The sender accepts one short-lived, identity-signed encrypted request at `POST /
 
 Identity signatures show possession of a Mycelium key; identities are permissionless and do not establish a unique person or recipient consent. Rate limits therefore cannot fully prevent Sybil abuse. Push acceptance is best-effort and is not proof that a recipient received, authenticated, stored, or processed a Mycelium object. The sender does not retry.
 
-Incoming push payloads are currently accepted only in the versioned JSON forms `{ "version": 1, "type": "object", "object": <signed Mycelium object> }` and `{ "version": 1, "type": "reference", "object_id": "<64 lowercase hex characters>" }`. The service worker places at most 32 envelopes (each no larger than 3,900 UTF-8 bytes) in a dedicated Cache API staging cache, expiring entries after seven days; this staging is untrusted and is not the authoritative object store. When the app is open, inline objects are passed through the existing object receive and signature-verification path. References are looked up through existing FIND requests to currently connected peers and remain staged if unresolved. Ordinary posts and unverified push metadata do not generate notifications. Incoming push handling does not yet guarantee delivery, background retrieval, or notifications.
+Incoming push payloads are currently accepted only in the versioned JSON forms `{ "version": 1, "type": "object", "object": <signed Mycelium object> }` and `{ "version": 1, "type": "reference", "object_id": "<64 lowercase hex characters>" }`. The service worker places at most 32 envelopes (each no larger than 3,900 UTF-8 bytes) in a dedicated Cache API staging cache, expiring entries after seven days; this staging is untrusted and is not the authoritative object store. When the app is open, inline objects are passed through the existing object receive and signature-verification path. References are looked up through existing FIND requests to currently connected peers and remain staged if unresolved.
+
+The app can display fixed, privacy-conscious notifications for newly accepted direct messages addressed to the local identity, replies to locally authored posts, and posts by followed authors. Classification happens only after existing object verification and acceptance; duplicates, self-authored objects, tombstoned objects, and unrelated object types do not notify. The three local-only category preferences default to enabled, but changing them never enables Web Push or requests notification permission. Disabling a category affects notifications only; object verification, storage, and P2P synchronization continue normally. A notification is displayed only when browser permission is already granted. Notification text never includes message or post contents.
+
+An incoming valid push also asks any open app client to attempt the existing bounded, coalesced object-outbox flush. The service worker does not duplicate signing, authorization, or P2P transport code. With no app client open, it cannot access the identity-backed outbox or classify an object, so neither outbound flushing nor event-specific notification is guaranteed. In particular, iOS/iPadOS Home Screen apps require a visible notification for each push and silent processing is unreliable; Mycelium will not violate a disabled category preference or notify based on an unverified payload to satisfy that platform requirement. Pushes may consequently be delayed or dropped on iOS when the app cannot safely display a category notification. Web Push remains opportunistic and does not guarantee delivery or background retrieval.
 
 ## What travels through the signalling server
 

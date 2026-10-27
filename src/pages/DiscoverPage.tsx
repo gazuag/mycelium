@@ -18,6 +18,7 @@ interface DiscoverPageProps {
   initialTab?: 'posts' | 'people';
   myPeerId?: string;
   myPublicKey?: string;
+  myDisplayName?: string;
   onAuthorClick: (peerId: string) => void;
   onOpenPost?: (postId: string) => void;
   onFollow: (publicKey: string) => void;
@@ -51,6 +52,7 @@ export function DiscoverPage({
   initialTab = 'posts',
   myPeerId,
   myPublicKey,
+  myDisplayName = '',
   onAuthorClick,
   onOpenPost,
   onFollow,
@@ -186,9 +188,13 @@ export function DiscoverPage({
                 contact.fingerprint === post.authorFingerprint || contact.publicKey === post.object.author
               );
               const authorFingerprint = post.authorFingerprint || matchedContact?.fingerprint || post.object.author;
-              const authorName = matchedContact
-                ? displayNameOrFallback(matchedContact.displayName, authorFingerprint)
-                : displayNameOrFallback(undefined, authorFingerprint);
+              const isOwnPost = authorFingerprint === myPeerId || post.object.author === myPublicKey;
+              const authorDisplayName = isOwnPost ? myDisplayName : matchedContact?.displayName;
+              const authorName = isOwnPost
+                ? displayNameOrFallback(myDisplayName, authorFingerprint)
+                : matchedContact
+                  ? displayNameOrFallback(matchedContact.displayName, authorFingerprint)
+                  : displayNameOrFallback(undefined, authorFingerprint);
               const recommendationSummary = getRecommendationSummary(post.object.object_id);
 
               return (
@@ -198,7 +204,7 @@ export function DiscoverPage({
                   replyCount={replyCounts?.get(post.object.object_id) ?? 0}
                   likeCount={recommendationSummary.active_recommender_count}
                   authorName={authorName}
-                  authorDisplayName={matchedContact?.displayName}
+                  authorDisplayName={authorDisplayName}
                   authorId={authorFingerprint}
                   authorOnline={matchedContact?.online === true}
                   onAuthorClick={() => onAuthorClick(authorFingerprint)}
@@ -208,7 +214,7 @@ export function DiscoverPage({
                   onDelete={onDelete}
                   onReply={() => {} }
                   isLiked={recommendationSummary.recommended_by_me}
-                  isOwnPost={authorFingerprint === myPeerId || post.object.author === myPublicKey}
+                  isOwnPost={isOwnPost}
                   showDislikeButton={false}
                   footerActions={
                     <div className="discover-actions">

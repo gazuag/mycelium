@@ -1,5 +1,7 @@
 import type { JsonValue, LocalPostMetadata, LocalPostMetadataStore, LocalPostView, ObjectStore, PostMention, PostObject } from './types';
 
+export const MAX_POST_CONTENT_LENGTH = 30_000;
+
 export function postPayload(view: LocalPostView): Record<string, unknown> {
   return typeof view.object.payload === 'object' && view.object.payload !== null && !Array.isArray(view.object.payload)
     ? view.object.payload as Record<string, unknown>

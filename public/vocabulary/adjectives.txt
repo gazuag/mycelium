@@ -1560,7 +1560,6 @@ unbalanced
 unbashful
 unbattered
 unbeaming
-unbelated
 unbendable
 unbitter
 unblazing
@@ -1575,7 +1574,7 @@ unbraided
 unbrainy
 unbrave
 unbreezy
-unbrilliant
+unbothered
 unbrindled
 unbrisk
 unbristly
@@ -1790,6 +1789,7 @@ unrascally
 unready
 unreckless
 unregal
+unrelated
 unrelaxed
 unresolute
 unrestless

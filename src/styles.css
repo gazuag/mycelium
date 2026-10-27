@@ -1347,6 +1347,12 @@ body, html, #root {
   width: 100%;
 }
 
+.home-composer .markdown-composer-input-row > textarea {
+  min-height: 0;
+  resize: none;
+  overflow-y: hidden;
+}
+
 .markdown-composer {
   display: flex;
   flex: 1 1 auto;
@@ -1356,9 +1362,25 @@ body, html, #root {
   width: 100%;
 }
 
-.markdown-composer > textarea {
-  width: 100%;
+.markdown-composer-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
   min-width: 0;
+  width: 100%;
+}
+
+.markdown-composer-input-row > textarea {
+  flex: 1 1 auto;
+  width: 0;
+  min-width: 0;
+}
+
+.markdown-composer-input-row > .btn {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 0.4rem 0.85rem;
+  white-space: nowrap;
 }
 
 .markdown-composer-controls {
@@ -1409,6 +1431,18 @@ body, html, #root {
   margin-left: 0.25rem;
   padding-inline: 0.55rem;
   font-size: var(--font-size-sm);
+}
+
+.markdown-toolbar .markdown-help-link {
+  width: auto;
+  min-width: 0;
+  min-height: 2rem;
+  margin-left: 0.25rem;
+  padding: 0 0.25rem;
+  border: 0;
+  background: transparent;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .markdown-link-form {
@@ -1671,6 +1705,29 @@ body, html, #root {
 
 .post-content a {
   overflow-wrap: anywhere;
+}
+
+.post-content-more {
+  display: inline;
+  margin-left: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-warning);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+.post-content-more:hover {
+  color: var(--color-warning);
+  text-decoration-thickness: 2px;
+}
+
+.post-content-more:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 .markdown-content {
@@ -2895,8 +2952,11 @@ button.post-reply-count:focus-visible {
   gap: 0.35rem;
 }
 
+.dm-compose {
+  align-items: flex-start;
+}
+
 .dm-compose textarea {
-  width: 100%;
   min-height: 2.5rem;
   max-height: 8rem;
   resize: vertical;

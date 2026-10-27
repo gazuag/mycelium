@@ -157,12 +157,16 @@ describe('LocalPostView UI migration', () => {
     expect(markup).toContain('placeholder="Share what is happening..."');
     expect(markup).toContain('class="markdown-help-link"');
     expect(markup).toContain('>Markdown formatting</button>');
+    expect(markup).toContain('rows="2"');
+    expect(markup).toContain('maxLength="30000"');
     expect(markup.indexOf('home-composer')).toBeLessThan(markup.indexOf('empty-state'));
     expect(markup).not.toContain('popular-posters-banner');
     expect(markup).not.toContain('<h2>Home</h2>');
     expect(markup).not.toContain('<h3>Create Post</h3>');
     expect(markup).not.toContain('>Hide</button>');
     expect(markup).not.toContain('>Write</button>');
+    expect(markup).not.toContain('Publish to discovery');
+    expect(markup).toContain('class="home-composer-entry"');
   });
 
   it('renders an automatic feed continuation point with a manual fallback', () => {
@@ -490,6 +494,53 @@ describe('LocalPostView UI migration', () => {
       <DiscoverPage
         discoveryPosts={[view]}
         contacts={[contact]}
+        onAuthorClick={noop}
+        onFollow={noop}
+        onLike={noop}
+        onDislike={noop}
+        onBlock={noop}
+        getRecommendationSummary={emptyRecommendationSummary}
+      />
+    );
+
+    expect(home).toContain(expectedName);
+    expect(discovery).toContain(expectedName);
+  });
+
+  it('shows the local display name for own posts in Home and Discovery without a self contact', () => {
+    const ownPeerId = '11:22:33:44:55:66:77:88';
+    const ownPublicKey = 'own-public-key';
+    const ownDisplayName = 'My Display Name';
+    const ownPost = createLocalPostView(
+      { ...makeView().object, author: ownPublicKey },
+      ownPeerId
+    );
+    const expectedName = `<span class="peer-name-primary">${ownDisplayName}</span><span class="peer-name-handle">@${fingerprintToHumanName(ownPeerId)}</span>`;
+    const home = renderToStaticMarkup(
+      <HomePage
+        posts={[ownPost]}
+        contacts={[]}
+        myPeerId={ownPeerId}
+        myPublicKey={ownPublicKey}
+        myDisplayName={ownDisplayName}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+    const discovery = renderToStaticMarkup(
+      <DiscoverPage
+        discoveryPosts={[ownPost]}
+        contacts={[]}
+        myPeerId={ownPeerId}
+        myPublicKey={ownPublicKey}
+        myDisplayName={ownDisplayName}
         onAuthorClick={noop}
         onFollow={noop}
         onLike={noop}

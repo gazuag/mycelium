@@ -121,8 +121,13 @@ describe('service-worker Web Push staging', () => {
     const handlers = new Map<string, (event: any) => void>();
     const records = new Map<string, Response>();
     const clientMessages: unknown[] = [];
-    let openClients: Array<{ postMessage: (message: unknown) => void }> = [];
+    let openClients: Array<{
+      postMessage: (message: unknown) => void;
+      url?: string;
+      focus?: () => Promise<void>;
+    }> = [];
     let failStorage = false;
+    const openWindow = vi.fn(async (_url: string) => undefined);
     const cache = {
       put: vi.fn(async (request: Request, response: Response) => {
         records.set(request.url, response.clone());
@@ -136,6 +141,7 @@ describe('service-worker Web Push staging', () => {
         location: { origin: 'https://mycelium.example' },
         clients: {
           matchAll: vi.fn(async () => openClients),
+          openWindow,
         },
         addEventListener: (type: string, listener: (event: any) => void) => handlers.set(type, listener)
       },
@@ -163,7 +169,12 @@ describe('service-worker Web Push staging', () => {
       records,
       clientMessages,
       cache,
-      setOpenClients(clients: Array<{ postMessage: (message: unknown) => void }>) {
+      openWindow,
+      setOpenClients(clients: Array<{
+        postMessage: (message: unknown) => void;
+        url?: string;
+        focus?: () => Promise<void>;
+      }>) {
         openClients = clients;
       },
       failStorage() {
@@ -199,6 +210,16 @@ describe('service-worker Web Push staging', () => {
           }
         });
         await pending;
+      },
+      async dispatchNotificationClick(notification: { close: () => void }) {
+        let pending: Promise<unknown> = Promise.resolve();
+        handlers.get('notificationclick')?.({
+          notification,
+          waitUntil(promise: Promise<unknown>) {
+            pending = promise;
+          }
+        });
+        await pending;
       }
     };
   }
@@ -225,6 +246,19 @@ describe('service-worker Web Push staging', () => {
     const staged = await [...harness.records.values()][0]?.json();
     expect(staged).toEqual({ version: 1, type: 'object', object: OBJECT });
     expect((staged as { object: DistributedObject }).object.signature).toBe('not-a-valid-signature');
+  });
+
+  it('requests an app outbox wake independently of notification preferences', async () => {
+    const harness = createWorkerHarness();
+    const client = { postMessage: vi.fn() };
+    harness.setOpenClients([client]);
+    await harness.dispatchPush({ version: 1, type: 'reference', object_id: OBJECT_ID });
+
+    expect(client.postMessage).toHaveBeenCalledWith({
+      type: WEB_PUSH_STAGED_MESSAGE_TYPE,
+      items: [{ id: OBJECT_ID, envelope: { version: 1, type: 'reference', object_id: OBJECT_ID } }]
+    });
+    expect(client.postMessage).toHaveBeenCalledWith({ type: 'MYCELIUM_PUSH_WAKE_V1' });
   });
 
   it('discards malformed cached JSON and still hands later valid entries to normal verification', async () => {
@@ -290,11 +324,18 @@ describe('service-worker Web Push staging', () => {
   it('handles storage and client communication failures without rejecting the push event', async () => {
     const unavailable = createWorkerHarness();
     unavailable.failStorage();
+    const openClient = { postMessage: vi.fn() };
+    unavailable.setOpenClients([openClient]);
     await expect(unavailable.dispatchPush({
       version: 1,
       type: 'reference',
       object_id: OBJECT_ID
     })).resolves.toBeUndefined();
+    expect(openClient.postMessage).toHaveBeenCalledWith({ type: 'MYCELIUM_PUSH_WAKE_V1' });
+    expect(openClient.postMessage).toHaveBeenCalledWith({
+      type: WEB_PUSH_STAGED_MESSAGE_TYPE,
+      items: [{ id: OBJECT_ID, envelope: { version: 1, type: 'reference', object_id: OBJECT_ID } }]
+    });
 
     const clientFailure = createWorkerHarness();
     clientFailure.setOpenClients([{ postMessage: () => { throw new Error('closed client'); } }]);
@@ -304,6 +345,26 @@ describe('service-worker Web Push staging', () => {
       object_id: OBJECT_ID
     })).resolves.toBeUndefined();
     expect(clientFailure.records.size).toBe(1);
+  });
+
+  it('notification clicks focus a same-origin app client or safely open the app root', async () => {
+    const harness = createWorkerHarness();
+    const close = vi.fn();
+    const crossOriginFocus = vi.fn(async () => undefined);
+    const appFocus = vi.fn(async () => undefined);
+    harness.setOpenClients([
+      { url: 'https://other.example/', postMessage: vi.fn(), focus: crossOriginFocus },
+      { url: 'https://mycelium.example/settings', postMessage: vi.fn(), focus: appFocus }
+    ]);
+    await harness.dispatchNotificationClick({ close });
+    expect(close).toHaveBeenCalledOnce();
+    expect(crossOriginFocus).not.toHaveBeenCalled();
+    expect(appFocus).toHaveBeenCalledOnce();
+    expect(harness.openWindow).not.toHaveBeenCalled();
+
+    harness.setOpenClients([]);
+    await harness.dispatchNotificationClick({ close: vi.fn() });
+    expect(harness.openWindow).toHaveBeenCalledWith('https://mycelium.example/');
   });
 
   it('bounds staged entries and acknowledges only valid IDs', async () => {

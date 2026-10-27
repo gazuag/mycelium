@@ -6,6 +6,7 @@ const PUSH_ENVELOPE_MAX_BYTES = 3900;
 const PUSH_STAGING_MAX_ENTRIES = 32;
 const PUSH_STAGING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUSH_STAGED_MESSAGE_TYPE = 'MYCELIUM_PUSH_STAGED_V1';
+const PUSH_WAKE_MESSAGE_TYPE = 'MYCELIUM_PUSH_WAKE_V1';
 let stagingQueue = Promise.resolve();
 
 self.addEventListener('install', (event) => {
@@ -38,19 +39,30 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  event.waitUntil(focusOrOpenApp());
 });
 
 async function handlePush(event) {
+  let id;
+  let envelope;
   try {
     if (!event.data) return;
     const bytes = await event.data.arrayBuffer();
     if (bytes.byteLength === 0 || bytes.byteLength > PUSH_ENVELOPE_MAX_BYTES) return;
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    const envelope = parseEnvelope(JSON.parse(text));
+    envelope = parseEnvelope(JSON.parse(text));
     if (!envelope) return;
-    const id = envelope.type === 'object' ? envelope.object.object_id : envelope.object_id;
+    id = envelope.type === 'object' ? envelope.object.object_id : envelope.object_id;
+  } catch {
+    return;
+  }
+  try {
     await enqueueStaging(() => storeEnvelope(id, envelope));
-    await notifyOpenClients([{ id, envelope }]);
+  } catch {
+    // An open app can still process this delivery even if staging is unavailable.
+  }
+  try {
+    await notifyOpenClients([{ id, envelope }], true);
   } catch {
     return;
   }
@@ -110,15 +122,40 @@ async function storeEnvelope(id, envelope) {
   }
 }
 
-async function notifyOpenClients(items) {
+async function notifyOpenClients(items, wakeOutbox = false) {
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   await Promise.all(clients.map(async (client) => {
     try {
       client.postMessage({ type: PUSH_STAGED_MESSAGE_TYPE, items });
     } catch {
-      return;
+      // A stale client must not suppress the independent outbox wake request.
+    }
+    if (wakeOutbox) {
+      try {
+        client.postMessage({ type: PUSH_WAKE_MESSAGE_TYPE });
+      } catch {
+        return;
+      }
     }
   }));
+}
+
+async function focusOrOpenApp() {
+  try {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of clients) {
+      try {
+        if (new URL(client.url).origin !== self.location.origin) continue;
+        await client.focus();
+        return;
+      } catch {
+        continue;
+      }
+    }
+    await self.clients.openWindow(new URL('/', self.location.origin).href);
+  } catch {
+    return;
+  }
 }
 
 async function sendStagedItems(client) {

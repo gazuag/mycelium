@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ChangeEvent, KeyboardEvent, MouseEvent } from 'react';
+import type { ChangeEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react';
 import { MarkdownContent } from './MarkdownContent';
+import { MarkdownHelp } from './MarkdownHelp';
 
 const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
@@ -10,6 +11,9 @@ type LinkKind = 'link' | 'image';
 interface MarkdownComposerProps {
   value: string;
   onChange: (value: string, caretPosition?: number) => void;
+  action?: ReactNode;
+  rows?: number;
+  maxLength?: number;
   textareaRef?: (element: HTMLTextAreaElement | null) => void;
   placeholder?: string;
   ariaLabel?: string;
@@ -23,6 +27,9 @@ interface MarkdownComposerProps {
 export function MarkdownComposer({
   value,
   onChange,
+  action,
+  rows,
+  maxLength,
   textareaRef,
   placeholder,
   ariaLabel,
@@ -138,28 +145,33 @@ export function MarkdownComposer({
 
   return (
     <div className="markdown-composer">
-      <textarea
-        ref={setTextareaRef}
-        value={value}
-        onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
-          rememberSelection(event.currentTarget);
-          onChange(event.target.value, event.currentTarget.selectionStart);
-        }}
-        onSelect={(event) => rememberSelection(event.currentTarget)}
-        onClick={(event) => {
-          rememberSelection(event.currentTarget);
-          onClick?.(event);
-        }}
-        onKeyUp={(event) => {
-          rememberSelection(event.currentTarget);
-          onKeyUp?.(event);
-        }}
-        onKeyDown={onKeyDown}
-        placeholder={placeholder}
-        aria-label={ariaLabel}
-        disabled={disabled}
-        autoComplete={autoComplete}
-      />
+      <div className="markdown-composer-input-row">
+        <textarea
+          ref={setTextareaRef}
+          value={value}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => {
+            rememberSelection(event.currentTarget);
+            onChange(event.target.value, event.currentTarget.selectionStart);
+          }}
+          onSelect={(event) => rememberSelection(event.currentTarget)}
+          onClick={(event) => {
+            rememberSelection(event.currentTarget);
+            onClick?.(event);
+          }}
+          onKeyUp={(event) => {
+            rememberSelection(event.currentTarget);
+            onKeyUp?.(event);
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          aria-label={ariaLabel}
+          rows={rows}
+          maxLength={maxLength}
+          disabled={disabled}
+          autoComplete={autoComplete}
+        />
+        {action}
+      </div>
       <div className="markdown-composer-controls">
         <div className="markdown-toolbar" role="toolbar" aria-label="Markdown formatting">
           <button type="button" title="Bold" aria-label="Bold" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat('bold')}><strong>B</strong></button>
@@ -180,6 +192,7 @@ export function MarkdownComposer({
           >
             Preview
           </button>
+          <MarkdownHelp />
         </div>
         {linkKind ? (
           <form

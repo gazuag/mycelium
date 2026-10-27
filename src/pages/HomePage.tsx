@@ -3,7 +3,6 @@ import type { Contact } from '../types';
 import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { MarkdownComposer } from '../components/MarkdownComposer';
-import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
@@ -12,6 +11,8 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { activeMentionAt, insertMention, mentionsPresentInText, type ActiveMention } from '../utils/postMentions';
 import type { PopularPeer } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
+import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
+import { resizeTextareaToRows } from '../utils/textarea';
 import {
   advancePopularPeerSuggestionsState,
   dismissPopularPeerSuggestions,
@@ -29,10 +30,12 @@ interface HomePageProps {
   contactsLoaded?: boolean;
   postText: string;
   onPostTextChange: (value: string) => void;
+  publishToDiscovery?: boolean;
   onSubmitPost: (publish: boolean, mentions: PostMention[]) => void;
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   myPeerId?: string;
+  myDisplayName?: string;
   onOpenPost?: (postId: string) => void;
   onLike: (objectId: string) => void;
   onDislike: (objectId: string) => void;
@@ -55,10 +58,12 @@ export function HomePage({
   contactsLoaded = true,
   postText,
   onPostTextChange,
+  publishToDiscovery = true,
   onSubmitPost,
   canCreatePost,
   onAuthorClick,
   myPeerId,
+  myDisplayName = '',
   onOpenPost,
   onLike,
   onDislike,
@@ -69,10 +74,8 @@ export function HomePage({
   onFollowPeer
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
-  const [publishToDiscovery, setPublishToDiscovery] = useState(true);
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  const [replyPublishToDiscovery, setReplyPublishToDiscovery] = useState(true);
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<PostMention[]>([]);
   const followedCount = contacts.filter((contact) => contact.followed).length;
@@ -109,6 +112,24 @@ export function HomePage({
     composerElement.setSelectionRange(pendingCaret.current, pendingCaret.current);
     pendingCaret.current = null;
   }, [composerElement, postText]);
+
+  useBrowserLayoutEffect(() => {
+    if (!composerElement) return;
+    resizeTextareaToRows(composerElement, 10);
+  }, [composerElement, postText]);
+
+  useEffect(() => {
+    if (!composerElement) return;
+    const resize = () => resizeTextareaToRows(composerElement, 10);
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', resize);
+      return () => window.removeEventListener('resize', resize);
+    }
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(composerElement);
+    return () => observer.disconnect();
+  }, [composerElement]);
 
   useEffect(() => {
     if (!postText) setSelectedMentions([]);
@@ -227,8 +248,19 @@ export function HomePage({
                 updateActiveMention(event.currentTarget.value, event.currentTarget.selectionStart);
               }}
               placeholder="Share what is happening..."
+              rows={2}
+              maxLength={MAX_POST_CONTENT_LENGTH}
+              action={
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => onSubmitPost(publishToDiscovery, mentionsPresentInText(postText, selectedMentions))}
+                  disabled={!canCreatePost || !postText.trim()}
+                >
+                  Send
+                </button>
+              }
             />
-            <MarkdownHelp />
           </div>
         </div>
         {activeMention ? (
@@ -240,24 +272,6 @@ export function HomePage({
             onSelect={selectMention}
           />
         ) : null}
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={publishToDiscovery}
-            onChange={(event) => setPublishToDiscovery(event.target.checked)}
-          />
-          <span>Publish to discovery</span>
-        </label>
-        <div className="row">
-          <button
-            className="btn"
-            type="button"
-            onClick={() => onSubmitPost(publishToDiscovery, mentionsPresentInText(postText, selectedMentions))}
-            disabled={!canCreatePost || !postText.trim()}
-          >
-            Send
-          </button>
-        </div>
       </div>
 
       {popularPeerSuggestionsState === 'active' && !allSuggestedPeersFollowed && popularPeers.length > 0 ? (
@@ -315,9 +329,13 @@ export function HomePage({
             const matchingContact = contacts.find((contact) =>
               contact.fingerprint === authorFingerprint || contact.publicKey === post.object.author
             );
-            const authorName = matchingContact
-              ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.object.author)
-              : displayNameOrFallback(undefined, authorFingerprint);
+            const isOwnPost = authorFingerprint === myPeerId || post.object.author === myPublicKey;
+            const authorDisplayName = isOwnPost ? myDisplayName : matchingContact?.displayName;
+            const authorName = isOwnPost
+              ? displayNameOrFallback(myDisplayName, authorFingerprint)
+              : matchingContact
+                ? displayNameOrFallback(matchingContact.displayName, matchingContact.fingerprint || matchingContact.publicKey || post.object.author)
+                : displayNameOrFallback(undefined, authorFingerprint);
             const recommendationSummary = post.recommendationSummary;
             const recommenders = recommendationSummary?.followed_recommenders ?? [];
             const recommenderNames = recommenders.slice(0, 2).map((recommender) =>
@@ -349,7 +367,7 @@ export function HomePage({
                 replyCount={replyCounts?.get(objectId) ?? 0}
                 likeCount={recommendationSummary?.active_recommender_count ?? 0}
                 authorName={authorName}
-                authorDisplayName={matchingContact?.displayName}
+                authorDisplayName={authorDisplayName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 authorOnline={matchingContact?.online === true}
                 onAuthorClick={onAuthorClick}
@@ -368,7 +386,7 @@ export function HomePage({
                 recommendationLabel={recommendationLabel}
                 discoveryLabel={post.homeFeedSource === 'discovery' ? 'You might like this' : undefined}
                 feedSource={post.homeFeedSource}
-                isOwnPost={post.authorFingerprint === myPeerId}
+                isOwnPost={isOwnPost}
                 replyComposer={isReplying ? (
                   <>
                     <div className="markdown-compose-field">
@@ -376,17 +394,9 @@ export function HomePage({
                         value={replyText}
                         onChange={(value) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: value }))}
                         placeholder="Write a reply..."
+                        maxLength={MAX_POST_CONTENT_LENGTH}
                       />
-                      <MarkdownHelp />
                     </div>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={replyPublishToDiscovery}
-                        onChange={(event) => setReplyPublishToDiscovery(event.target.checked)}
-                      />
-                      <span>Publish to discovery</span>
-                    </label>
                     <div className="row">
                       <button
                         className="btn"
@@ -394,7 +404,7 @@ export function HomePage({
                         onClick={() => {
                           const text = (replyDrafts[objectId] ?? '').trim();
                           if (!text) return;
-                          onReply(objectId, text, replyPublishToDiscovery);
+                          onReply(objectId, text, publishToDiscovery);
                           setReplyDrafts((drafts) => ({ ...drafts, [objectId]: '' }));
                           setReplyingToPostId(null);
                         }}

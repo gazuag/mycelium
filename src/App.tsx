@@ -40,6 +40,17 @@ import { canonicalize, type MyceliumPacket, type PacketSigner } from './p2p/prot
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import { webPushManager } from './services/web-push';
 import {
+  classifyNewlyAcceptedObjectNotification,
+  createPushWakeOutboxFlusher,
+  DEFAULT_WEB_PUSH_NOTIFICATION_PREFERENCES,
+  DISABLED_WEB_PUSH_NOTIFICATION_PREFERENCES,
+  parseWebPushNotificationPreferences,
+  showWebPushNotificationOnce,
+  updateWebPushNotificationPreference,
+  WEB_PUSH_NOTIFICATION_PREFERENCES_STORAGE_KEY,
+  type WebPushNotificationCategory
+} from './services/web-push-notifications';
+import {
   envelopeObjectId,
   parseIncomingWebPushEnvelope,
   WEB_PUSH_STAGED_MESSAGE_TYPE,
@@ -52,6 +63,7 @@ import { parseAddPeerInvitePath } from './utils/addPeerInvite';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
 import { composeHomeFeed } from './utils/homeFeed';
 import { mentionsPresentInText } from './utils/postMentions';
+import { MAX_POST_CONTENT_LENGTH } from './object-layer/post-state';
 import {
   checkExternalImageSizes,
   DEFAULT_EXTERNAL_IMAGE_LIMIT_MB,
@@ -138,6 +150,8 @@ interface AppNavigationState {
 }
 
 const APP_NAVIGATION_STATE_KEY = 'myceliumNavigation';
+const PUBLISH_TO_DISCOVERY_STORAGE_KEY = 'myceliumPublishToDiscovery';
+const PUSH_OUTBOX_FLUSH_COOLDOWN_MS = 30_000;
 const PAGE_KEYS: PageKey[] = ['home', 'messages', 'relationships', 'discover', 'profile', 'myProfile', 'chat', 'settings'];
 
 function readAppNavigationState(state: unknown): AppNavigationState {
@@ -271,6 +285,20 @@ function App() {
   const objectStorageLimitBytesRef = useRef(objectStorageLimitMb * BYTES_PER_MB);
   const [objectStorageUsedBytes, setObjectStorageUsedBytes] = useState<number | null>(null);
   const [externalImageLimitMb, setExternalImageLimitMb] = useState(loadExternalImageLimitMb);
+  const [publishToDiscovery, setPublishToDiscovery] = useState(() => {
+    try {
+      return localStorage.getItem(PUBLISH_TO_DISCOVERY_STORAGE_KEY) !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const [webPushNotificationPreferences, setWebPushNotificationPreferences] = useState(() => {
+    try {
+      return parseWebPushNotificationPreferences(localStorage.getItem(WEB_PUSH_NOTIFICATION_PREFERENCES_STORAGE_KEY));
+    } catch {
+      return DISABLED_WEB_PUSH_NOTIFICATION_PREFERENCES;
+    }
+  });
   const [recommendationRevision, setRecommendationRevision] = useState(0);
   const [homeFeedInjectionRevision, setHomeFeedInjectionRevision] = useState(0);
   const [homeFeedInjectionFrequencies, setHomeFeedInjectionFrequencies] = useState<{
@@ -331,6 +359,10 @@ function App() {
   const postParentLookupRef = useRef<Map<string, { attemptedAt: number; promise: Promise<DistributedObject | null> }>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
   const webPushProcessingIdsRef = useRef(new Set<string>());
+  const webPushNotificationPreferencesRef = useRef(webPushNotificationPreferences);
+  const requestPushOutboxFlush = useMemo(() => createPushWakeOutboxFlusher(async () => {
+    await outboxServiceRef.current?.flush();
+  }, Date.now, PUSH_OUTBOX_FLUSH_COOLDOWN_MS), []);
 
   if (!objectStoreRef.current) {
     objectStoreRef.current = new IndexedDbObjectStore({
@@ -682,6 +714,33 @@ function App() {
     }
   }, [addLog]);
 
+  const handleSavePublishToDiscovery = useCallback((enabled: boolean): boolean => {
+    try {
+      localStorage.setItem(PUBLISH_TO_DISCOVERY_STORAGE_KEY, String(enabled));
+    } catch (error) {
+      addLog(`Publish to discovery setting could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    setPublishToDiscovery(enabled);
+    return true;
+  }, [addLog]);
+
+  const handleSaveWebPushNotificationPreference = useCallback((
+    category: WebPushNotificationCategory,
+    enabled: boolean
+  ): boolean => {
+    const next = updateWebPushNotificationPreference(webPushNotificationPreferencesRef.current, category, enabled);
+    try {
+      localStorage.setItem(WEB_PUSH_NOTIFICATION_PREFERENCES_STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+      addLog(`Notification preference could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    webPushNotificationPreferencesRef.current = next;
+    setWebPushNotificationPreferences(next);
+    return true;
+  }, [addLog]);
+
   const handleSaveObjectStorageLimit = useCallback((limitMb: number): boolean => {
     const limitBytes = limitMb * BYTES_PER_MB;
     if (!Number.isSafeInteger(limitMb) || limitBytes < MIN_OBJECT_STORAGE_BYTES
@@ -925,6 +984,45 @@ function App() {
       if (propagateNow) await outboxService.flush();
     }
     await refreshObjectStore();
+  };
+
+  const notifyNewlyAcceptedObject = async (object: DistributedObject) => {
+    const localIdentity = identityRef.current;
+    const store = objectStoreRef.current;
+    if (!localIdentity || !store) return;
+
+    try {
+      const authorContact = contactsRef.current.find((contact) =>
+        contact.publicKey === object.author || contact.fingerprint === object.author
+      );
+      const authorFingerprint = authorContact?.fingerprint
+        ?? (isValidPeerFingerprint(object.author) ? object.author : await deriveFingerprint(object.author));
+      if (blockedPeersRef.current.has(object.author)
+        || blockedPeersRef.current.has(authorFingerprint)) return;
+      const followedAuthorKeys = new Set(contactsRef.current
+        .filter((contact) => contact.followed)
+        .flatMap((contact) => [contact.publicKey, contact.fingerprint]));
+      const classification = await classifyNewlyAcceptedObjectNotification(object, {
+        identity: localIdentity,
+        followedAuthorKeys,
+        store,
+        resolveSenderEncryptionKey: (author) => {
+          const contact = contactsRef.current.find((candidate) => candidate.publicKey === author);
+          return contact ? getContactEncryptionKey(contact) : null;
+        },
+        isTombstoned: async (objectId) => (
+          isDeletionAwareObjectStore(store) && Boolean(await store.getDeletionTombstone(objectId))
+        )
+      });
+      if (!classification || !webPushNotificationPreferencesRef.current[classification.category]
+        || typeof Notification === 'undefined' || Notification.permission !== 'granted'
+        || !('serviceWorker' in navigator)) return;
+
+      const registration = await navigator.serviceWorker.ready;
+      await showWebPushNotificationOnce(registration, classification.category, classification.dedupeId, localStorage);
+    } catch {
+      addLog('A verified-object notification could not be displayed');
+    }
   };
 
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
@@ -1262,6 +1360,7 @@ function App() {
     addLog(`${stored ? 'Stored' : 'Rejected'} generic object from ${peerId}`);
     if (stored && packet.type === 'OBJECT_STORE') {
       inboxServiceRef.current?.notifyObjectStored(packet.payload.object);
+      if (!isDeleteRequest(packet.payload.object)) void notifyNewlyAcceptedObject(packet.payload.object);
       if (packet.payload.object.object_type === 'mycelium.reply' || packet.payload.object.object_type === 'mycelium.post') {
         void replyUnread.discover([packet.payload.object]);
       }
@@ -1369,6 +1468,7 @@ function App() {
             await cachePostChain(found);
           }
           if (found.object_type === 'mycelium.dm') inboxServiceRef.current?.notifyObjectStored(found);
+          if (!isDeleteRequest(found)) void notifyNewlyAcceptedObject(found);
           if (found.object_type === 'mycelium.reply' || found.object_type === 'mycelium.post') {
             void replyUnread.discover([found]);
           }
@@ -1383,8 +1483,14 @@ function App() {
 
     const handleMessage = (event: MessageEvent<unknown>) => {
       const message = event.data;
-      if (!message || typeof message !== 'object' || Array.isArray(message)
-        || (message as { type?: unknown }).type !== WEB_PUSH_STAGED_MESSAGE_TYPE) return;
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+      const messageType = (message as { type?: unknown }).type;
+      if (messageType === 'MYCELIUM_PUSH_WAKE_V1') {
+        const flush = requestPushOutboxFlush();
+        if (flush) void flush.catch(() => addLog('Opportunistic outbox flush after Web Push failed'));
+        return;
+      }
+      if (messageType !== WEB_PUSH_STAGED_MESSAGE_TYPE) return;
       const items = (message as { items?: unknown }).items;
       if (!Array.isArray(items) || items.length > WEB_PUSH_STAGING_MAX_ENTRIES) return;
       const source = event.source;
@@ -1431,7 +1537,7 @@ function App() {
       window.removeEventListener('focus', requestDrain);
       window.removeEventListener('online', requestDrain);
     };
-  }, [identity?.id, connectedPeerIds.join(',')]);
+  }, [identity?.id, connectedPeerIds.join(','), addLog, requestPushOutboxFlush]);
 
   const logPostChainResult = (postId: string, result: PostChainResult) => {
     if (result.complete && result.storageFailures.length === 0) {
@@ -1744,6 +1850,7 @@ function App() {
         } catch (error) {
           if (!existedBefore && await store.get(object.object_id)) {
             inboxServiceRef.current?.notifyObjectStored(object);
+            if (!isDeleteRequest(object)) void notifyNewlyAcceptedObject(object);
           }
           throw error;
         }
@@ -1754,6 +1861,7 @@ function App() {
           return;
         }
         inboxServiceRef.current?.notifyObjectStored(object);
+        if (!isDeleteRequest(object)) void notifyNewlyAcceptedObject(object);
         if (isDeleteRequest(object)) {
           await handleAcceptedDeleteRequest(object, false);
           addLog(`Received and accepted Delete Request ${object.object_id} from ${peer}`);
@@ -1890,6 +1998,7 @@ function App() {
               }
             }
             newlyStoredObjects.forEach((object) => inboxServiceRef.current?.notifyObjectStored(object));
+            newlyStoredObjects.forEach((object) => void notifyNewlyAcceptedObject(object));
             const receivedViews: LocalPostView[] = [];
             for (const object of newlyStoredObjects) {
               recommendationIndexRef.current.add(object);
@@ -2626,6 +2735,10 @@ function App() {
     const isReply = Boolean(replyTo);
     const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
     if (!content) return;
+    if (content.length > MAX_POST_CONTENT_LENGTH) {
+      addLog(`Post cancelled: content exceeds the ${MAX_POST_CONTENT_LENGTH.toLocaleString()} character limit.`);
+      return;
+    }
     const mentions = isReply ? [] : mentionsPresentInText(content, selectedMentions);
     const tags = isReply ? [] : newPostTags.split(',').map((t) => t.trim()).filter(Boolean);
     const objectStore = objectStoreRef.current;
@@ -3224,11 +3337,15 @@ function App() {
           discoveryStore,
           resolvePostParentFromPeers
         );
+        const newlyCachedPostIds = new Set(expanded.chains.flatMap((chain) => chain.newlyCachedObjectIds));
         expanded.chains.forEach((chain) => {
           if (!chain.complete || chain.storageFailures.length > 0) {
             logPostChainResult(chain.objects[chain.objects.length - 1]?.object_id ?? 'unknown', chain);
           }
         });
+        verifiedPosts
+          .filter((view) => newlyCachedPostIds.has(view.object.object_id))
+          .forEach((view) => void notifyNewlyAcceptedObject(view.object));
         recordNewEligibleHomePosts(verifiedPosts.filter((view) => !knownPostIds.has(view.object.object_id)));
       }
       void replyUnread.discover([...verifiedPosts, ...verifiedReplies].map((post) => post.object));
@@ -4225,6 +4342,7 @@ function App() {
                   void handleCreatePost(Boolean(publishToDiscovery), postId, content);
                 }
               }}
+              publishToDiscovery={publishToDiscovery}
               getRecommendationSummary={getRecommendationSummary}
             />
           ) : (
@@ -4257,9 +4375,11 @@ function App() {
             onSubmitPost={(publishToDiscovery, mentions) => {
               void handleCreatePost(publishToDiscovery, undefined, undefined, mentions);
             }}
+            publishToDiscovery={publishToDiscovery}
             canCreatePost={Boolean(identity)}
             onAuthorClick={handleOpenPeerProfile}
             myPeerId={identity.id}
+            myDisplayName={myProfile.displayName}
             onOpenPost={handleOpenConversation}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -4318,6 +4438,7 @@ function App() {
             popularPeers={popularPeers}
             myPeerId={identity.id}
             myPublicKey={identity.publicKey}
+            myDisplayName={myProfile.displayName}
             onAuthorClick={handleOpenPeerProfile}
             onOpenPost={handleOpenConversation}
             onFollow={handleToggleFollow}
@@ -4476,11 +4597,15 @@ function App() {
             recommendationFrequency={homeFeedInjectionFrequencies.recommendation}
             discoveryFrequency={homeFeedInjectionFrequencies.discovery}
             onSaveInjectionFrequencies={handleSaveInjectionFrequencies}
+            publishToDiscovery={publishToDiscovery}
+            onSavePublishToDiscovery={handleSavePublishToDiscovery}
             objectStorageLimitMb={objectStorageLimitMb}
             objectStorageUsedBytes={objectStorageUsedBytes}
             onSaveObjectStorageLimit={handleSaveObjectStorageLimit}
             externalImageLimitMb={externalImageLimitMb}
             onSaveExternalImageLimit={handleSaveExternalImageLimit}
+            webPushNotificationPreferences={webPushNotificationPreferences}
+            onSaveWebPushNotificationPreference={handleSaveWebPushNotificationPreference}
             onWebPushChanged={refreshConnectedPeerProfiles}
             onExportIdentity={handleExportIdentity}
             onImportIdentity={handleImportIdentity}

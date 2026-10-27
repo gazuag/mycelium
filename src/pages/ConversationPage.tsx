@@ -3,9 +3,9 @@ import type { Contact } from '../types';
 import { postReplyTo, type DeletionTombstone, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { MarkdownComposer } from '../components/MarkdownComposer';
-import { MarkdownHelp } from '../components/MarkdownHelp';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
 
 interface ConversationPageProps {
   post: LocalPostView;
@@ -30,6 +30,7 @@ interface ConversationPageProps {
   onHide: (objectId: string) => void;
   onDelete?: (objectId: string) => void;
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
+  publishToDiscovery?: boolean;
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
@@ -52,11 +53,11 @@ export function ConversationPage({
   onHide,
   onDelete,
   onReply,
+  publishToDiscovery = true,
   getRecommendationSummary
 }: ConversationPageProps) {
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
-  const [publishToDiscovery, setPublishToDiscovery] = useState(true);
   const [selectedReplyTextarea, setSelectedReplyTextarea] = useState<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -138,35 +139,25 @@ export function ConversationPage({
     const objectId = currentPost.object.object_id;
     const replyText = replyDrafts[objectId] ?? '';
     const composerControls = (
-      <>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={publishToDiscovery}
-            onChange={(event) => setPublishToDiscovery(event.target.checked)}
-          />
-          <span>Publish to discovery</span>
-        </label>
-        <div className="row">
-          {!inline ? (
-            <button
-              className="btn"
-              type="button"
-              onClick={() => submitReply(objectId, replyText)}
-              disabled={!replyText.trim()}
-            >
-              Send reply
-            </button>
-          ) : null}
+      <div className="row">
+        {!inline ? (
           <button
-            className="btn secondary"
+            className="btn"
             type="button"
-            onClick={() => cancelReply(objectId)}
+            onClick={() => submitReply(objectId, replyText)}
+            disabled={!replyText.trim()}
           >
-            Cancel
+            Send reply
           </button>
-        </div>
-      </>
+        ) : null}
+        <button
+          className="btn secondary"
+          type="button"
+          onClick={() => cancelReply(objectId)}
+        >
+          Cancel
+        </button>
+      </div>
     );
     const textarea = (
       <div className="markdown-compose-field">
@@ -176,8 +167,8 @@ export function ConversationPage({
           onChange={(value) => setReplyDrafts((drafts) => ({ ...drafts, [objectId]: value }))}
           placeholder={`Reply to ${authorName}...`}
           ariaLabel={`Reply to ${authorName}`}
+          maxLength={MAX_POST_CONTENT_LENGTH}
         />
-        <MarkdownHelp />
       </div>
     );
 
