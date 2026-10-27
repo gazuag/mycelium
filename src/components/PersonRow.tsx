@@ -14,7 +14,10 @@ interface PersonRowProps {
 
 export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutualLabel, metric }: PersonRowProps) {
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey);
-  const bio = displayProfileBio(contact.profile?.bio, contact.fingerprint || contact.publicKey);
+  const bio = displayProfileBio(
+    contact.identityObject?.payload.bio ?? contact.profile?.bio,
+    contact.fingerprint || contact.publicKey
+  );
   const lastSeen = contact.lastSeen && Number.isFinite(Date.parse(contact.lastSeen))
     ? new Date(contact.lastSeen).toLocaleString()
     : undefined;

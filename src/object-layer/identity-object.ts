@@ -1,7 +1,6 @@
 import type { EncryptionKeyBinding } from '../crypto/dm-crypto';
-import { verifyEncryptionKeyBinding } from '../crypto/dm-crypto';
 import { createSignedObject, validateDistributedObject } from './envelope';
-import type { DistributedObject, ObjectContent, ObjectIdentity } from './types';
+import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity } from './types';
 
 export const IDENTITY_OBJECT_TYPE = 'mycelium.identity';
 
@@ -10,6 +9,7 @@ export interface IdentityObjectPayload {
   readonly bio: string;
   readonly encryption_public_key: string;
   readonly encryption_key_binding: EncryptionKeyBinding;
+  readonly metadata?: Readonly<Record<string, JsonValue>>;
 }
 
 export type IdentityObject = DistributedObject & {
@@ -23,6 +23,7 @@ export interface CreateSignedIdentityObjectOptions {
   readonly encryption_public_key: string;
   readonly encryption_key_binding: EncryptionKeyBinding;
   readonly created_at?: string;
+  readonly metadata?: Readonly<Record<string, JsonValue>>;
 }
 
 export async function createSignedIdentityObject(
@@ -41,7 +42,8 @@ export async function createSignedIdentityObject(
         encryption_public_key: options.encryption_key_binding.encryption_public_key,
         created_at: options.encryption_key_binding.created_at,
         signature: options.encryption_key_binding.signature
-      }
+      },
+      ...(options.metadata ? { metadata: options.metadata } : {})
     },
     replication_policy: {}
   };
@@ -58,21 +60,5 @@ export async function validateIdentityObject(value: unknown): Promise<boolean> {
     return false;
   }
 
-  const payload = candidate.payload as Partial<IdentityObjectPayload>;
-  if (typeof payload.display_name !== 'string'
-    || typeof payload.bio !== 'string'
-    || typeof payload.encryption_public_key !== 'string'
-    || !payload.encryption_key_binding
-    || typeof payload.encryption_key_binding !== 'object') {
-    return false;
-  }
-
-  if (!(await validateDistributedObject(value))) return false;
-  const object = value as IdentityObject;
-  const binding = object.payload.encryption_key_binding;
-  if (binding.signing_public_key !== object.author
-    || binding.encryption_public_key !== object.payload.encryption_public_key) {
-    return false;
-  }
-  return await verifyEncryptionKeyBinding(binding);
+  return await validateDistributedObject(value);
 }

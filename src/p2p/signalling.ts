@@ -8,6 +8,7 @@ export type SignalMessage =
   | {
       type: 'peer-list';
       peers: string[];
+      requestId?: string;
     }
   | {
       type: 'discovery-result';
@@ -17,6 +18,14 @@ export type SignalMessage =
       type: 'peer-discovery-result';
       packet: unknown;
     };
+
+interface PendingOnlinePeerList {
+  readonly resolve: (peers: string[]) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+const pendingOnlinePeerLists = new Map<string, PendingOnlinePeerList>();
+const ONLINE_PEER_LIST_TIMEOUT_MS = 5_000;
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
 
@@ -108,4 +117,42 @@ export function connectToSignalling(
 
 export function sendSignal(socket: WebSocket, message: SignalMessage) {
   socket.send(JSON.stringify(message));
+}
+
+export function requestOnlinePeerList(socket: WebSocket, localId: string): Promise<string[]> {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('Online peer-list request failed: WebSocket not open'));
+  }
+  const requestId = createPeerListRequestId();
+  return new Promise<string[]>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingOnlinePeerLists.delete(requestId);
+      reject(new Error('Online peer-list request failed: timeout'));
+    }, ONLINE_PEER_LIST_TIMEOUT_MS);
+    pendingOnlinePeerLists.set(requestId, { resolve, timer });
+    try {
+      socket.send(JSON.stringify({ type: 'peer-list-request', id: localId, requestId }));
+    } catch (error) {
+      clearTimeout(timer);
+      pendingOnlinePeerLists.delete(requestId);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+export function resolveOnlinePeerList(message: SignalMessage): boolean {
+  if (message.type !== 'peer-list' || typeof message.requestId !== 'string') return false;
+  const pending = pendingOnlinePeerLists.get(message.requestId);
+  if (!pending) return false;
+  pendingOnlinePeerLists.delete(message.requestId);
+  clearTimeout(pending.timer);
+  pending.resolve(message.peers.filter((peerId): peerId is string => typeof peerId === 'string'));
+  return true;
+}
+
+function createPeerListRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `peer-list-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

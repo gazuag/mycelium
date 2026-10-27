@@ -57,7 +57,10 @@ export function ProfileHeader({
           <span className={`status-pill ${contact.online ? 'online' : 'offline'}`}>{contact.online ? 'Online' : 'Offline'}</span>
         ) : null}
       </div>
-      <p className="note">{displayProfileBio(contact.profile?.bio, contact.fingerprint) ?? 'No bio yet.'}</p>
+      <p className="note">{displayProfileBio(
+        contact.identityObject?.payload.bio ?? contact.profile?.bio,
+        contact.fingerprint || contact.publicKey
+      ) ?? 'No bio yet.'}</p>
       {showActions && onFollowToggle && onMessage && onBlock ? (
         <div className="profile-actions">
           <FollowButton

@@ -1,5 +1,6 @@
 import { canonicalize, canonicalizeV3 } from '../p2p/protocol';
 import { sha256, verifySignedString } from '../crypto/identity';
+import { verifyEncryptionKeyBinding } from '../crypto/dm-crypto';
 import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity, ObjectSignatureVerifier, RecommendationAction, RecommendationObject } from './types';
 
 export type ImmutableObjectContent = Omit<DistributedObject, 'object_id' | 'signature'>;
@@ -210,10 +211,45 @@ export async function validateDistributedObject(
     return false;
   }
 
-  if (validatedObject.object_id_version === 3) return true;
-
+  if (validatedObject.object_id_version === 3) {
+    return validatedObject.object_type !== 'mycelium.identity'
+      || await validateIdentityPayload(validatedObject.payload, validatedObject.author);
+  }
   try {
-    return await verifySignature(validatedObject.author, canonicalizeObjectContent(validatedObject), validatedObject.signature);
+    if (!(await verifySignature(validatedObject.author, canonicalizeObjectContent(validatedObject), validatedObject.signature))) return false;
+    return validatedObject.object_type !== 'mycelium.identity'
+      || await validateIdentityPayload(validatedObject.payload, validatedObject.author);
+  } catch {
+    return false;
+  }
+}
+
+async function validateIdentityPayload(payload: JsonValue, author: string): Promise<boolean> {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const identity = payload as Record<string, JsonValue>;
+  const binding = identity.encryption_key_binding;
+  if (typeof identity.display_name !== 'string'
+    || typeof identity.bio !== 'string'
+    || typeof identity.encryption_public_key !== 'string'
+    || !binding
+    || typeof binding !== 'object'
+    || Array.isArray(binding)) {
+    return false;
+  }
+  const candidate = binding as Record<string, JsonValue>;
+  if (candidate.signing_public_key !== author
+    || candidate.encryption_public_key !== identity.encryption_public_key
+    || typeof candidate.created_at !== 'string'
+    || typeof candidate.signature !== 'string') {
+    return false;
+  }
+  try {
+    return await verifyEncryptionKeyBinding({
+      signing_public_key: candidate.signing_public_key,
+      encryption_public_key: candidate.encryption_public_key,
+      created_at: candidate.created_at,
+      signature: candidate.signature
+    });
   } catch {
     return false;
   }

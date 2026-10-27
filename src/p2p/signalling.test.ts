@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resolveSignalServerUrl } from './signalling';
+import { requestOnlinePeerList, resolveOnlinePeerList, resolveSignalServerUrl } from './signalling';
 
 const DEFAULT_SIGNAL_URL = 'wss://discover.unfilter.ing:8443';
 
@@ -29,5 +29,43 @@ describe('signalling URL security', () => {
     vi.stubGlobal('VITE_SIGNAL_SERVER_URL', url);
 
     expect(resolveSignalServerUrl()).toBe(url);
+  });
+});
+
+describe('online peer-list signalling', () => {
+  it('correlates a live peer-list response to its request', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const socket = {
+      readyState: 1,
+      send: (message: string) => sentMessages.push(JSON.parse(message))
+    } as unknown as WebSocket;
+
+    const response = requestOnlinePeerList(socket, 'local-peer');
+    const requestId = sentMessages[0].requestId;
+
+    expect(sentMessages[0]).toMatchObject({
+      type: 'peer-list-request',
+      id: 'local-peer'
+    });
+    expect(resolveOnlinePeerList({
+      type: 'peer-list',
+      peers: ['online-peer'],
+      requestId: String(requestId)
+    })).toBe(true);
+    await expect(response).resolves.toEqual(['online-peer']);
+    expect(resolveOnlinePeerList({
+      type: 'peer-list',
+      peers: [],
+      requestId: String(requestId)
+    })).toBe(false);
+  });
+
+  it('rejects a request when the signalling socket is not open', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = { readyState: 0 } as WebSocket;
+
+    await expect(requestOnlinePeerList(socket, 'local-peer'))
+      .rejects.toThrow('WebSocket not open');
   });
 });

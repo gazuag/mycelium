@@ -81,6 +81,22 @@ async def broadcast_peer_list() -> None:
             pass
 
 
+async def handle_peer_list_request(message: dict, websocket: WebSocketServerProtocol, client_id: Optional[str]) -> None:
+    request_id = message.get('requestId')
+    if (
+        client_id
+        and clients.get(client_id) is websocket
+        and normalize_client_id(message.get('id')) == client_id
+        and isinstance(request_id, str)
+        and 0 < len(request_id) <= 128
+    ):
+        await websocket.send(json.dumps({
+            'type': 'peer-list',
+            'peers': list(clients.keys()),
+            'requestId': request_id
+        }))
+
+
 def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     table_exists = conn.execute(
@@ -525,6 +541,10 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                 logging.info('Registered client %s (%d clients currently)', client_id, len(clients))
                 await broadcast_peer_list()
                 await flush_queued_signals(client_id, websocket)
+                continue
+
+            if msg_type == 'peer-list-request':
+                await handle_peer_list_request(message, websocket, client_id)
                 continue
 
             if msg_type in {'offer', 'answer', 'ice-candidate'}:

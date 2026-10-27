@@ -379,6 +379,37 @@ class DiscoveryObjectServerTests(unittest.TestCase):
             'peers': ['online-without-posts']
         }])
 
+    def test_registered_peer_can_request_fresh_online_peer_list(self):
+        original_clients = self.server.clients.copy()
+        requester = FakeWebSocket()
+        other_peer = FakeWebSocket()
+        try:
+            self.server.clients.clear()
+            self.server.clients.update({'requester': requester, 'other-peer': other_peer})
+            asyncio.run(self.server.handle_peer_list_request(
+                {'id': 'requester', 'requestId': 'recovery-1'},
+                requester,
+                'requester'
+            ))
+        finally:
+            self.server.clients.clear()
+            self.server.clients.update(original_clients)
+
+        self.assertEqual(requester.messages, [{
+            'type': 'peer-list',
+            'peers': ['requester', 'other-peer'],
+            'requestId': 'recovery-1'
+        }])
+
+    def test_online_peer_list_request_requires_current_registration(self):
+        websocket = FakeWebSocket()
+        asyncio.run(self.server.handle_peer_list_request(
+            {'id': 'requester', 'requestId': 'recovery-1'},
+            websocket,
+            'requester'
+        ))
+        self.assertEqual(websocket.messages, [])
+
     def test_popular_peer_request_returns_correlated_protocol_response(self):
         self.store_object('popular-reply', 'mycelium.post', 'author', {'reply_to_author': 'popular-peer'})
         websocket = FakeWebSocket()

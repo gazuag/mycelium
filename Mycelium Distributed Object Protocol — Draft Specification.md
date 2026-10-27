@@ -57,7 +57,7 @@ The exact serialization format should be canonical and deterministic so that sig
 
 `object_id` uniquely identifies the object instance and is an opaque reference. Its generation depends on the object-ID version described below.
 
-`object_type` identifies the application-level object type. The transport layer should not need to understand the meaning of the type.
+`object_type` identifies the application-level object type. The transport layer should not need to understand the meaning of the type, though object validation may enforce required schemas for protocol-defined types.
 
 `author` identifies the public key of the object creator.
 
@@ -68,6 +68,10 @@ The exact serialization format should be canonical and deterministic so that sig
 `sequence` is an optional author-controlled monotonically increasing sequence number. Objects such as posts should use it to establish ordering within an author's stream.
 
 `payload` contains the actual object data.
+
+`mycelium.identity` is the author's profile object. Its `author` is the public signing key, and its payload contains `display_name`, `bio`, the encryption public key and its author-signed binding, plus an optional JSON `metadata` map for additional profile fields. The object's signed `created_at` is the profile version timestamp. Each update is a new immutable object with a new object ID; peers choose the current profile by greatest signed `created_at`, breaking equal timestamps by lexicographically greatest `object_id`. Older objects may remain cached but are superseded for profile display and lookup.
+
+Peers exchange and cache identity objects through the ordinary object transport and replication mechanisms. Every receiver validates the object's author signature and identity payload; a cache peer is only a source of bytes, not an authority for profile claims. `PROFILE_UPDATE` connection metadata does not replace a stored identity object.
 
 `signature` is a cryptographic signature made by the author's private key. Its exact signed bytes are generation-specific as described below.
 

@@ -1,4 +1,5 @@
 import type { EncryptionKeyBinding } from './crypto/dm-crypto';
+import type { IdentityObject } from './object-layer/identity-object';
 
 export type ConnectionState = 'idle' | 'signalling' | 'connecting' | 'connected' | 'disconnected';
 
@@ -7,6 +8,7 @@ export interface Contact {
   fingerprint: string;
   displayName?: string;
   profile?: SignedProfile;
+  identityObject?: IdentityObject;
   addedAt: string;
   followed: boolean;
   follower?: boolean;
