@@ -17,6 +17,10 @@ class FakeWebSocket:
     async def send(self, message):
         self.messages.append(json.loads(message))
 
+class ModernFakeWebSocket:
+    def __init__(self, state_name):
+        self.state = type('State', (), {'name': state_name})()
+
 
 class DiscoveryObjectServerTests(unittest.TestCase):
     @classmethod
@@ -33,6 +37,11 @@ class DiscoveryObjectServerTests(unittest.TestCase):
     def setUp(self):
         self.server.DB_CONN.execute('DELETE FROM discovery_posts')
         self.server.DB_CONN.commit()
+
+    def test_websocket_open_check_supports_legacy_and_current_apis(self):
+        self.assertTrue(self.server.websocket_is_open(FakeWebSocket()))
+        self.assertTrue(self.server.websocket_is_open(ModernFakeWebSocket('OPEN')))
+        self.assertFalse(self.server.websocket_is_open(ModernFakeWebSocket('CLOSED')))
 
     def store_object(self, object_id, object_type, author, payload, received_at=None, sequence=None):
         obj = {

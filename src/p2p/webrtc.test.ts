@@ -143,6 +143,14 @@ beforeEach(() => {
 });
 
 describe('PROFILE_UPDATE metadata forwarding', () => {
+  it('allows clearing ICE servers for host-only peers', () => {
+    configureIceServers([]);
+
+    createManager();
+
+    expect(FakePeerConnection.instances[0].configuration.iceServers).toEqual([]);
+  });
+
   it('preserves the original packet at the metadata callback boundary', () => {
     const received: Array<{ peerId: string; metadata: PeerMetadata; packet?: MyceliumPacket }> = [];
     const manager = createManager({

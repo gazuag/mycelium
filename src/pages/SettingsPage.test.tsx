@@ -33,6 +33,7 @@ describe('SettingsPage', () => {
         onSaveWebPushNotificationPreference={vi.fn(() => true)}
         onWebPushChanged={vi.fn(async () => {})}
         onExportIdentity={vi.fn()}
+        onExportLocalObservations={vi.fn(async () => {})}
         onImportIdentity={vi.fn()}
         onCreateIdentity={vi.fn()}
         onClearIdentity={vi.fn()}
@@ -51,6 +52,7 @@ describe('SettingsPage', () => {
     expect(markup).toContain('Enable Web Push');
     expect(markup).toContain('requests notification permission only after you choose this action');
     expect(markup).toContain('<h3>Diagnostics</h3>');
+    expect(markup).toContain('>Export Local Observations</button>');
     expect(markup).toContain('Copy fingerprint');
     expect(markup).toContain('my-peer-id');
     expect(markup).toContain('Follow peer by address');

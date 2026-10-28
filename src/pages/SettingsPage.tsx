@@ -37,6 +37,7 @@ interface SettingsPageProps {
   onSaveWebPushNotificationPreference: (category: WebPushNotificationCategory, enabled: boolean) => boolean;
   onWebPushChanged: () => Promise<void>;
   onExportIdentity: (passphrase: string) => Promise<void>;
+  onExportLocalObservations: () => Promise<void>;
   onImportIdentity: (file: File, passphrase: string) => Promise<void>;
   onCreateIdentity: () => void;
   onClearIdentity: () => void;
@@ -75,6 +76,7 @@ export function SettingsPage({
   onSaveWebPushNotificationPreference,
   onWebPushChanged,
   onExportIdentity,
+  onExportLocalObservations,
   onImportIdentity,
   onCreateIdentity,
   onClearIdentity
@@ -85,6 +87,8 @@ export function SettingsPage({
   const [importPassphrase, setImportPassphrase] = useState('');
   const [identityBackupError, setIdentityBackupError] = useState('');
   const [identityBackupStatus, setIdentityBackupStatus] = useState('');
+  const [observationExportError, setObservationExportError] = useState('');
+  const [observationExportStatus, setObservationExportStatus] = useState('');
   const identityImportInput = useRef<HTMLInputElement>(null);
   const [recommendationFrequencyDraft, setRecommendationFrequencyDraft] = useState(String(recommendationFrequency));
   const [discoveryFrequencyDraft, setDiscoveryFrequencyDraft] = useState(String(discoveryFrequency));
@@ -781,6 +785,28 @@ export function SettingsPage({
           <div className="row">
             <button className="btn secondary" type="button" onClick={handleCopyDiagnostics}>Copy diagnostics</button>
             <button className="btn secondary" type="button" onClick={onClearLogs}>Clear diagnostics log</button>
+          </div>
+        </section>
+        <section>
+          <h4>Local observations</h4>
+          <p className="note">Export locally stored connection, FIND-forwarding, and validated object-supply observations. These records are not sent to other peers.</p>
+          <div className="row">
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={async () => {
+                setObservationExportError('');
+                setObservationExportStatus('');
+                try {
+                  await onExportLocalObservations();
+                  setObservationExportStatus('Local observations download started.');
+                } catch (error) {
+                  setObservationExportError(error instanceof Error ? error.message : String(error));
+                }
+              }}
+            >Export Local Observations</button>
+            {observationExportError ? <span className="note" role="alert">{observationExportError}</span> : null}
+            {observationExportStatus ? <span className="note" role="status">{observationExportStatus}</span> : null}
           </div>
         </section>
 

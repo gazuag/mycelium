@@ -799,9 +799,11 @@ export function findObject(
   transport: ObjectTransport,
   store: ObjectStore,
   ttl = 2,
-  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>,
+  onValidatedObject?: (supplierPeerId: string, object: DistributedObject) => void,
+  onRequestStarted?: (requestId: string) => void
 ): Promise<DistributedObject | null> {
-  return resolveFindRequest(sender, peerId, objectId, ttl, transport, store, onAcceptedDeleteRequest);
+  return resolveFindRequest(sender, peerId, objectId, ttl, transport, store, onAcceptedDeleteRequest, onValidatedObject, onRequestStarted);
 }
 
 // Target number of useful live replicas to aim for when an object's replication_policy omits an explicit budget.
@@ -1045,13 +1047,16 @@ async function resolveFindRequest(
   ttl: number,
   transport: ObjectTransport,
   store: ObjectStore,
-  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>
+  onAcceptedDeleteRequest?: (request: DistributedObject) => Promise<void>,
+  onValidatedObject?: (supplierPeerId: string, object: DistributedObject) => void,
+  onRequestStarted?: (requestId: string) => void
 ): Promise<DistributedObject | null> {
   if (!Number.isSafeInteger(ttl) || ttl < 0) {
     throw new Error('Invalid FIND TTL');
   }
   if (isDeletionAwareObjectStore(store) && await store.getDeletionTombstone(objectId)) return null;
   const requestPacket = await buildFindPacket(sender, peerId, objectId, undefined, undefined, ttl, sender);
+  onRequestStarted?.(requestPacket.payload.requestId);
   const requestDeadlineMs = Date.parse(requestPacket.payload.expiresAt);
   const requestWithTtl = { ...requestPacket, payload: { ...requestPacket.payload, ttl } };
   return new Promise((resolve, reject) => {
@@ -1097,6 +1102,7 @@ async function resolveFindRequest(
         } else {
           await store.put(object);
         }
+        onValidatedObject?.(peerId, object);
         resolve(object);
       }).catch(reject);
     });

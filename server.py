@@ -24,6 +24,12 @@ def normalize_client_id(value: Optional[str]) -> Optional[str]:
     value = value.strip()
     return value or None
 
+def websocket_is_open(websocket: WebSocketServerProtocol) -> bool:
+    legacy_open = getattr(websocket, 'open', None)
+    if legacy_open is not None:
+        return bool(legacy_open)
+    return getattr(getattr(websocket, 'state', None), 'name', None) == 'OPEN'
+
 MAX_DISCOVERY_POSTS = int(os.environ.get('MAX_DISCOVERY_POSTS', '10000'))
 MAX_POST_SIZE = int(os.environ.get('MAX_POST_SIZE', '4096'))
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
@@ -60,7 +66,7 @@ async def flush_queued_signals(client_id: str, websocket: WebSocketServerProtoco
     fresh_messages = [raw_message for timestamp, raw_message in queued if now - timestamp <= SIGNAL_QUEUE_TTL_SECONDS]
     for raw_message in fresh_messages:
         try:
-            if websocket.open:
+            if websocket_is_open(websocket):
                 await websocket.send(raw_message)
         except Exception:
             logging.warning('Failed to deliver queued signal to %s', client_id)
@@ -75,7 +81,7 @@ async def broadcast_peer_list() -> None:
     })
     for ws in list(clients.values()):
         try:
-            if ws.open:
+            if websocket_is_open(ws):
                 await ws.send(message)
         except Exception:
             pass
@@ -554,7 +560,7 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                     logging.warning('Signal missing target')
                     continue
                 recipient = clients.get(target)
-                if recipient and recipient.open:
+                if recipient and websocket_is_open(recipient):
                     await recipient.send(raw_message)
                     logging.info('Relayed %s from %s to %s', msg_type, sender or '<unknown>', target)
                 else:
@@ -586,7 +592,7 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
             logging.info('Client disconnected: %s', client_id)
             await broadcast_peer_list()
 
-async def websocket_handler(websocket: WebSocketServerProtocol, path: str) -> None:
+async def websocket_handler(websocket: WebSocketServerProtocol, path: Optional[str] = None) -> None:
     await handle_client(websocket)
 
 async def main() -> None:

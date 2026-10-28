@@ -76,6 +76,22 @@ export interface ObjectSupplyObservation {
   expires_at: string;
 }
 
+export interface LocalObservationExport {
+  format: 'mycelium-local-observations';
+  version: 1;
+  exported_at: string;
+  summary: {
+    connections: number;
+    find_forwarding: number;
+    object_supply: number;
+  };
+  observations: {
+    connections: PeerConnectionObservation[];
+    find_forwarding: FindForwardingObservation[];
+    object_supply: ObjectSupplyObservation[];
+  };
+}
+
 const observationSessionId = createSessionId();
 let nextAttemptObservationId = 0;
 
@@ -103,6 +119,29 @@ export async function loadFindForwardingObservations(now = Date.now()): Promise<
 
 export async function loadObjectSupplyObservations(now = Date.now()): Promise<ObjectSupplyObservation[]> {
   return loadUnexpiredRecords<ObjectSupplyObservation>(OBJECT_SUPPLY_OBSERVATION_STORE, now);
+}
+
+export async function exportLocalObservations(now = Date.now()): Promise<LocalObservationExport> {
+  const [connections, findForwarding, objectSupply] = await Promise.all([
+    loadConnectionObservations(now),
+    loadFindForwardingObservations(now),
+    loadObjectSupplyObservations(now)
+  ]);
+  return {
+    format: 'mycelium-local-observations',
+    version: 1,
+    exported_at: new Date(now).toISOString(),
+    summary: {
+      connections: connections.length,
+      find_forwarding: findForwarding.length,
+      object_supply: objectSupply.length
+    },
+    observations: {
+      connections,
+      find_forwarding: findForwarding,
+      object_supply: objectSupply
+    }
+  };
 }
 
 export async function pruneExpiredObservations(now = Date.now()): Promise<void> {

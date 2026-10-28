@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:integration": "playwright test",
+    "test:integration:observations": "playwright test src/integration/local-observations-multi-peer.test.ts",
     "preview": "vite preview",
     "setup-hooks": "git config core.hooksPath .githooks"
   },

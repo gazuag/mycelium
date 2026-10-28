@@ -7,6 +7,7 @@ A privacy-first peer-to-peer social app prototype.
 - Generates a local cryptographic identity in the browser.
 - Stores identity data locally in IndexedDB.
 - Keeps bounded, expiring connection, FIND-forwarding, and validated object-supply observations in local IndexedDB. These observations are not shared or used for peer selection.
+- Exports those local observations from **Settings → Diagnostics → Local observations** as JSON without modifying the stored records.
 - Exports an identity backup file.
 - Connects two peers via WebRTC using a minimal signalling server.
 - Sends direct text messages over an RTCDataChannel.
@@ -96,6 +97,51 @@ configuration, and tests.
 4. Click `Connect`.
 5. Wait until status changes to `Connected`.
 6. Send a chat message.
+
+## Multi-peer observation integration test
+
+Run the four-peer Playwright test with:
+
+```bash
+npm run test:integration:observations
+```
+
+It launches a Vite development server with the test-only browser API enabled
+and starts a separate local signalling server using a temporary SQLite
+database and a temporary self-signed TLS certificate. It uses host-only ICE
+candidates, so it does not depend on public signalling, discovery, or TURN
+services. The test creates four independent browser contexts and fresh
+identities, exercises live WebRTC, a replicated post retrieved from its cache
+after its author disconnects, FIND forwarding, valid and tampered object
+delivery, and the Settings observation export. Generated exports and
+diagnostics are written to the ignored `test-results/topology-observations/`
+directory; browser profiles and the temporary signalling database are removed
+when the run ends.
+
+To test against a separately started development server, set
+`MYCELIUM_BASE_URL` to its URL and start it with
+`VITE_E2E_TEST_API=true`. The hook is gated to Vite development builds and is
+not enabled in production builds. Browser console errors and uncaught page
+errors are captured in `peer-diagnostics.json`; each exported JSON is checked
+against that browser's read-only IndexedDB records and export is verified not
+to mutate them.
+
+## Local peer usefulness estimates
+
+The Stage B estimator reads the bounded Stage A observation stores and produces
+a deterministic, local-only estimate with a confidence value. It is not used
+for peer ranking or connection selection. Explicit connection records identify
+only peers this browser successfully connected to; a FIND forwarding response
+is a responsive path observation, not evidence that the incoming and child
+peers connect directly. Validated object supplies can reveal overlap between
+suppliers, but only among objects observed by this browser. Object evidence
+decays with a 30-day half-life, FIND response evidence with a 14-day half-life,
+and contribution is capped per verified author. New or unobserved peers start
+at a neutral estimate with zero confidence. These observations cannot establish
+a peer's full inventory or its marginal reach across the network. The score is
+a bounded heuristic, not a probability or a claim of network-wide usefulness;
+confidence reflects only the amount of distinct, decayed evidence in these
+local records.
 
 ## Deploying the frontend to Cloudflare Pages
 

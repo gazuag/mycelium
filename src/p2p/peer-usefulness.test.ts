@@ -1,0 +1,246 @@
+import { describe, expect, it } from 'vitest';
+import {
+  CONNECTION_EVIDENCE_HALF_LIFE_MS,
+  FIND_EVIDENCE_HALF_LIFE_MS,
+  OBJECT_EVIDENCE_HALF_LIFE_MS,
+  estimatePeerUsefulness
+} from './peer-usefulness';
+import type {
+  FindForwardingObservation,
+  ObjectSupplyObservation,
+  PeerConnectionObservation
+} from './local-observations';
+
+const NOW = Date.parse('2026-10-28T10:00:00.000Z');
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function connection(peerId: string, connectedAt = NOW): PeerConnectionObservation {
+  return {
+    id: peerId,
+    peer_id: peerId,
+    success_count: 1,
+    most_recent_success: new Date(connectedAt).toISOString(),
+    recent_failures: [],
+    sessions: [{
+      id: `${peerId}-session`,
+      opened_at: new Date(connectedAt).toISOString(),
+      identity: { kind: 'session', peerId }
+    }],
+    updated_at: new Date(connectedAt).toISOString(),
+    expires_at: new Date(NOW + 180 * DAY_MS).toISOString()
+  };
+}
+
+function supply(
+  supplierPeerId: string,
+  objectId: string,
+  objectAuthor = `author-${objectId}`,
+  observedAt = NOW,
+  expiresAt = NOW + 90 * DAY_MS
+): ObjectSupplyObservation {
+  const timestamp = new Date(observedAt).toISOString();
+  return {
+    id: `${encodeURIComponent(supplierPeerId)}|${encodeURIComponent(objectId)}`,
+    supplier_peer_id: supplierPeerId,
+    supplier_identity_kind: 'session',
+    object_id: objectId,
+    object_author: objectAuthor,
+    object_author_verified: true,
+    validated: true,
+    first_observed_at: timestamp,
+    last_observed_at: timestamp,
+    updated_at: timestamp,
+    expires_at: new Date(expiresAt).toISOString()
+  };
+}
+
+function findResponse(
+  id: string,
+  incomingPeerId: string,
+  childPeerId: string,
+  status: FindForwardingObservation['status'] = 'responded',
+  updatedAt = NOW,
+  expiresAt = NOW + 30 * DAY_MS
+): FindForwardingObservation {
+  const timestamp = new Date(updatedAt).toISOString();
+  return {
+    id,
+    request_id: `request-${id}`,
+    incoming_peer_id: incomingPeerId,
+    incoming_peer_identity_kind: 'session',
+    child_peer_id: childPeerId,
+    child_peer_identity_kind: 'session',
+    status,
+    observed_at: timestamp,
+    updated_at: timestamp,
+    expires_at: new Date(expiresAt).toISOString()
+  };
+}
+
+function estimate(
+  peerIds: readonly string[],
+  records: {
+    connections?: readonly PeerConnectionObservation[];
+    findForwarding?: readonly FindForwardingObservation[];
+    objectSupply?: readonly ObjectSupplyObservation[];
+  } = {}
+) {
+  return estimatePeerUsefulness(peerIds, records, NOW);
+}
+
+describe('local peer usefulness estimation', () => {
+  it('returns neutral estimates with no evidence for new peers', () => {
+    expect(estimate(['new-peer'], {})).toEqual([expect.objectContaining({
+      peer_id: 'new-peer',
+      direct_connection_observed: false,
+      direct_identity_evidence: 'unknown',
+      direct_connection_weight: 0,
+      score: 0.5,
+      confidence: 0,
+      novel_object_weight: 0,
+      forwarded_response_weight: 0
+    })]);
+  });
+
+  it('keeps direct connection evidence separate from FIND forwarding paths', () => {
+    const verifiedConnection = connection('verified-peer');
+    verifiedConnection.sessions[0].identity = {
+      kind: 'verified',
+      peerId: 'verified-peer',
+      publicKey: 'verified-public-key'
+    };
+    const [directPeer, , incomingPeer, childPeer] = estimate(
+      ['direct-peer', 'verified-peer', 'incoming-peer', 'child-peer'],
+      {
+        connections: [connection('direct-peer'), verifiedConnection],
+        findForwarding: [findResponse('find-1', 'incoming-peer', 'child-peer')]
+      }
+    );
+    const [, verifiedPeer] = estimate(
+      ['direct-peer', 'verified-peer'],
+      { connections: [connection('direct-peer'), verifiedConnection] }
+    );
+
+    expect(directPeer).toMatchObject({
+      direct_connection_observed: true,
+      direct_identity_evidence: 'session'
+    });
+    expect(verifiedPeer).toMatchObject({
+      direct_connection_observed: true,
+      direct_identity_evidence: 'verified'
+    });
+    expect(incomingPeer.direct_connection_observed).toBe(false);
+    expect(childPeer).toMatchObject({
+      direct_connection_observed: false,
+      direct_identity_evidence: 'unknown',
+      responsive_forwarded_origins: 1
+    });
+  });
+
+  it('discounts overlap when another supplier delivered the same object', () => {
+    const estimates = estimate(['peer-a', 'peer-b'], {
+      objectSupply: [
+        supply('peer-a', 'unique-object', 'author-a'),
+        supply('peer-a', 'shared-object', 'author-b'),
+        supply('peer-b', 'shared-object', 'author-b')
+      ]
+    });
+
+    expect(estimates[0].novel_object_weight).toBe(1.5);
+    expect(estimates[1].novel_object_weight).toBe(0.5);
+    expect(estimates[0].redundant_objects).toBe(1);
+    expect(estimates[1].redundant_objects).toBe(1);
+    expect(estimates[0].score).toBeGreaterThan(estimates[1].score);
+  });
+
+  it('decays old object and FIND evidence by their configured half-lives', () => {
+    const [oldObject, oldFind, oldConnection] = estimate(['object-peer', 'find-peer', 'connection-peer'], {
+      connections: [connection('connection-peer', NOW - CONNECTION_EVIDENCE_HALF_LIFE_MS)],
+      objectSupply: [supply('object-peer', 'half-life-object', 'author', NOW - OBJECT_EVIDENCE_HALF_LIFE_MS)],
+      findForwarding: [
+        findResponse('find-old', 'incoming-peer', 'find-peer', 'responded', NOW - FIND_EVIDENCE_HALF_LIFE_MS)
+      ]
+    });
+
+    expect(oldObject.novel_object_weight).toBe(0.5);
+    expect(oldFind.forwarded_response_weight).toBe(0.5);
+    expect(oldConnection.direct_connection_weight).toBe(0.5);
+    expect(oldObject.score).toBeGreaterThan(0.5);
+    expect(oldObject.score).toBeLessThan(estimate(['object-peer'], {
+      objectSupply: [supply('object-peer', 'fresh-object', 'author')]
+    })[0].score);
+  });
+
+  it('deduplicates repeated records and caps the contribution from one author', () => {
+    const oneObject = supply('peer-a', 'object-0', 'prolific-author');
+    const manyObjects = Array.from({ length: 100 }, (_, index) => (
+      supply('peer-a', `object-${index}`, 'prolific-author')
+    ));
+    const duplicateFind = findResponse('duplicate-find', 'incoming-peer', 'peer-a');
+    const result = estimate(['peer-a'], {
+      objectSupply: [...manyObjects, ...Array.from({ length: 10 }, () => oneObject)],
+      findForwarding: [duplicateFind, { ...duplicateFind }]
+    })[0];
+    const oneObjectResult = estimate(['peer-a'], { objectSupply: [oneObject] })[0];
+    const sameEvidenceWithoutDuplicateFind = estimate(['peer-a'], {
+      objectSupply: manyObjects,
+      findForwarding: [duplicateFind]
+    })[0];
+
+    expect(result.distinct_validated_objects).toBe(100);
+    expect(result.distinct_verified_authors).toBe(1);
+    expect(result.novel_object_weight).toBe(1);
+    expect(result.responsive_forwarded_origins).toBe(1);
+    expect(result.novel_object_weight).toBe(oneObjectResult.novel_object_weight);
+    expect(result.score).toBe(sameEvidenceWithoutDuplicateFind.score);
+    expect(result.score).toBeLessThanOrEqual(0.95);
+    expect(result.confidence).toBeLessThanOrEqual(1);
+  });
+
+  it('caps usefulness evidence and score despite many distinct objects and origins', () => {
+    const objectSupply = Array.from({ length: 20 }, (_, index) => (
+      supply('peer-a', `object-${index}`, `author-${index}`)
+    ));
+    const findForwarding = Array.from({ length: 20 }, (_, index) => (
+      findResponse(`find-${index}`, `incoming-${index}`, 'peer-a')
+    ));
+    const [result] = estimate(['peer-a'], { objectSupply, findForwarding });
+
+    expect(result.novel_object_weight).toBe(5);
+    expect(result.forwarded_response_weight).toBe(2);
+    expect(result.score).toBeLessThanOrEqual(0.95);
+    expect(result.confidence).toBeLessThanOrEqual(1);
+  });
+
+  it('ignores expired or invalid records and safely handles missing categories', () => {
+    const result = estimate(['peer-a'], {
+      objectSupply: [
+        supply('peer-a', 'expired', 'author', NOW, NOW - 1)
+      ],
+      findForwarding: [
+        findResponse('expired-find', 'incoming-peer', 'peer-a', 'responded', NOW, NOW - 1),
+        findResponse('pending-find', 'incoming-peer', 'peer-a', 'pending')
+      ]
+    })[0];
+    const missing = estimate(['peer-a'])[0];
+
+    expect(result.score).toBe(0.5);
+    expect(result.confidence).toBe(0);
+    expect(result).toMatchObject({
+      distinct_validated_objects: 0,
+      responsive_forwarded_origins: 0
+    });
+    expect(missing).toEqual(estimate(['peer-a'], {})[0]);
+  });
+
+  it('returns deterministic estimates for identical inputs', () => {
+    const input = {
+      connections: [connection('peer-a')],
+      findForwarding: [findResponse('find-1', 'incoming-peer', 'peer-a')],
+      objectSupply: [supply('peer-a', 'object-1', 'author-1')]
+    };
+
+    expect(estimate(['peer-a', 'new-peer'], input))
+      .toEqual(estimate(['peer-a', 'new-peer'], input));
+  });
+});

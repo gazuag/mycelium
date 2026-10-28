@@ -12,6 +12,7 @@ import {
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import {
   connectionObservationId,
+  exportLocalObservations,
   newConnectionAttemptObservationId,
   recordConnectionClosed,
   recordConnectionFailure,
@@ -248,10 +249,14 @@ function App() {
   });
   const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('idle');
   const [signallingStatus, setSignallingStatus] = useState('idle');
+  const signallingStatusRef = useRef(signallingStatus);
+  signallingStatusRef.current = signallingStatus;
   const [connectedPeerIds, setConnectedPeerIds] = useState<string[]>([]);
   const [signallingReconnectTick, setSignallingReconnectTick] = useState(0);
   const [remoteId, setRemoteId] = useState('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const logsRef = useRef(logs);
+  logsRef.current = logs;
   const [dataChannelOpen, setDataChannelOpen] = useState(false);
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
@@ -418,6 +423,12 @@ function App() {
   }
 
   const refreshTurnIceServers = async () => {
+    if (import.meta.env.DEV && import.meta.env.VITE_E2E_TEST_API === 'true') {
+      configureIceServers([]);
+      turnIceConfiguredRef.current = true;
+      addLog('Using host-only ICE candidates for local browser integration tests');
+      return;
+    }
     try {
       const iceServers = await fetchMeteredIceServers();
       configureIceServers(iceServers);
@@ -967,7 +978,8 @@ function App() {
             transport,
             store,
             2,
-            (request) => handleAcceptedDeleteRequest(request, false)
+            (request) => handleAcceptedDeleteRequest(request, false),
+            (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog)
           );
           if (object) return object;
         } catch (error) {
@@ -1253,7 +1265,9 @@ function App() {
             await objectTransportRef.current?.send(route.upstreamPeer, relayed);
             return;
           }
-          await objectTransportRef.current?.send(peerId, response) ?? Promise.reject(new Error('Object transport is unavailable'));
+          const transport = objectTransportRef.current;
+          if (!transport) throw new Error('Object transport is unavailable');
+          await transport.send(peerId, response);
         },
         identityRef.current?.id ?? 'unknown',
         findRequestCacheRef.current,
@@ -1351,6 +1365,8 @@ function App() {
       addLog(`PHASE6 RESPONSE PATH CHECK requestId=${requestId ?? 'unknown'} aggregationPresent=${Boolean(aggregationState)} routePresent=${Boolean(route)} routeUpstream=${route?.upstreamPeer ?? 'none'} sender=${peerId}`);
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
       if (route && route.upstreamPeer !== peerId) {
+        void recordFindForwarding(requestId!, route.upstreamPeer, peerId, 'responded')
+          .catch((error: unknown) => addLog(`Failed to record FIND forwarding response: ${error instanceof Error ? error.message : String(error)}`));
         const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
         const validatedSuppliedObjects = await validateFindResponseObjects(packet, requestId!, new Set());
         for (const object of validatedSuppliedObjects) {
@@ -1437,7 +1453,9 @@ function App() {
     const transport = objectTransportRef.current;
     if (!transport) return;
     return transport.onPacket((peerId, packet) => {
-      void handleObjectPacket(peerId, packet);
+      void handleObjectPacket(peerId, packet).catch((error: unknown) => {
+        addLog(`Failed to process object packet from ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
     });
   }, []);
 
@@ -1516,7 +1534,8 @@ function App() {
             transport,
             store,
             2,
-            (request) => handleAcceptedDeleteRequest(request, false)
+            (request) => handleAcceptedDeleteRequest(request, false),
+            (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog)
           );
           if (!found) continue;
           if (found.object_type === 'mycelium.post' && await validateObject(found)) {
@@ -2044,6 +2063,10 @@ function App() {
         const existedBefore = await store.get(object.object_id);
         let stored: boolean;
         try {
+          if (!await validateObject(object)) {
+            addLog(`Rejected invalid object ${object.object_id} from ${peer}`);
+            return;
+          }
           stored = await receiveAndReplicate(
             object,
             peer,
@@ -3335,7 +3358,8 @@ function App() {
               transport,
               store,
               2,
-              (request) => handleAcceptedDeleteRequest(request, false)
+              (request) => handleAcceptedDeleteRequest(request, false),
+              (supplierPeerId, validatedObject) => observeValidatedObjectSupply(supplierPeerId, validatedObject, addLog)
             );
           } catch (error) {
             retrievalError = error;
@@ -3815,6 +3839,119 @@ function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleExportLocalObservations() {
+    const observations = await exportLocalObservations();
+    const blob = new Blob([JSON.stringify(observations, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'mycelium-local-observations.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || import.meta.env.VITE_E2E_TEST_API !== 'true' || !identity) return;
+    window.__MYCELIUM_E2E__ = {
+      state: () => ({
+        identityId: identityRef.current?.id ?? '',
+        connectedPeers: objectTransportRef.current?.connectedPeers() ?? [],
+        signallingStatus: signallingStatusRef.current,
+        followingPeerIds: contactsRef.current.filter((contact) => contact.followed).map((contact) => contact.fingerprint),
+        logs: logsRef.current.map((entry) => entry.text)
+      }),
+      connectPeer: async (peerId) => {
+        const socket = signallingSocketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Signalling is not connected');
+        const manager = ensurePeerManager(peerId);
+        if (!manager) throw new Error(`Could not create peer manager for ${peerId}`);
+        requestPeerOffer(peerId, manager, socket, true);
+      },
+      followPeer: async (peerId, followed) => {
+        const contact = contactsRef.current.find((candidate) => (
+          candidate.fingerprint === peerId || candidate.publicKey === peerId
+        ));
+        if (Boolean(contact?.followed) !== followed) await handleToggleFollow(peerId);
+      },
+      findObject: async (objectId, peerId) => {
+        const localIdentity = identityRef.current;
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!localIdentity || !store || !transport) throw new Error('Object transport is not ready');
+        let requestId = '';
+        const found = await findObject(
+          localIdentity.id,
+          peerId,
+          objectId,
+          transport,
+          store,
+          2,
+          undefined,
+          (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog),
+          (startedRequestId) => { requestId = startedRequestId; }
+        );
+        return found
+          ? { found: true, objectId: found.object_id, requestId }
+          : { found: false, requestId };
+      },
+      createLocalTestPost: async (content) => {
+        const localIdentity = identityRef.current;
+        const store = objectStoreRef.current;
+        if (!localIdentity || !store) throw new Error('Identity or object store is not ready');
+        const object = await createSignedObject({
+          object_type: 'mycelium.post',
+          created_at: new Date().toISOString(),
+          payload: createPostObjectPayload(content, []),
+          replication_policy: {}
+        }, createObjectIdentity(localIdentity)) as PostObject;
+        await store.put(object);
+        return object.object_id;
+      },
+      objectIdForPost: async (content) => {
+        const objects = await objectStoreRef.current?.query();
+        return objects?.find((object) => {
+          if (object.object_type !== 'mycelium.post' || !object.payload
+            || typeof object.payload !== 'object' || Array.isArray(object.payload)) return false;
+          return object.payload.content === content;
+        })?.object_id ?? null;
+      },
+      deleteObject: async (objectId) => {
+        const store = objectStoreRef.current;
+        if (!store) throw new Error('Object store is not ready');
+        await store.delete(objectId);
+      },
+      sendObject: async (objectId, peerId) => {
+        const localIdentity = identityRef.current;
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!localIdentity || !store || !transport) throw new Error('Object transport is not ready');
+        const object = await store.get(objectId);
+        if (!object) throw new Error(`Object ${objectId} is not stored locally`);
+        const signer: PacketSigner = (packet) => signString(localIdentity.privateKey, canonicalize(packet));
+        await transport.send(peerId, await buildObjectStorePacket(localIdentity.id, peerId, object, signer));
+      },
+      sendInvalidObject: async (objectId, peerId) => {
+        const localIdentity = identityRef.current;
+        const store = objectStoreRef.current;
+        const transport = objectTransportRef.current;
+        if (!localIdentity || !store || !transport) throw new Error('Object transport is not ready');
+        const object = await store.get(objectId);
+        if (!object) throw new Error(`Object ${objectId} is not stored locally`);
+        const signer: PacketSigner = (packet) => signString(localIdentity.privateKey, canonicalize(packet));
+        const packet = await buildObjectStorePacket(localIdentity.id, peerId, {
+          ...object,
+          signature: `${object.signature}invalid`
+        }, signer);
+        await transport.send(peerId, packet);
+      }
+    };
+    return () => {
+      delete window.__MYCELIUM_E2E__;
+    };
+  }, [identity?.id]);
+
   function createIdentityBackupPayload(identityRecord: IdentityRecord) {
     return {
       version: 1,
@@ -4277,7 +4414,8 @@ function App() {
         transport,
         store,
         2,
-        (request) => handleAcceptedDeleteRequest(request, false)
+        (request) => handleAcceptedDeleteRequest(request, false),
+        (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog)
       );
       if (!found) {
         setObjectTestStatus(`FIND TEST: FAIL - peer returned no object for ${objectId}`);
@@ -4309,7 +4447,8 @@ function App() {
         transport,
         store,
         2,
-        (request) => handleAcceptedDeleteRequest(request, false)
+        (request) => handleAcceptedDeleteRequest(request, false),
+        (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog)
       );
       const localCopy = await store.get(missingObjectId);
       if (found || localCopy) {
@@ -4448,7 +4587,8 @@ function App() {
         transport,
         store,
         2,
-        (request) => handleAcceptedDeleteRequest(request, false)
+        (request) => handleAcceptedDeleteRequest(request, false),
+        (supplierPeerId, object) => observeValidatedObjectSupply(supplierPeerId, object, addLog)
       );
       const status = found ? `Single-object FIND returned ${found.object_id}` : `Single-object FIND returned no object for ${objectId}`;
       setPhase7QueryStatus(status);
@@ -5029,6 +5169,7 @@ function App() {
             onSaveWebPushNotificationPreference={handleSaveWebPushNotificationPreference}
             onWebPushChanged={refreshConnectedPeerProfiles}
             onExportIdentity={handleExportIdentity}
+            onExportLocalObservations={handleExportLocalObservations}
             onImportIdentity={handleImportIdentity}
             onCreateIdentity={handleCreateIdentity}
             onClearIdentity={handleClearIdentity}

@@ -48,7 +48,7 @@ function parseRequestId(value: unknown): string | undefined {
 }
 
 export function configureIceServers(iceServers: RTCIceServer[]) {
-  if (iceServers.length > 0) ICE_SERVERS = [...iceServers];
+  ICE_SERVERS = [...iceServers];
 }
 const PING_INTERVAL_MS = 30000;
 const OFFER_RECOVERY_TIMEOUT_MS = 10000;

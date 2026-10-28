@@ -8,6 +8,7 @@ import {
   OBJECT_SUPPLY_DEDUPE_MS,
   connectionObservationId,
   currentConnectionDurationMs,
+  exportLocalObservations,
   loadConnectionObservations,
   loadFindForwardingObservations,
   loadObjectSupplyObservations,
@@ -42,6 +43,38 @@ beforeEach(async () => {
 });
 
 describe('local topology observations', () => {
+  it('exports all local categories with matching counts without mutating storage', async () => {
+    const now = Date.parse('2026-10-27T12:00:00.000Z');
+    await recordConnectionOpened(SESSION_PEER, connectionObservationId('export-connection'), sessionIdentity, now);
+    await recordFindForwarding('export-request', SESSION_PEER, VERIFIED_PEER, 'responded', now);
+    await recordValidatedObjectSupply(SESSION_PEER, 'a'.repeat(64), 'author-public-key', now);
+
+    const before = {
+      connections: await loadConnectionObservations(),
+      findForwarding: await loadFindForwardingObservations(),
+      objectSupply: await loadObjectSupplyObservations()
+    };
+    const exported = await exportLocalObservations(now + 1);
+    const after = {
+      connections: await loadConnectionObservations(),
+      findForwarding: await loadFindForwardingObservations(),
+      objectSupply: await loadObjectSupplyObservations()
+    };
+
+    expect(exported).toMatchObject({
+      format: 'mycelium-local-observations',
+      version: 1,
+      exported_at: new Date(now + 1).toISOString(),
+      summary: { connections: 1, find_forwarding: 1, object_supply: 1 },
+      observations: {
+        connections: before.connections,
+        find_forwarding: before.findForwarding,
+        object_supply: before.objectSupply
+      }
+    });
+    expect(after).toEqual(before);
+  });
+
   it('records one successful connection and ignores duplicate open callbacks', async () => {
     const openedAt = Date.parse('2026-10-27T12:00:00.000Z');
     const sessionId = connectionObservationId('connection-1');
