@@ -213,13 +213,36 @@ describe('collectFindResults', () => {
     const signed = await createObject({ id: 'tamper' });
     const invalid = { ...signed, payload: { id: 'changed' } };
     const fake = createFakeTransport(['peer-a']);
-    const resultPromise = collectFindResults(options(fake));
+    const observed: Array<{ peerId: string; object: DistributedObject }> = [];
+    const resultPromise = collectFindResults({
+      ...options(fake),
+      onValidatedObject: (peerId, object) => observed.push({ peerId, object })
+    });
     await waitForSends(fake, 1);
     await emitResponse(fake, 'peer-a', [invalid]);
-
     const result = await resultPromise;
     expect(result.objects).toEqual([]);
     expect(result.complete).toBe(true);
+    expect(observed).toEqual([]);
+  });
+
+  it('reports each directly supplying peer for validated FIND objects', async () => {
+    const object = await createObject({ id: 'reported-supplier' });
+    const fake = createFakeTransport(['peer-a', 'peer-b']);
+    const observed: Array<{ peerId: string; object: DistributedObject }> = [];
+    const resultPromise = collectFindResults({
+      ...options(fake),
+      onValidatedObject: (peerId, received) => observed.push({ peerId, object: received })
+    });
+    await waitForSends(fake, 2);
+    await emitResponse(fake, 'peer-a', [object]);
+    await emitResponse(fake, 'peer-b', [object]);
+
+    await resultPromise;
+    expect(observed).toEqual([
+      { peerId: 'peer-a', object },
+      { peerId: 'peer-b', object }
+    ]);
   });
 
   it('drops objects whose recipient differs from the FIND criterion', async () => {

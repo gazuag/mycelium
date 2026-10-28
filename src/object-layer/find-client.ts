@@ -21,6 +21,7 @@ export interface CollectFindResultsOptions {
   sender: string;
   criteria: FindQueryCriteria;
   validate?: (object: DistributedObject) => Promise<boolean>;
+  onValidatedObject?: (peerId: string, object: DistributedObject) => void;
   fanout?: number;
   peerOffset?: number;
   graceMs?: number;
@@ -46,6 +47,7 @@ export async function collectFindResults({
   sender,
   criteria,
   validate = validateDistributedObject,
+  onValidatedObject,
   fanout = 4,
   peerOffset = 0,
   graceMs = 1000,
@@ -94,6 +96,7 @@ export async function collectFindResults({
       criteria,
       peers,
       validate,
+      onValidatedObject,
       graceMs,
       timeoutMs: remainingMs,
       expiresAt,
@@ -139,6 +142,7 @@ async function collectFindRound({
   criteria,
   peers,
   validate,
+  onValidatedObject,
   graceMs,
   timeoutMs,
   expiresAt,
@@ -149,6 +153,7 @@ async function collectFindRound({
   criteria: FindQueryCriteria;
   peers: string[];
   validate: (object: DistributedObject) => Promise<boolean>;
+  onValidatedObject?: (peerId: string, object: DistributedObject) => void;
   graceMs: number;
   timeoutMs: number;
   expiresAt: string;
@@ -254,7 +259,10 @@ async function collectFindRound({
                 peerObjects = new Map<string, DistributedObject>();
                 objectsByPeer.set(peerId, peerObjects);
               }
-              if (!peerObjects.has(object.object_id)) peerObjects.set(object.object_id, object);
+              if (!peerObjects.has(object.object_id)) {
+                peerObjects.set(object.object_id, object);
+                onValidatedObject?.(peerId, object);
+              }
             }
           }
           if (response.payload.complete === true) respondedPeers.add(peerId);

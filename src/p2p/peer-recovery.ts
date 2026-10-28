@@ -5,10 +5,12 @@ export interface PreviouslyConnectedPeer {
 
 export interface PeerRecoveryOptions {
   readonly getConnectedPeers: () => readonly string[];
+  readonly getPendingPeerIds?: () => readonly string[];
   readonly getPreviouslyConnectedPeers: () => readonly PreviouslyConnectedPeer[];
   readonly discoverOnlinePeers: () => Promise<readonly string[]>;
   readonly isAttemptInProgress: (peerId: string) => boolean;
   readonly attemptPeer: (peerId: string) => Promise<boolean>;
+  readonly preferredTarget?: number;
   readonly maxConcurrentAttempts?: number;
   readonly retryDelaysMs?: readonly number[];
   readonly peerBackoffBaseMs?: number;
@@ -25,6 +27,55 @@ const DEFAULT_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000];
 const DEFAULT_PEER_BACKOFF_BASE_MS = 5_000;
 const DEFAULT_PEER_BACKOFF_MAX_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_ATTEMPTS = 2;
+export const DEFAULT_PREFERRED_CONNECTION_TARGET = 10;
+
+export class PeerConnectionCapacity {
+  private readonly getConnectedPeers: () => readonly string[];
+  private readonly hardMaximum: number;
+  private readonly maxConcurrentAttempts: number;
+  private readonly reservations = new Set<string>();
+
+  constructor(
+    getConnectedPeers: () => readonly string[],
+    hardMaximum = 20,
+    maxConcurrentAttempts = 4,
+    private readonly preferredTarget = DEFAULT_PREFERRED_CONNECTION_TARGET
+  ) {
+    this.getConnectedPeers = getConnectedPeers;
+    this.hardMaximum = normalizePositiveInteger(hardMaximum, 20);
+    this.maxConcurrentAttempts = normalizePositiveInteger(maxConcurrentAttempts, 4);
+    this.preferredTarget = Math.min(
+      normalizePositiveInteger(preferredTarget, DEFAULT_PREFERRED_CONNECTION_TARGET),
+      this.hardMaximum
+    );
+  }
+
+  reserve(peerId: string, direction: 'inbound' | 'outbound'): boolean {
+    if (!peerId.trim()) return false;
+    const connected = new Set(this.getConnectedPeers());
+    if (connected.has(peerId) || this.reservations.has(peerId)) return true;
+
+    const occupied = new Set([...connected, ...this.reservations]);
+    if (occupied.size >= this.hardMaximum || this.reservations.size >= this.maxConcurrentAttempts) {
+      return false;
+    }
+    if (direction === 'outbound' && occupied.size >= this.preferredTarget) return false;
+    this.reservations.add(peerId);
+    return true;
+  }
+
+  release(peerId: string): void {
+    this.reservations.delete(peerId);
+  }
+
+  getPendingPeerIds(): readonly string[] {
+    return [...this.reservations];
+  }
+
+  getOccupiedCount(): number {
+    return new Set([...this.getConnectedPeers(), ...this.reservations]).size;
+  }
+}
 
 export class PeerRecoveryCoordinator {
   private readonly options: PeerRecoveryOptions;
@@ -37,6 +88,7 @@ export class PeerRecoveryCoordinator {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryIndex = 0;
   private stopWaiter: (() => void) | null = null;
+  private lastObservedCount = 0;
 
   constructor(options: PeerRecoveryOptions) {
     this.options = options;
@@ -51,14 +103,29 @@ export class PeerRecoveryCoordinator {
   }
 
   notifyConnectivityChanged(): void {
-    if (this.options.getConnectedPeers().length > 0) {
+    const connectedCount = new Set(this.options.getConnectedPeers()).size;
+    const preferredTarget = normalizePositiveInteger(
+      this.options.preferredTarget,
+      DEFAULT_PREFERRED_CONNECTION_TARGET
+    );
+    if (connectedCount >= preferredTarget) {
       this.stop();
+      this.lastObservedCount = connectedCount;
       return;
     }
-    if (this.active) return;
+    if (this.active) {
+      if (connectedCount < this.lastObservedCount && this.retryTimer !== null) {
+        clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        void this.run(this.generation);
+      }
+      this.lastObservedCount = connectedCount;
+      return;
+    }
 
     this.active = true;
     this.retryIndex = 0;
+    this.lastObservedCount = connectedCount;
     this.generation += 1;
     if (this.running) {
       this.pendingRun = true;
@@ -93,8 +160,7 @@ export class PeerRecoveryCoordinator {
         .filter((peer) => peer.peerId.trim().length > 0)
         .sort((left, right) => compareRecentConnection(left.lastConnectedAt, right.lastConnectedAt));
       const tried = new Set<string>();
-      const remaining = knownPeers.map((peer) => peer.peerId);
-      this.fillAttemptQueue(remaining, tried, 1);
+      const remaining: string[] = [];
       let discoveryComplete = false;
       const discovery = this.options.discoverOnlinePeers()
         .catch(() => [] as readonly string[])
@@ -105,17 +171,15 @@ export class PeerRecoveryCoordinator {
             ...knownPeers.map((peer) => peer.peerId).filter((peerId) => onlineSet.has(peerId)),
             ...new Set(onlinePeers.filter((peerId) => !knownPeers.some((peer) => peer.peerId === peerId)))
           ];
-          remaining.splice(0, remaining.length, ...prioritizedOnlinePeers.filter((peerId) => (
+          remaining.push(...prioritizedOnlinePeers.filter((peerId) => (
             !tried.has(peerId) && !this.inFlight.has(peerId)
           )));
           for (const peerId of onlineSet) {
-            if (!prioritizedOnlinePeers.includes(peerId) && !tried.has(peerId) && !this.inFlight.has(peerId)) {
-              remaining.push(peerId);
-            }
+            if (!remaining.includes(peerId) && !tried.has(peerId) && !this.inFlight.has(peerId)) remaining.push(peerId);
           }
         });
 
-      while (this.isCurrent(generation) && this.options.getConnectedPeers().length === 0) {
+      while (this.isCurrent(generation) && this.hasCapacityToFill()) {
         this.fillAttemptQueue(remaining, tried);
         if (discoveryComplete && remaining.length === 0 && this.inFlight.size === 0) break;
 
@@ -125,7 +189,11 @@ export class PeerRecoveryCoordinator {
         await Promise.race([...pending, stopWait]);
       }
 
-      if (!this.isCurrent(generation) || this.options.getConnectedPeers().length > 0) return;
+      if (!this.isCurrent(generation)) return;
+      if (new Set(this.options.getConnectedPeers()).size >= this.preferredTarget()) {
+        this.stop();
+        return;
+      }
       this.scheduleRetry();
     } finally {
       this.running = false;
@@ -143,13 +211,38 @@ export class PeerRecoveryCoordinator {
       DEFAULT_MAX_CONCURRENT_ATTEMPTS
     );
     const maxConcurrent = Math.min(configuredLimit, concurrencyLimit ?? configuredLimit);
-    while (remaining.length > 0 && this.inFlight.size < maxConcurrent) {
+    while (
+      remaining.length > 0
+      && this.inFlight.size < maxConcurrent
+      && this.pendingPeerIds().size < configuredLimit
+      && this.occupiedPeerIds().size < this.preferredTarget()
+    ) {
       const peerId = remaining.shift();
       if (!peerId || tried.has(peerId) || this.inFlight.has(peerId)
+        || this.options.getConnectedPeers().includes(peerId)
         || this.options.isAttemptInProgress(peerId) || !this.canAttempt(peerId)) continue;
       tried.add(peerId);
       this.startAttempt(peerId);
     }
+  }
+
+  private hasCapacityToFill(): boolean {
+    return this.occupiedPeerIds().size < this.preferredTarget();
+  }
+
+  private occupiedPeerIds(): Set<string> {
+    return new Set([...this.options.getConnectedPeers(), ...this.pendingPeerIds()]);
+  }
+
+  private pendingPeerIds(): Set<string> {
+    return new Set([
+      ...(this.options.getPendingPeerIds?.() ?? []),
+      ...this.inFlight.keys()
+    ]);
+  }
+
+  private preferredTarget(): number {
+    return normalizePositiveInteger(this.options.preferredTarget, DEFAULT_PREFERRED_CONNECTION_TARGET);
   }
 
   private startAttempt(peerId: string): void {

@@ -4,8 +4,22 @@ import { decryptJsonPayload, encryptJsonPayload, type VaultBlob } from './crypto
 import { connectToSignalling, requestOnlinePeerList, resolveOnlinePeerList, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
 import { closeAndRemovePeerManager } from './p2p/peer-manager-registry';
-import { PeerRecoveryCoordinator } from './p2p/peer-recovery';
+import {
+  DEFAULT_PREFERRED_CONNECTION_TARGET,
+  PeerConnectionCapacity,
+  PeerRecoveryCoordinator
+} from './p2p/peer-recovery';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
+import {
+  connectionObservationId,
+  newConnectionAttemptObservationId,
+  recordConnectionClosed,
+  recordConnectionFailure,
+  recordConnectionOpened,
+  recordFindForwarding,
+  recordValidatedObjectSupply,
+  type PeerIdentityEvidence
+} from './p2p/local-observations';
 import { wrapFindTransport } from './object-layer/find-transport-adapter';
 import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
@@ -206,9 +220,19 @@ function isValidPeerFingerprint(value: string) {
   return /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(value.trim());
 }
 
+function observeValidatedObjectSupply(
+  peerId: string,
+  object: DistributedObject,
+  reportError: (message: string) => void
+) {
+  void recordValidatedObjectSupply(peerId, object.object_id, object.author)
+    .catch((error: unknown) => reportError(`Failed to record validated object supply from ${peerId}: ${error instanceof Error ? error.message : String(error)}`));
+}
+
 function App() {
   const peerManagersRef = useRef<Record<string, PeerConnectionManager>>({});
   const peerRecoveryRef = useRef<PeerRecoveryCoordinator | null>(null);
+  const peerCapacityRef = useRef<PeerConnectionCapacity | null>(null);
   const activePeerAttemptsRef = useRef(new Set<string>());
   const peerRecoveryAttemptResolversRef = useRef(new Map<string, (connected: boolean) => void>());
   const peerDisconnectedTimeoutsRef = useRef(new Map<string, number>());
@@ -360,6 +384,7 @@ function App() {
   const waitingPeerIntervalsRef = useRef<Map<string, number>>(new Map());
   const peerElectionFallbackTimersRef = useRef<Map<string, number>>(new Map());
   const peerAttemptTimeoutsRef = useRef<Map<string, number>>(new Map());
+  const peerAttemptObservationIdsRef = useRef(new Map<string, string>());
   const peerPostReceptionTimesRef = useRef<Map<string, number>>(new Map());
   const postParentLookupRef = useRef<Map<string, { attemptedAt: number; promise: Promise<DistributedObject | null> }>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
@@ -559,7 +584,8 @@ function App() {
       saveCursor: saveInboxCursor,
       loadBackfillState: loadInboxBackfillState,
       saveBackfillState: saveInboxBackfillState,
-      events: dmEventsRef.current
+      events: dmEventsRef.current,
+      onValidatedObject: (peerId, object) => observeValidatedObjectSupply(peerId, object, addLog)
     });
     const outboxStore = outboxStoreRef.current;
     if (!outboxStore) return;
@@ -905,7 +931,9 @@ function App() {
       const next = prev.map((contact) => (contact.fingerprint === peerId ? { ...contact, ...updates } : contact));
       const updated = next.find((contact) => contact.fingerprint === peerId);
       if (updated) {
-        saveContact(updated);
+        void saveContact(updated).catch((error: unknown) => {
+          addLog(`Failed to persist contact state for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
       }
       return next;
     });
@@ -1084,9 +1112,14 @@ function App() {
         addLog(`local results: ${localObjects.length}`);
         addLog(`children selected: ${nextPeers.join(', ') || 'none'}`);
         addLog(`upstream recorded: ${peerId}`);
+        const forwardedChildren = new Set<string>();
         let aggregation: FindAggregation;
         aggregation = new FindAggregation(requestedObjectIds, expiresAtMs, async (objects, reason, aggregatedHasMore) => {
           try {
+            for (const childPeerId of forwardedChildren) {
+              void recordFindForwarding(requestId, peerId, childPeerId, 'failed')
+                .catch((error: unknown) => addLog(`Failed to record FIND forwarding timeout: ${error instanceof Error ? error.message : String(error)}`));
+            }
             const transport = objectTransportRef.current;
             if (!transport || !transport.connectedPeers().includes(peerId)) return;
             const responsePage = await prepareFindQueryPage(objects, queryFields);
@@ -1168,6 +1201,9 @@ function App() {
               }
               await transport.send(nextPeer, forwardedPacket);
             });
+            if (forwarded) forwardedChildren.add(nextPeer);
+            void recordFindForwarding(requestId, peerId, nextPeer, forwarded ? 'pending' : 'failed')
+              .catch((error: unknown) => addLog(`Failed to record FIND forwarding observation: ${error instanceof Error ? error.message : String(error)}`));
             if (forwarded) {
               addLog(`forwarded request to child ${nextPeer}: requestId=${requestId} ttl=${packet.payload.ttl - 1}`);
             } else {
@@ -1193,7 +1229,9 @@ function App() {
           const route = response.payload.requestId ? findRequestRouteRef.current.get(response.payload.requestId) : undefined;
           const aggregationState = response.payload.requestId ? findAggregationRef.current.get(response.payload.requestId) : undefined;
           if (route && route.upstreamPeer !== peerId && typeof response.payload.origin === 'string') {
-            const relayed = await buildFindResponsePacket(
+              void recordFindForwarding(response.payload.requestId, route.upstreamPeer, peerId, 'responded')
+                .catch((error: unknown) => addLog(`Failed to record FIND forwarding response: ${error instanceof Error ? error.message : String(error)}`));
+              const relayed = await buildFindResponsePacket(
               identityRef.current?.id ?? 'unknown',
               route.upstreamPeer,
               response.payload.object_id,
@@ -1257,7 +1295,11 @@ function App() {
           addLog(`OBJECT FIND forwarded: requestId=${requestId} ${fromPeer} -> ${nextPeer} ttl=${ttl} expiresAt=${expiresAt}`);
           try {
             await objectTransportRef.current?.send(nextPeer, forwardedPacket);
+            void recordFindForwarding(requestId, fromPeer, nextPeer, 'pending')
+              .catch((error: unknown) => addLog(`Failed to record FIND forwarding observation: ${error instanceof Error ? error.message : String(error)}`));
           } catch (error) {
+            void recordFindForwarding(requestId, fromPeer, nextPeer, 'failed')
+              .catch((recordError: unknown) => addLog(`Failed to record FIND forwarding failure: ${recordError instanceof Error ? recordError.message : String(recordError)}`));
             findRequestRouteRef.current.delete(requestId);
             findRequestCacheRef.current.delete(requestId);
             throw error;
@@ -1276,7 +1318,12 @@ function App() {
       if (aggregationState) {
         if (peerId !== aggregationState.upstreamPeer && aggregationState.aggregation.hasChild(peerId)) {
           const validatedObjects = await validateFindResponseObjects(packet, requestId!, aggregationState.requestedObjectIds);
+          for (const object of validatedObjects) {
+            observeValidatedObjectSupply(peerId, object, addLog);
+          }
           const objects = await filterTombstonedObjects(validatedObjects, store);
+          void recordFindForwarding(requestId!, aggregationState.upstreamPeer, peerId, 'responded')
+            .catch((error: unknown) => addLog(`Failed to record FIND forwarding response: ${error instanceof Error ? error.message : String(error)}`));
           const queryFields = packet.payload as { object_type?: string; author?: string; created_after?: string; created_before?: string; page_before?: { created_at: string; object_id: string }; since?: string; limit?: number; order?: 'created_at_desc' };
           const isPhase7Query = Boolean(queryFields.object_type || queryFields.author || queryFields.created_after || queryFields.created_before || queryFields.page_before || queryFields.since || queryFields.limit !== undefined || queryFields.order);
           if (isPhase7Query) {
@@ -1305,6 +1352,10 @@ function App() {
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
       if (route && route.upstreamPeer !== peerId) {
         const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
+        const validatedSuppliedObjects = await validateFindResponseObjects(packet, requestId!, new Set());
+        for (const object of validatedSuppliedObjects) {
+          observeValidatedObjectSupply(peerId, object, addLog);
+        }
         const childObjects = Array.isArray(packet.payload.objects)
           ? packet.payload.objects
           : packet.payload.object ? [packet.payload.object] : [];
@@ -1770,6 +1821,19 @@ function App() {
     addLog(`Received authenticated connection metadata from ${peerId} following=${metadata.following}`);
   };
 
+  const peerObservationIdentity = async (peerId: string): Promise<PeerIdentityEvidence> => {
+    const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peerId);
+    const identityObject = contact?.identityObject;
+    if (contact
+      && identityObject
+      && identityObject.author === contact.publicKey
+      && await validateIdentityObject(identityObject)
+      && await deriveFingerprint(identityObject.author) === peerId) {
+      return { kind: 'verified', peerId, publicKey: identityObject.author };
+    }
+    return { kind: 'session', peerId };
+  };
+
   const addKnownPeer = async (peerId: string) => {
     if (!peerId || peerId === identity?.id || peerId === identity?.publicKey) return;
     if (blockedPeersRef.current.has(peerId)) {
@@ -1812,6 +1876,8 @@ function App() {
       peerAttemptTimeoutsRef.current.delete(peerId);
     }
     activePeerAttemptsRef.current.delete(peerId);
+    peerAttemptObservationIdsRef.current.delete(peerId);
+    peerCapacityRef.current?.release(peerId);
   };
 
   const settlePeerRecoveryAttempt = (peerId: string, connected: boolean) => {
@@ -1851,13 +1917,26 @@ function App() {
     }, 15_000));
   };
 
-  const startPeerAttemptTimeout = (peerId: string, timeoutMs = 30_000) => {
-    if (peerAttemptTimeoutsRef.current.has(peerId)) return;
+  const startPeerAttemptTimeout = (
+    peerId: string,
+    timeoutMs = 30_000,
+    direction: 'inbound' | 'outbound' = 'outbound'
+  ) => {
+    if (peerAttemptTimeoutsRef.current.has(peerId)) return true;
+    if (!peerCapacityRef.current?.reserve(peerId, direction)) return false;
+    if (objectTransportRef.current?.connectedPeers().includes(peerId)) return true;
     activePeerAttemptsRef.current.add(peerId);
+    peerAttemptObservationIdsRef.current.set(peerId, newConnectionAttemptObservationId());
     peerAttemptTimeoutsRef.current.set(peerId, window.setTimeout(() => {
+      const failureId = peerAttemptObservationIdsRef.current.get(peerId);
       peerAttemptTimeoutsRef.current.delete(peerId);
       activePeerAttemptsRef.current.delete(peerId);
-      addLog(`Peer ${peerId} connection attempt timed out after 30 seconds`);
+      peerCapacityRef.current?.release(peerId);
+      addLog(`Peer ${peerId} connection attempt timed out after ${Math.round(timeoutMs / 1000)} seconds`);
+      if (failureId) {
+        void recordConnectionFailure(peerId, failureId)
+          .catch((error: unknown) => addLog(`Failed to record connection attempt failure for ${peerId}: ${error instanceof Error ? error.message : String(error)}`));
+      }
       settlePeerRecoveryAttempt(peerId, false);
       const manager = peerManagersRef.current[peerId];
       if (manager && !manager.isDataChannelOpen()) {
@@ -1865,6 +1944,7 @@ function App() {
       }
       peerRecoveryRef.current?.notifyConnectivityChanged();
     }, timeoutMs));
+    return true;
   };
 
   const startPeerWaitingInterval = (peerId: string) => {
@@ -1916,6 +1996,8 @@ function App() {
     }) => signString(identity.privateKey, canonicalize(packet));
 
     let manager: PeerConnectionManager;
+    let connectionObservationSessionId = '';
+    let connectionObservationPromise: Promise<void> = Promise.resolve();
     const isCurrentManager = (peer: string) => peerManagersRef.current[peer] === manager;
     manager = new PeerConnectionManager(
       identity.id,
@@ -1978,6 +2060,9 @@ function App() {
             if (!isDeleteRequest(object)) void notifyNewlyAcceptedObject(object);
           }
           throw error;
+        }
+        if (await validateObject(object)) {
+          observeValidatedObjectSupply(peer, object, addLog);
         }
         if (object.object_type === IDENTITY_OBJECT_TYPE) {
           await updateContactFromIdentityObject(object as IdentityObject);
@@ -2102,6 +2187,11 @@ function App() {
               throw error;
             }
             for (const object of objects) {
+              if (object && await validateObject(object)) {
+                observeValidatedObjectSupply(peer, object, addLog);
+              }
+            }
+            for (const object of objects) {
               if (object.object_type === IDENTITY_OBJECT_TYPE) {
                 await updateContactFromIdentityObject(object as IdentityObject);
               }
@@ -2168,22 +2258,29 @@ function App() {
       },
       async (peer: string) => {
         if (!isCurrentManager(peer)) return;
+        const openedAt = Date.now();
+        if (!connectionObservationSessionId) {
+          connectionObservationSessionId = connectionObservationId(manager.getConnectionId());
+          connectionObservationPromise = peerObservationIdentity(peer)
+            .then((peerIdentity) => recordConnectionOpened(peer, connectionObservationSessionId, peerIdentity, openedAt))
+            .catch((error: unknown) => addLog(`Failed to record connection to ${peer}: ${error instanceof Error ? error.message : String(error)}`));
+        }
         settlePeerRecoveryAttempt(peer, true);
         await addKnownPeer(peer);
         setDataChannelOpen(true);
         setActivePeerId(peer);
-        updateContactState(peer, { connected: true, lastSeen: new Date().toISOString() });
+        updateContactStateAndPersist(peer, { connected: true, lastSeen: new Date().toISOString() });
         peerRecoveryRef.current?.notifyConnectivityChanged();
         inboxServiceRef.current?.notifyPeerConnected();
         void dmServiceRef.current?.flushOutbox();
-        const manager = peerManagersRef.current[peer];
+        const connectedManager = peerManagersRef.current[peer];
         addLog(`Peer ${peer} data channel open`);
-        addLog(`Peer ${peer} connected (initiated by ${manager?.didInitiateConnection() ? 'us' : 'them'})`);
+        addLog(`Peer ${peer} connected (initiated by ${connectedManager?.didInitiateConnection() ? 'us' : 'them'})`);
         clearPeerWaitingInterval(peer);
         clearPeerElectionFallback(peer);
         clearPeerAttemptTimeout(peer);
-        if (manager) {
-          await sendPeerMetadata(manager, peer);
+        if (connectedManager) {
+          await sendPeerMetadata(connectedManager, peer);
           try {
             await sendCachedIdentityProfiles(peer);
           } catch (error) {
@@ -2196,6 +2293,12 @@ function App() {
         }
       },
       (peer: string) => {
+        const closedAt = Date.now();
+        if (connectionObservationSessionId) {
+          void connectionObservationPromise
+            .then(() => recordConnectionClosed(peer, connectionObservationSessionId, closedAt))
+            .catch((error: unknown) => addLog(`Failed to record disconnection from ${peer}: ${error instanceof Error ? error.message : String(error)}`));
+        }
         if (!isCurrentManager(peer)) return;
         addLog(`Peer ${peer} disconnected (data channel or peer connection closed)`);
         clearPeerDisconnectedTimeout(peer);
@@ -2203,10 +2306,12 @@ function App() {
         clearPeerElectionFallback(peer);
         settlePeerRecoveryAttempt(peer, false);
         feedDisconnectSubscribersRef.current.forEach((subscriber) => subscriber(peer));
-        for (const state of findAggregationRef.current.values()) {
+        for (const [requestId, state] of findAggregationRef.current.entries()) {
           if (state.aggregation.hasChild(peer)) {
             addLog(`child ${peer} disconnected`);
             addLog('marking child failed');
+            void recordFindForwarding(requestId, state.upstreamPeer, peer, 'failed')
+              .catch((error: unknown) => addLog(`Failed to record FIND forwarding outcome: ${error instanceof Error ? error.message : String(error)}`));
             void state.aggregation.failChild(peer);
           }
         }
@@ -2262,8 +2367,18 @@ function App() {
       startPeerElectionFallback(peerId);
       return;
     }
-    startPeerAttemptTimeout(peerId, attemptTimeoutMs);
+    if (manager.isDataChannelOpen() || activePeerAttemptsRef.current.has(peerId)) return;
+    if (!startPeerAttemptTimeout(peerId, attemptTimeoutMs, 'outbound')) {
+      addLog(`Peer ${peerId} connection attempt deferred: connection capacity is full`);
+      settlePeerRecoveryAttempt(peerId, false);
+      return;
+    }
     void manager.createOffer(peerId, socket).catch((error: unknown) => {
+      const failureId = peerAttemptObservationIdsRef.current.get(peerId);
+      if (failureId) {
+        void recordConnectionFailure(peerId, failureId)
+          .catch((recordError: unknown) => addLog(`Failed to record connection attempt failure for ${peerId}: ${recordError instanceof Error ? recordError.message : String(recordError)}`));
+      }
       settlePeerRecoveryAttempt(peerId, false);
       addLog(`Peer ${peerId} connection failed: ${error instanceof Error ? error.message : String(error)}`);
       if (peerManagersRef.current[peerId] === manager && !manager.isDataChannelOpen()) {
@@ -2316,6 +2431,10 @@ function App() {
     const socket = signallingSocketRef.current;
     let initiatedAttempts = 0;
     for (const peerId of validPeers) {
+      if ((peerCapacityRef.current?.getOccupiedCount() ?? 0) >= DEFAULT_PREFERRED_CONNECTION_TARGET) {
+        addLog('Peer-list dialing stopped: preferred connection target reached');
+        break;
+      }
       const manager = ensurePeerManager(peerId);
       if (!socket || socket.readyState !== WebSocket.OPEN || !manager) {
         addLog(`Peer-list dial skipped for ${peerId}: signalling=${socket?.readyState === WebSocket.OPEN ? 'open' : 'closed'} manager=${manager ? 'ready' : 'missing'}`);
@@ -2358,8 +2477,16 @@ function App() {
   useEffect(() => {
     if (!identity?.id || !contactsLoaded) return;
 
+    const capacity = new PeerConnectionCapacity(
+      () => objectTransportRef.current?.connectedPeers() ?? [],
+      20,
+      4,
+      DEFAULT_PREFERRED_CONNECTION_TARGET
+    );
+    peerCapacityRef.current = capacity;
     const recovery = new PeerRecoveryCoordinator({
       getConnectedPeers: () => objectTransportRef.current?.connectedPeers() ?? [],
+      getPendingPeerIds: () => capacity.getPendingPeerIds(),
       getPreviouslyConnectedPeers: () => contactsRef.current
         .filter((contact): contact is Contact & { lastSeen: string } => (
           isValidPeerFingerprint(contact.fingerprint) && typeof contact.lastSeen === 'string'
@@ -2407,7 +2534,15 @@ function App() {
     recovery.notifyConnectivityChanged();
     return () => {
       recovery.dispose();
+      for (const timeout of peerAttemptTimeoutsRef.current.values()) {
+        window.clearTimeout(timeout);
+      }
+      peerAttemptTimeoutsRef.current.clear();
+      activePeerAttemptsRef.current.clear();
+      for (const resolve of peerRecoveryAttemptResolversRef.current.values()) resolve(false);
+      peerRecoveryAttemptResolversRef.current.clear();
       if (peerRecoveryRef.current === recovery) peerRecoveryRef.current = null;
+      if (peerCapacityRef.current === capacity) peerCapacityRef.current = null;
     };
   }, [identity?.id, contactsLoaded]);
 
@@ -2573,19 +2708,35 @@ function App() {
         }
 
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
-          if (message.from === identityRef.current?.id) {
+          const peerId = message.from;
+          if (peerId === identityRef.current?.id) {
             addLog(`Ignoring signalling message from self: ${message.type}`);
             return;
           }
-          if (message.type === 'offer') startPeerAttemptTimeout(message.from);
-          const manager = ensurePeerManager(message.from);
+          if (!isValidPeerFingerprint(peerId) || blockedPeersRef.current.has(peerId)) {
+            addLog(`Ignoring signalling message from invalid or blocked peer: ${peerId}`);
+            return;
+          }
+          if (message.type === 'offer') {
+            if (!startPeerAttemptTimeout(peerId, 30_000, 'inbound')) {
+              addLog(`Ignoring inbound offer from ${peerId}: connection capacity is full`);
+              return;
+            }
+          } else if (
+            !objectTransportRef.current?.connectedPeers().includes(peerId)
+            && !activePeerAttemptsRef.current.has(peerId)
+          ) {
+            addLog(`Ignoring ${message.type} from ${peerId} without an admitted connection attempt`);
+            return;
+          }
+          const manager = ensurePeerManager(peerId);
           if (manager) {
             try {
               await manager.handleSignal(message, socket);
             } catch (error) {
-              settlePeerRecoveryAttempt(message.from, false);
-              addLog(`Peer ${message.from} signalling negotiation failed: ${error instanceof Error ? error.message : String(error)}`);
-              closeAndRemovePeerManager(peerManagersRef.current, message.from, manager);
+              settlePeerRecoveryAttempt(peerId, false);
+              addLog(`Peer ${peerId} signalling negotiation failed: ${error instanceof Error ? error.message : String(error)}`);
+              closeAndRemovePeerManager(peerManagersRef.current, peerId, manager);
               peerRecoveryRef.current?.notifyConnectivityChanged();
             }
           }

@@ -15,6 +15,7 @@ export interface InboxServiceOptions {
   saveBackfillState?: (identityKey: string, state: InboxBackfillState | null) => Promise<unknown>;
   events: DmEvents;
   controllerConfig?: Partial<InboxControllerConfig>;
+  onValidatedObject?: (peerId: string, object: DistributedObject) => void;
   now?: () => Date;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
@@ -29,6 +30,7 @@ export function createInboxService({
   loadBackfillState,
   saveBackfillState,
   events,
+  onValidatedObject,
   controllerConfig,
   now,
   setTimer,
@@ -60,6 +62,7 @@ export function createInboxService({
     saveCursor,
     loadBackfillState,
     saveBackfillState,
+    onValidatedObject,
     now,
     onStored: (objects) => objects.forEach(notifyObjectStored)
   });

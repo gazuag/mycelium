@@ -6,6 +6,7 @@ A privacy-first peer-to-peer social app prototype.
 
 - Generates a local cryptographic identity in the browser.
 - Stores identity data locally in IndexedDB.
+- Keeps bounded, expiring connection, FIND-forwarding, and validated object-supply observations in local IndexedDB. These observations are not shared or used for peer selection.
 - Exports an identity backup file.
 - Connects two peers via WebRTC using a minimal signalling server.
 - Sends direct text messages over an RTCDataChannel.
@@ -40,6 +41,7 @@ than the remaining allowance before the client can abort it.
 
 - `src/crypto/identity.ts` — local keypair generation and fingerprint derivation.
 - `src/storage/idb.ts` — IndexedDB storage for local identity.
+- `src/p2p/local-observations.ts` — bounded local-only observations of direct connections, FIND forwarding, and validated object suppliers.
 - `src/p2p/signalling.ts` — WebSocket signalling connection.
 - `src/p2p/webrtc.ts` — WebRTC peer connection and data channel.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.

@@ -11,6 +11,7 @@ export interface InboxRunnerOptions {
   loadBackfillState?: (identityKey: string) => Promise<InboxBackfillState | null>;
   saveBackfillState?: (identityKey: string, state: InboxBackfillState | null) => Promise<unknown>;
   onStored?: (objects: DistributedObject[]) => void | Promise<void>;
+  onValidatedObject?: (peerId: string, object: DistributedObject) => void;
   now?: () => Date;
 }
 
@@ -23,9 +24,10 @@ export function createInboxRunner({
   loadBackfillState,
   saveBackfillState,
   onStored,
+  onValidatedObject,
   now
 }: InboxRunnerOptions): { syncOnce: () => Promise<{ stored: number; truncated: boolean }> } {
-  const fetchPage = fetchPageFromPeers(transport, { sender: myPublicKey });
+  const fetchPage = fetchPageFromPeers(transport, { sender: myPublicKey, onValidatedObject });
 
   return {
     async syncOnce() {
