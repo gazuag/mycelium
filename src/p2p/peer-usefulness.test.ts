@@ -153,6 +153,19 @@ describe('local peer usefulness estimation', () => {
     expect(estimates[0].score).toBeGreaterThan(estimates[1].score);
   });
 
+  it('does not increase confidence by counting one retrieval as both FIND and object evidence', () => {
+    const objectOnly = estimate(['child-peer'], {
+      objectSupply: [supply('child-peer', 'find-result', 'author')]
+    })[0];
+    const bothCategories = estimate(['child-peer'], {
+      objectSupply: [supply('child-peer', 'find-result', 'author')],
+      findForwarding: [findResponse('same-retrieval', 'origin-peer', 'child-peer')]
+    })[0];
+
+    expect(bothCategories.score).toBeGreaterThan(objectOnly.score);
+    expect(bothCategories.confidence).toBe(objectOnly.confidence);
+  });
+
   it('decays old object and FIND evidence by their configured half-lives', () => {
     const [oldObject, oldFind, oldConnection] = estimate(['object-peer', 'find-peer', 'connection-peer'], {
       connections: [connection('connection-peer', NOW - CONNECTION_EVIDENCE_HALF_LIFE_MS)],

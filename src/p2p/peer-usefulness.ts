@@ -108,8 +108,11 @@ export function estimatePeerUsefulness(
 
     const novelObjectWeight = Math.min(MAX_OBJECT_REACH_WEIGHT, sum(authorWeights.values()));
     const forwardedResponseWeight = Math.min(MAX_FIND_REACH_WEIGHT, sum(findWeightsByOrigin.values()));
-    const evidence = Math.min(MAX_OBJECT_REACH_WEIGHT, novelObjectWeight) + forwardedResponseWeight * 0.25;
-    const confidence = clamp(1 - Math.exp(-evidence / 3), 0, 1);
+    const objectEvidence = novelObjectWeight;
+    const findEvidence = forwardedResponseWeight * 0.25;
+    const evidence = objectEvidence + findEvidence;
+    const independentEvidence = Math.max(objectEvidence, findEvidence);
+    const confidence = clamp(1 - Math.exp(-independentEvidence / 3), 0, 1);
     const score = Math.min(
       MAX_SCORE,
       0.5 + (MAX_SCORE - 0.5) * (evidence / (evidence + 2))

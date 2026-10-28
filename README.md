@@ -129,19 +129,22 @@ to mutate them.
 ## Local peer usefulness estimates
 
 The Stage B estimator reads the bounded Stage A observation stores and produces
-a deterministic, local-only estimate with a confidence value. It is not used
-for peer ranking or connection selection. Explicit connection records identify
-only peers this browser successfully connected to; a FIND forwarding response
-is a responsive path observation, not evidence that the incoming and child
-peers connect directly. Validated object supplies can reveal overlap between
-suppliers, but only among objects observed by this browser. Object evidence
-decays with a 30-day half-life, FIND response evidence with a 14-day half-life,
-and contribution is capped per verified author. New or unobserved peers start
-at a neutral estimate with zero confidence. These observations cannot establish
-a peer's full inventory or its marginal reach across the network. The score is
-a bounded heuristic, not a probability or a claim of network-wide usefulness;
-confidence reflects only the amount of distinct, decayed evidence in these
-local records.
+a deterministic, local-only estimate with a confidence value. Stage C uses
+credible estimates only to order recovery candidates: unseen or low-confidence
+peers retain rotating exploration opportunities, and missing or failed
+estimates preserve the existing order. Estimates cannot override availability,
+retry backoff, active-attempt checks, or connection capacity. Explicit
+connection records identify only peers this browser successfully connected
+to; a FIND forwarding response is a responsive path observation, not evidence
+that the incoming and child peers connect directly. Validated object supplies
+can reveal overlap between suppliers, but only among objects observed by this
+browser. Object evidence decays with a 30-day half-life, FIND response evidence
+with a 14-day half-life, and contribution is capped per verified author. New or
+unobserved peers start at a neutral estimate with zero confidence. These
+observations cannot establish a peer's full inventory or its marginal reach
+across the network. The score is a bounded heuristic, not a probability or a
+claim of network-wide usefulness; confidence reflects the strongest decayed
+evidence category to avoid summing correlated object and FIND evidence.
 
 ## Deploying the frontend to Cloudflare Pages
 

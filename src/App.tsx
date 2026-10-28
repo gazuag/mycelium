@@ -9,6 +9,7 @@ import {
   PeerConnectionCapacity,
   PeerRecoveryCoordinator
 } from './p2p/peer-recovery';
+import { estimateLocalPeerUsefulness } from './p2p/peer-usefulness';
 import { PeerConnectionObjectTransport } from './p2p/object-transport';
 import {
   connectionObservationId,
@@ -2515,6 +2516,10 @@ function App() {
           isValidPeerFingerprint(contact.fingerprint) && typeof contact.lastSeen === 'string'
         ))
         .map((contact) => ({ peerId: contact.fingerprint, lastConnectedAt: contact.lastSeen })),
+      getPeerUsefulnessEstimates: estimateLocalPeerUsefulness,
+      onPeerUsefulnessError: (error) => {
+        addLog(`Peer usefulness estimate unavailable; retaining existing candidate order: ${error instanceof Error ? error.message : String(error)}`);
+      },
       discoverOnlinePeers: async () => {
         const socket = signallingSocketRef.current;
         const localPeerId = identityRef.current?.id;
