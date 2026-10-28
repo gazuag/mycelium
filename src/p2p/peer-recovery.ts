@@ -34,10 +34,20 @@ const DEFAULT_MAX_CONCURRENT_ATTEMPTS = 2;
 export const DEFAULT_PREFERRED_CONNECTION_TARGET = 10;
 export const MIN_USEFULNESS_SELECTION_CONFIDENCE = 0.5;
 
+interface PeerCandidateRotation {
+  lastExplorationPeerId?: string;
+  lastCrediblePeerId?: string;
+}
+
+interface PeerCandidateGroups {
+  explorationPeerIds: ReadonlySet<string>;
+  crediblePeerIds: ReadonlySet<string>;
+}
+
 export function prioritizePeerCandidates(
   candidates: readonly string[],
   estimates: readonly PeerUsefulnessEstimate[],
-  selectionRound = 0
+  rotation: PeerCandidateRotation = {}
 ): string[] {
   const uniqueCandidates = [...new Set(candidates.filter((peerId) => peerId.trim().length > 0))];
   if (uniqueCandidates.length < 2) return uniqueCandidates;
@@ -60,26 +70,18 @@ export function prioritizePeerCandidates(
   const credibleCandidates = uniqueCandidates.filter((peerId) => hasCredibleUsefulness(estimatesByPeer.get(peerId)));
   if (credibleCandidates.length === 0) return uniqueCandidates;
 
-  const round = Number.isSafeInteger(selectionRound) && selectionRound > 0 ? selectionRound : 0;
   const explorationCandidates = uniqueCandidates.filter((peerId) => (
     !hasCredibleUsefulness(estimatesByPeer.get(peerId))
-  ));
-  const explorationPeer = explorationCandidates.length > 0
-    ? explorationCandidates[round % explorationCandidates.length]
-    : undefined;
+  )).sort((left, right) => left.localeCompare(right));
+  const explorationPeer = rotateAfterPeer(explorationCandidates, rotation.lastExplorationPeerId)[0];
 
   const rankedCredible = credibleCandidates
     .map((peerId, index) => ({ peerId, index, score: estimatesByPeer.get(peerId)!.score }))
     .sort((left, right) => right.score - left.score || left.index - right.index);
-  const diversifiedCredible: string[] = [];
-  for (let index = 0; index < rankedCredible.length;) {
-    let end = index + 1;
-    while (end < rankedCredible.length && rankedCredible[end].score === rankedCredible[index].score) end += 1;
-    const tiedPeers = rankedCredible.slice(index, end).map(({ peerId }) => peerId);
-    const offset = round % tiedPeers.length;
-    diversifiedCredible.push(...tiedPeers.slice(offset), ...tiedPeers.slice(0, offset));
-    index = end;
-  }
+  const diversifiedCredible = rotateAfterPeer(
+    rankedCredible.map(({ peerId }) => peerId),
+    rotation.lastCrediblePeerId
+  );
 
   return [
     ...(explorationPeer ? [explorationPeer] : []),
@@ -88,6 +90,20 @@ export function prioritizePeerCandidates(
       peerId !== explorationPeer && !credibleCandidates.includes(peerId)
     ))
   ];
+}
+
+function rotateAfterPeer(peerIds: readonly string[], previousPeerId?: string): string[] {
+  if (peerIds.length < 2 || !previousPeerId) return [...peerIds];
+  const previousIndex = peerIds.indexOf(previousPeerId);
+  if (previousIndex < 0) return [...peerIds];
+  const nextIndex = (previousIndex + 1) % peerIds.length;
+  return [...peerIds.slice(nextIndex), ...peerIds.slice(0, nextIndex)];
+}
+
+function isCredibleUsefulness(estimate: PeerUsefulnessEstimate | undefined): estimate is PeerUsefulnessEstimate {
+  return estimate !== undefined
+    && estimate.confidence >= MIN_USEFULNESS_SELECTION_CONFIDENCE
+    && (estimate.novel_object_weight > 0 || estimate.forwarded_response_weight > 0);
 }
 
 export class PeerConnectionCapacity {
@@ -142,6 +158,7 @@ export class PeerRecoveryCoordinator {
   private readonly options: PeerRecoveryOptions;
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly failures = new Map<string, PeerFailure>();
+  private readonly candidateRotation: PeerCandidateRotation = {};
   private active = false;
   private running = false;
   private pendingRun = false;
@@ -224,6 +241,7 @@ export class PeerRecoveryCoordinator {
       const tried = new Set<string>();
       const remaining: string[] = [];
       let discoveryComplete = false;
+      let candidateGroups: PeerCandidateGroups | undefined;
       const discovery = this.options.discoverOnlinePeers()
         .catch(() => [] as readonly string[])
         .then(async (onlinePeers) => {
@@ -238,10 +256,18 @@ export class PeerRecoveryCoordinator {
           ));
           let orderedCandidates = prioritizedOnlinePeers;
           if (this.options.getPeerUsefulnessEstimates && orderedCandidates.length > 1) {
-            const selectionRound = this.selectionRound++;
             try {
               const estimates = await this.options.getPeerUsefulnessEstimates(orderedCandidates);
-              orderedCandidates = prioritizePeerCandidates(orderedCandidates, estimates, selectionRound);
+              const estimatesByPeer = new Map(estimates.map((estimate) => [estimate.peer_id, estimate]));
+              candidateGroups = {
+                explorationPeerIds: new Set(orderedCandidates.filter((peerId) => (
+                  !isCredibleUsefulness(estimatesByPeer.get(peerId))
+                ))),
+                crediblePeerIds: new Set(orderedCandidates.filter((peerId) => (
+                  isCredibleUsefulness(estimatesByPeer.get(peerId))
+                )))
+              };
+              orderedCandidates = prioritizePeerCandidates(orderedCandidates, estimates, this.candidateRotation);
             } catch (error) {
               this.options.onPeerUsefulnessError?.(error);
             }
@@ -250,7 +276,7 @@ export class PeerRecoveryCoordinator {
         });
 
       while (this.isCurrent(generation) && this.hasCapacityToFill()) {
-        this.fillAttemptQueue(remaining, tried);
+        this.fillAttemptQueue(remaining, tried, undefined, candidateGroups);
         if (discoveryComplete && remaining.length === 0 && this.inFlight.size === 0) break;
 
         const pending: Promise<unknown>[] = [...this.inFlight.values()];
@@ -275,7 +301,12 @@ export class PeerRecoveryCoordinator {
     }
   }
 
-  private fillAttemptQueue(remaining: string[], tried: Set<string>, concurrencyLimit?: number): void {
+  private fillAttemptQueue(
+    remaining: string[],
+    tried: Set<string>,
+    concurrencyLimit?: number,
+    candidateGroups?: PeerCandidateGroups
+  ): void {
     const configuredLimit = normalizePositiveInteger(
       this.options.maxConcurrentAttempts,
       DEFAULT_MAX_CONCURRENT_ATTEMPTS
@@ -292,6 +323,11 @@ export class PeerRecoveryCoordinator {
         || this.options.getConnectedPeers().includes(peerId)
         || this.options.isAttemptInProgress(peerId) || !this.canAttempt(peerId)) continue;
       tried.add(peerId);
+      if (candidateGroups?.explorationPeerIds.has(peerId)) {
+        this.candidateRotation.lastExplorationPeerId = peerId;
+      } else if (candidateGroups?.crediblePeerIds.has(peerId)) {
+        this.candidateRotation.lastCrediblePeerId = peerId;
+      }
       this.startAttempt(peerId);
     }
   }

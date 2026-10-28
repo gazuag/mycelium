@@ -237,6 +237,133 @@ describe('PeerRecoveryCoordinator', () => {
     coordinator.dispose();
   });
 
+  it('rotates exploration by peer identity when discovery order changes between rounds', async () => {
+    let coordinator: PeerRecoveryCoordinator;
+    let discoveryRound = 0;
+    const connectedPeers: string[] = [];
+    const attempts: string[] = [];
+    const candidates = [
+      ['explore-a', 'explore-b', 'credible'],
+      ['credible', 'explore-b', 'explore-a']
+    ];
+    coordinator = new PeerRecoveryCoordinator({
+      getConnectedPeers: () => connectedPeers,
+      getPreviouslyConnectedPeers: () => [],
+      preferredTarget: 1,
+      discoverOnlinePeers: async () => candidates[discoveryRound++],
+      getPeerUsefulnessEstimates: async () => [usefulness('credible', 0.9, 0.9)],
+      isAttemptInProgress: () => false,
+      attemptPeer: async (peerId) => {
+        attempts.push(peerId);
+        connectedPeers.push(peerId);
+        coordinator.notifyConnectivityChanged();
+        return true;
+      }
+    });
+
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    connectedPeers.length = 0;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+
+    expect(attempts).toEqual(['explore-a', 'explore-b']);
+    coordinator.dispose();
+  });
+
+  it('rotates the first credible candidate across successive recovery rounds', async () => {
+    let coordinator: PeerRecoveryCoordinator;
+    let discoveryRound = 0;
+    const connectedPeers: string[] = [];
+    const attempts: string[] = [];
+    coordinator = new PeerRecoveryCoordinator({
+      getConnectedPeers: () => connectedPeers,
+      getPreviouslyConnectedPeers: () => [],
+      preferredTarget: 1,
+      discoverOnlinePeers: async () => (
+        discoveryRound++ === 0
+          ? ['highest-score', 'lower-score']
+          : ['lower-score', 'highest-score']
+      ),
+      getPeerUsefulnessEstimates: async () => [
+        usefulness('highest-score', 0.95, 0.9),
+        usefulness('lower-score', 0.7, 0.8)
+      ],
+      isAttemptInProgress: () => false,
+      attemptPeer: async (peerId) => {
+        attempts.push(peerId);
+        connectedPeers.push(peerId);
+        coordinator.notifyConnectivityChanged();
+        return true;
+      }
+    });
+
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    connectedPeers.length = 0;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+
+    expect(attempts).toEqual(['highest-score', 'lower-score']);
+    coordinator.dispose();
+  });
+
+  it('respects active checks and retry backoff while leaving skipped candidates eligible later', async () => {
+    vi.useFakeTimers();
+    let coordinator: PeerRecoveryCoordinator;
+    let currentTime = 0;
+    let discoveryRound = 0;
+    const connectedPeers: string[] = [];
+    const attempts: string[] = [];
+    const connect = (peerId: string) => {
+      attempts.push(peerId);
+      if (peerId === 'available-peer') connectedPeers.push(peerId);
+      coordinator.notifyConnectivityChanged();
+      return Promise.resolve(peerId === 'available-peer' || currentTime >= 100);
+    };
+    coordinator = new PeerRecoveryCoordinator({
+      getConnectedPeers: () => connectedPeers,
+      getPreviouslyConnectedPeers: () => [],
+      preferredTarget: 1,
+      discoverOnlinePeers: async () => {
+        discoveryRound += 1;
+        return ['backoff-peer', 'active-peer', 'available-peer'];
+      },
+      getPeerUsefulnessEstimates: async () => [
+        usefulness('backoff-peer', 0.95, 0.9),
+        usefulness('active-peer', 0.9, 0.9),
+        usefulness('available-peer', 0.7, 0.8)
+      ],
+      isAttemptInProgress: (peerId) => peerId === 'active-peer',
+      attemptPeer: connect,
+      peerBackoffBaseMs: 100,
+      peerBackoffMaxMs: 100,
+      retryDelaysMs: [10],
+      now: () => currentTime
+    });
+
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    connectedPeers.length = 0;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    expect(attempts).toEqual(['backoff-peer', 'available-peer', 'available-peer']);
+
+    connectedPeers.length = 0;
+    currentTime = 100;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    expect(attempts).toEqual([
+      'backoff-peer',
+      'available-peer',
+      'available-peer',
+      'backoff-peer',
+      'available-peer'
+    ]);
+    expect(discoveryRound).toBe(3);
+    coordinator.dispose();
+  });
+
   it('uses credible usefulness after discovery without bypassing active-attempt checks', async () => {
     const attempts: string[] = [];
     const estimates = [
@@ -313,9 +440,14 @@ describe('prioritizePeerCandidates', () => {
     const candidates = ['known-useful-peer', 'new-peer-a', 'new-peer-b'];
     const estimates = [usefulness('known-useful-peer', 0.9, 0.9)];
 
-    expect(prioritizePeerCandidates(candidates, estimates, 0)[0]).toBe('new-peer-a');
-    expect(prioritizePeerCandidates(candidates, estimates, 1)[0]).toBe('new-peer-b');
-    expect(prioritizePeerCandidates(candidates, estimates, 2)[0]).toBe('new-peer-a');
+    expect(prioritizePeerCandidates(candidates, estimates)[0]).toBe('new-peer-a');
+    expect(prioritizePeerCandidates(candidates, estimates, { lastExplorationPeerId: 'new-peer-a' })[0])
+      .toBe('new-peer-b');
+    expect(prioritizePeerCandidates(
+      ['known-useful-peer', 'new-peer-b', 'new-peer-a'],
+      estimates,
+      { lastExplorationPeerId: 'new-peer-b' }
+    )[0]).toBe('new-peer-a');
   });
 
   it('keeps lower-scored candidates eligible after higher-scored candidates', () => {
@@ -330,14 +462,17 @@ describe('prioritizePeerCandidates', () => {
     expect(ordered).toEqual(['higher-score', 'lower-score']);
   });
 
-  it('rotates equal-scored credible candidates across rounds and remains deterministic per round', () => {
+  it('rotates credible candidates by identity and remains deterministic when input order changes', () => {
     const candidates = ['peer-a', 'peer-b', 'peer-c'];
     const estimates = candidates.map((peerId) => usefulness(peerId, 0.8, 0.8));
 
-    expect(prioritizePeerCandidates(candidates, estimates, 0))
-      .toEqual(prioritizePeerCandidates(candidates, estimates, 0));
-    expect([0, 1, 2].map((round) => prioritizePeerCandidates(candidates, estimates, round)[0]))
-      .toEqual(['peer-a', 'peer-b', 'peer-c']);
+    expect(prioritizePeerCandidates(candidates, estimates))
+      .toEqual(prioritizePeerCandidates(candidates, estimates));
+    expect(prioritizePeerCandidates(
+      ['peer-c', 'peer-a', 'peer-b'],
+      estimates,
+      { lastCrediblePeerId: 'peer-a' }
+    )[0]).toBe('peer-b');
   });
 });
 
