@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import websockets
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from .protocol import (
     HEX_SHA256,
@@ -25,6 +27,7 @@ from .protocol import (
     MAX_OBJECT_BYTES,
     MAX_PACKET_BYTES,
     canonicalize,
+    canonicalize_v3,
     fingerprint,
     object_expired,
     is_safe_integer,
@@ -56,7 +59,9 @@ REPLICATION_BUDGET = 3
 DEFAULT_MAX_PEERS = 16
 HARD_MAX_PEERS = 64
 DEFAULT_DISPLAY_NAME = "Mycelium peer"
+DEFAULT_BIO = "I'm an automatic cache node."
 MAX_DISPLAY_NAME_LENGTH = 80
+MAX_BIO_LENGTH = 2000
 PEER_MODES = ("social", "hoarder")
 
 
@@ -145,6 +150,163 @@ def write_identity(path: Path) -> Identity:
     return identity
 
 
+def write_encryption_identity(path: Path) -> str:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    if path.exists():
+        if path.is_symlink():
+            raise ValueError("encryption identity file must not be a symbolic link")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(raw, dict) or not isinstance(raw.get("public_key"), str)
+                or not isinstance(raw.get("private_key"), str)):
+            raise ValueError("encryption identity file has an invalid shape")
+        private_key = serialization.load_der_private_key(
+            base64.b64decode(raw["private_key"], validate=True), password=None
+        )
+        if (not isinstance(private_key, ec.EllipticCurvePrivateKey)
+                or not isinstance(private_key.curve, ec.SECP256R1)):
+            raise ValueError("encryption identity private key must be P-256")
+        public_key = base64.b64encode(private_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )).decode("ascii")
+        if raw["public_key"] != public_key:
+            raise ValueError("encryption identity public and private keys do not match")
+        path.chmod(0o600)
+        return public_key
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = base64.b64encode(private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )).decode("ascii")
+    private_key_text = base64.b64encode(private_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )).decode("ascii")
+    encoded = json.dumps(
+        {"public_key": public_key, "private_key": private_key_text},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(prefix=".encryption-identity-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return public_key
+
+
+def create_identity_object(
+    identity: Identity,
+    display_name: str,
+    bio: str,
+    encryption_public_key: str,
+) -> dict[str, Any]:
+    binding = {
+        "signing_public_key": identity.public_key,
+        "encryption_public_key": encryption_public_key,
+        "created_at": utc_now(),
+    }
+    binding_signature = identity.sign(json.dumps(
+        {"domain": "mycelium-enc-key-binding-v1", **binding},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ))
+    immutable = {
+        "object_type": "mycelium.identity",
+        "author": identity.public_key,
+        "created_at": utc_now(),
+        "payload": {
+            "display_name": display_name,
+            "bio": bio,
+            "encryption_public_key": encryption_public_key,
+            "encryption_key_binding": {**binding, "signature": binding_signature},
+        },
+        "replication_policy": {},
+    }
+    object_id = os.urandom(32).hex()
+    content_hash = hashlib.sha256(canonicalize_v3(immutable).encode("utf-8")).hexdigest()
+    signature = identity.sign(canonicalize_v3({
+        "domain": "mycelium.object-signature.v3",
+        "object_id": object_id,
+        "content_hash": content_hash,
+    }))
+    return {
+        **immutable,
+        "object_id": object_id,
+        "signature": signature,
+        "object_id_version": 3,
+        "content_hash": content_hash,
+    }
+
+
+def validate_identity_object(value: Any) -> bool:
+    if (not isinstance(value, dict) or value.get("object_type") != "mycelium.identity"
+            or not validate_object(value)):
+        return False
+    payload = value.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    display_name = payload.get("display_name")
+    bio = payload.get("bio")
+    encryption_public_key = payload.get("encryption_public_key")
+    binding = payload.get("encryption_key_binding")
+    if (not isinstance(display_name, str) or not display_name.strip()
+            or not isinstance(bio, str) or not isinstance(encryption_public_key, str)
+            or not isinstance(binding, dict)):
+        return False
+    if (binding.get("signing_public_key") != value.get("author")
+            or binding.get("encryption_public_key") != encryption_public_key
+            or not isinstance(binding.get("created_at"), str)
+            or not isinstance(binding.get("signature"), str)):
+        return False
+    try:
+        encryption_key = serialization.load_der_public_key(
+            base64.b64decode(encryption_public_key, validate=True)
+        )
+        if (not isinstance(encryption_key, ec.EllipticCurvePublicKey)
+                or not isinstance(encryption_key.curve, ec.SECP256R1)):
+            return False
+        binding_content = json.dumps(
+            {
+                "domain": "mycelium-enc-key-binding-v1",
+                "signing_public_key": binding["signing_public_key"],
+                "encryption_public_key": binding["encryption_public_key"],
+                "created_at": binding["created_at"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return verify_signature(value["author"], binding_content, binding["signature"])
+    except (KeyError, TypeError, ValueError, RecursionError, UnicodeError):
+        return False
+
+
+def validate_peer_object(value: Any) -> bool:
+    if isinstance(value, dict) and value.get("object_type") == "mycelium.identity":
+        return validate_identity_object(value)
+    return validate_object(value)
+
+
 @dataclass
 class FindState:
     request_id: str
@@ -193,6 +355,8 @@ class PeerNode:
         display_name: str | None = None,
         mode: str = "social",
         auto_follow_back: bool | None = None,
+        bio: str | None = None,
+        encryption_public_key: str | None = None,
     ):
         if max_peers < 1 or max_peers > HARD_MAX_PEERS:
             raise ValueError(f"maximum peer connections must be between 1 and {HARD_MAX_PEERS}")
@@ -202,8 +366,15 @@ class PeerNode:
         self.store = store
         self.max_peers = max_peers
         self.display_name = self._load_display_name(display_name)
+        self.bio = self._load_bio(bio)
         self.mode = mode
         self.auto_follow_back = mode == "social" if auto_follow_back is None else auto_follow_back
+        self.encryption_public_key = encryption_public_key
+        self.identity_object = (
+            self._load_identity_object(encryption_public_key)
+            if encryption_public_key else None
+        )
+        self.identity_profiles_sent: set[str] = set()
         self.links: dict[str, PeerLink] = {}
         self.online_peers: set[str] = set()
         self.pool_peers: set[str] = set()
@@ -234,6 +405,49 @@ class PeerNode:
         value = value.strip()
         self.store.set_setting("display_name", value)
         return value
+
+    def _load_bio(self, configured: str | None) -> str:
+        value = configured if configured is not None else self.store.get_setting("bio")
+        value = value if value is not None else DEFAULT_BIO
+        if not isinstance(value, str) or len(value) > MAX_BIO_LENGTH:
+            raise ValueError(f"bio must contain at most {MAX_BIO_LENGTH} characters")
+        value = value.strip()
+        self.store.set_setting("bio", value)
+        return value
+
+    def _load_identity_object(self, encryption_public_key: str) -> dict[str, Any]:
+        cached, _ = self.store.query_objects({
+            "object_type": "mycelium.identity",
+            "author": self.identity.public_key,
+            "order": "created_at_desc",
+        }, limit=1)
+        if cached and validate_identity_object(cached[0]):
+            payload = cached[0]["payload"]
+            if (payload["display_name"] == self.display_name
+                    and payload["bio"] == self.bio
+                    and payload["encryption_public_key"] == encryption_public_key):
+                return cached[0]
+
+        profile = create_identity_object(
+            self.identity,
+            self.display_name,
+            self.bio,
+            encryption_public_key,
+        )
+        if not validate_identity_object(profile) or not self.store.put_object(profile):
+            raise ValueError("could not create and persist the signed identity object")
+        return profile
+
+    async def _send_identity_object(self, peer_id: str) -> None:
+        if not self.identity_object or peer_id in self.identity_profiles_sent:
+            return
+        try:
+            await self.send_packet(peer_id, "OBJECT_STORE", {"object": self.identity_object})
+        except (ConnectionError, ValueError) as error:
+            logging.debug("Could not send signed identity object to %s: %s", peer_id, error)
+            return
+        self.identity_profiles_sent.add(peer_id)
+        logging.info("Sent signed identity object to %s", peer_id)
 
     def connected_peers(self) -> list[str]:
         return [
@@ -346,6 +560,7 @@ class PeerNode:
             if not self._authenticate_profile(peer_id, packet):
                 return
             await self._start_feed_sync(peer_id)
+            await self._send_identity_object(peer_id)
             profile = packet["payload"].get("profile", packet["payload"].get("metadata"))
             following = profile.get("following") if isinstance(profile, dict) else None
             if (self.auto_follow_back and isinstance(following, bool)
@@ -663,6 +878,7 @@ class PeerNode:
         if previous_sync:
             self._cancel_feed_sync_timer(previous_sync)
         self.feed_sync_started.discard(peer_id)
+        self.identity_profiles_sent.discard(peer_id)
         self.authenticated.discard(peer_id)
         self.remote_keys.pop(peer_id, None)
         await self.send_packet(peer_id, "HELLO", {
@@ -680,14 +896,20 @@ class PeerNode:
         logging.info("Data channel opened with %s", peer_id)
 
     async def _send_profile(self, peer_id: str, packet_type: str) -> None:
+        profile = {
+            "author": self.identity.node_id,
+            "publicKey": self.identity.public_key,
+            "displayName": self.display_name,
+            "bio": self.bio,
+            "following": self.store.is_following(peer_id),
+            "timestamp": utc_now(),
+            **({
+                "encryptionPublicKey": self.encryption_public_key,
+                "encryptionKeyBinding": self.identity_object["payload"]["encryption_key_binding"],
+            } if self.identity_object else {}),
+        }
         await self.send_packet(peer_id, packet_type, {
-            "profile": {
-                "author": self.identity.node_id,
-                "publicKey": self.identity.public_key,
-                "displayName": self.display_name,
-                "following": self.store.is_following(peer_id),
-                "timestamp": utc_now(),
-            },
+            "profile": profile,
         })
 
     async def receive_object_from(
@@ -704,7 +926,7 @@ class PeerNode:
         if value.get("object_type") == "mycelium.delete-request":
             accepted = await self._accept_delete_request(value)
         else:
-            if not validate_object(value):
+            if not validate_peer_object(value):
                 logging.info(
                     "Rejected object from %s: validation failed (shape, object ID, or signature)",
                     peer_id,
@@ -999,7 +1221,7 @@ class PeerNode:
             local_objects, local_has_more = self.store.query_objects(
                 query_value, query_value.get("limit", FIND_MAX_QUERY)
             )
-            local_objects = [obj for obj in local_objects if validate_object(obj)]
+            local_objects = [obj for obj in local_objects if validate_peer_object(obj)]
         else:
             local_objects = []
             for object_id in object_ids:
@@ -1123,7 +1345,7 @@ class PeerNode:
                 if (not isinstance(candidate, dict)
                         or candidate.get("object_id") != lookup.object_id
                         or not self._object_within_limit(candidate)
-                        or not validate_object(candidate)
+                        or not validate_peer_object(candidate)
                         or object_expired(candidate)
                         or self.store.is_tombstoned(lookup.object_id)):
                     continue
@@ -1156,7 +1378,7 @@ class PeerNode:
             candidate = payload.get("object")
             candidates = [candidate] if isinstance(candidate, dict) else []
         for candidate in candidates:
-            if not self._object_within_limit(candidate) or not validate_object(candidate):
+            if not self._object_within_limit(candidate) or not validate_peer_object(candidate):
                 continue
             object_id = candidate["object_id"]
             if state.object_ids and object_id not in state.object_ids:
@@ -1847,6 +2069,11 @@ def parse_args() -> argparse.Namespace:
         help="profile display name; persisted in SQLite and overridden by this option when supplied",
     )
     parser.add_argument(
+        "--bio",
+        default=os.environ.get("MYCELIUM_BIO"),
+        help="profile bio; persisted in SQLite and overridden by this option when supplied",
+    )
+    parser.add_argument(
         "--mode",
         choices=PEER_MODES,
         default=os.environ.get("MYCELIUM_MODE", "social"),
@@ -1898,13 +2125,19 @@ async def async_main(args: argparse.Namespace) -> None:
         args.data_dir / "peer.sqlite3",
         object_cache_limit_bytes=args.cache_mb * 1024 * 1024,
     )
+    identity = write_identity(identity_path)
+    encryption_public_key = write_encryption_identity(
+        identity_path.with_suffix(".encryption.json")
+    )
     node = PeerNode(
-        write_identity(identity_path),
+        identity,
         store,
         args.max_peers,
         args.display_name,
         args.mode,
         args.auto_follow_back,
+        args.bio,
+        encryption_public_key,
     )
     usage = store.usage()
     counts = store.counts()

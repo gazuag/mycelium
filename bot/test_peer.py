@@ -24,10 +24,13 @@ from .peer import (
     PeerLink,
     PeerNode,
     _configure_logging,
+    create_identity_object,
     new_packet,
     parse_args,
     sign_packet,
     write_identity,
+    write_encryption_identity,
+    validate_identity_object,
 )
 from .protocol import (
     Identity,
@@ -35,6 +38,7 @@ from .protocol import (
     canonicalize,
     canonicalize_v3,
     fingerprint,
+    immutable_object_content,
     validate_object,
     verify_signature,
     validate_packet_shape,
@@ -310,6 +314,103 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
         key_data = json.loads(path.read_text())
         self.assertEqual(key_data["public_key"], created.public_key)
         self.assertEqual(key_data["node_id"], created.node_id)
+
+    async def test_identity_object_contains_bio_and_is_sent_after_peer_authentication(self) -> None:
+        encryption_path = self.root / "identity.encryption.json"
+        encryption_public_key = write_encryption_identity(encryption_path)
+        self.assertEqual(write_encryption_identity(encryption_path), encryption_public_key)
+        self.assertEqual(encryption_path.stat().st_mode & 0o777, 0o600)
+
+        node = PeerNode(
+            self.identity,
+            self.store,
+            display_name="Cache Relay",
+            bio="I'm an automatic cache node.",
+            encryption_public_key=encryption_public_key,
+        )
+        self.node = node
+        profile = node.identity_object
+        self.assertIsNotNone(profile)
+        self.assertTrue(validate_identity_object(profile))
+        self.assertEqual(profile["object_type"], "mycelium.identity")
+        self.assertEqual(profile["payload"]["display_name"], "Cache Relay")
+        self.assertEqual(profile["payload"]["bio"], "I'm an automatic cache node.")
+        self.assertEqual(self.store.get_object(profile["object_id"]), profile)
+
+        restarted = PeerNode(self.identity, self.store, encryption_public_key=encryption_public_key)
+        self.assertEqual(restarted.identity_object["object_id"], profile["object_id"])
+
+        remote = Identity.create()
+        channel = StubChannel()
+        node.links[remote.node_id] = StubLink(channel)
+        packet = sign_packet(remote, new_packet(
+            remote.node_id,
+            self.identity.node_id,
+            "PROFILE_UPDATE",
+            {"profile": {"publicKey": remote.public_key}},
+        ))
+        await node.handle_data(
+            remote.node_id,
+            json.dumps(packet, ensure_ascii=False, separators=(",", ":")),
+        )
+        object_packets = [item for item in channel.packets if item["type"] == "OBJECT_STORE"]
+        self.assertEqual(len(object_packets), 1)
+        object_packet = object_packets[0]
+        self.assertEqual(object_packet["payload"]["object"], profile)
+        self.assertTrue(verify_signature(
+            self.identity.public_key,
+            canonicalize({key: value for key, value in object_packet.items() if key != "signature"}),
+            object_packet["signature"],
+        ))
+
+        await node._send_profile(remote.node_id, "PROFILE_UPDATE")
+        connection_profile = channel.packets[-1]["payload"]["profile"]
+        self.assertEqual(connection_profile["displayName"], "Cache Relay")
+        self.assertEqual(connection_profile["bio"], "I'm an automatic cache node.")
+        self.assertEqual(connection_profile["encryptionPublicKey"], encryption_public_key)
+
+    async def test_invalid_identity_key_binding_is_rejected_before_storage(self) -> None:
+        encryption_public_key = write_encryption_identity(self.root / "profile-key.json")
+        invalid_profile = create_identity_object(
+            self.identity,
+            "Cache Relay",
+            "A profile with an invalid key binding",
+            encryption_public_key,
+        )
+        replacement_encryption_key = write_encryption_identity(self.root / "replacement-key.json")
+        invalid_payload = dict(invalid_profile["payload"])
+        invalid_binding = dict(invalid_payload["encryption_key_binding"])
+        invalid_binding["encryption_public_key"] = replacement_encryption_key
+        invalid_payload["encryption_key_binding"] = invalid_binding
+        immutable = {
+            **immutable_object_content(invalid_profile),
+            "payload": invalid_payload,
+        }
+        object_id = os.urandom(32).hex()
+        content_hash = hashlib.sha256(canonicalize_v3(immutable).encode("utf-8")).hexdigest()
+        invalid_profile = {
+            **immutable,
+            "object_id": object_id,
+            "signature": self.identity.sign(canonicalize_v3({
+                "domain": "mycelium.object-signature.v3",
+                "object_id": object_id,
+                "content_hash": content_hash,
+            })),
+            "object_id_version": 3,
+            "content_hash": content_hash,
+        }
+
+        self.assertTrue(validate_object(invalid_profile))
+        self.assertFalse(validate_identity_object(invalid_profile))
+        result = await self.node.receive_object_from(Identity.create().node_id, invalid_profile)
+        self.assertEqual(result, "rejected")
+        self.assertIsNone(self.store.get_object(object_id))
+
+    async def test_bio_environment_variable_is_parsed(self) -> None:
+        with patch.dict(os.environ, {"MYCELIUM_BIO": "Cache relay"}, clear=True), patch(
+            "sys.argv", ["peer"]
+        ):
+            self.assertEqual(parse_args().bio, "Cache relay")
 
     async def test_follow_back_cli_defaults_and_explicit_overrides(self) -> None:
         with patch.dict(os.environ, {}, clear=True), patch("sys.argv", ["peer"]):

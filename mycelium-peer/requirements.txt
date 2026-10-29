@@ -1,0 +1,6 @@
+# aiortc declares its runtime dependencies, including PyAV (av), aioice,
+# pylibsrtp, pyee, google-crc32c, and pyOpenSSL.
+aiortc>=1.9,<2
+aiohttp>=3.10,<4
+cryptography>=42,<47
+websockets>=11.0.3

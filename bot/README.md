@@ -32,6 +32,7 @@ persistent storage and restrict access to the service account.
 | `--data-dir` | `MYCELIUM_DATA_DIR` | `~/.local/share/mycelium-peer` |
 | `--identity-file` | `MYCELIUM_IDENTITY_FILE` | `<data-dir>/identity.json` |
 | `--display-name` | `MYCELIUM_DISPLAY_NAME` | persisted value, otherwise `Mycelium peer` |
+| `--bio` | `MYCELIUM_BIO` | persisted value, otherwise `I'm an automatic cache node.` |
 | `--cache-mb` | `MYCELIUM_CACHE_MB` | `2048` |
 | `--max-peers` | `MYCELIUM_MAX_PEERS` | `16` (hard maximum `64`) |
 | `--mode` | `MYCELIUM_MODE` | `social` |
@@ -50,12 +51,16 @@ follow-back behavior. `--auto-follow-back` and `--no-auto-follow-back`
 (or `MYCELIUM_AUTO_FOLLOW_BACK=true|false`) explicitly override either mode's
 default. Feed access is never obtained by publishing a follow relationship.
 
-The display name is published in the existing signed PROFILE exchange. It is
-stored in the SQLite settings table and survives restarts; a supplied CLI
-option or environment variable replaces the stored value. This is a display
-name only: the bot has no username or handle. Its profile `author` is its
-existing fingerprint, and `publicKey` carries the key used for signature and
-identity verification.
+The display name and bio are published in a signed `mycelium.identity` object
+using the ordinary object transport. The legacy signed PROFILE exchange still
+carries display metadata for connection compatibility, but it does not replace
+the identity object. Both settings are stored in SQLite and survive restarts;
+a supplied CLI option or environment variable replaces the stored value. The
+bot also keeps a P-256 encryption key in `identity.encryption.json` beside its
+signing identity and publishes its author-signed key binding in the identity
+object. The bot is a cache/relay, not a direct-message client. Its profile
+object `author` is the signing public key; the PROFILE handshake `author` is
+the existing fingerprint.
 
 The browser has no signed follow object. Its authenticated per-peer profile
 has a `following` boolean indicating whether that peer follows the recipient.
@@ -155,12 +160,12 @@ MYCELIUM_MODE=hoarder \
 python -m bot.peer --data-dir /var/lib/mycelium-peer
 ```
 
-The data directory contains `identity.json` and `peer.sqlite3`; SQLite may
-also create `peer.sqlite3-wal` and `peer.sqlite3-shm` while running. Back up the
-identity and database together. Stop the service cleanly before copying them
-to get a consistent backup. A display-name override in the service environment
-is written to SQLite at startup. No browser or external database service is
-needed.
+The data directory contains `identity.json`, `identity.encryption.json`, and
+`peer.sqlite3`; SQLite may also create `peer.sqlite3-wal` and
+`peer.sqlite3-shm` while running. Back up both identity files and the database
+together. Stop the service cleanly before copying them to get a consistent
+backup. Display-name and bio overrides are written to SQLite at startup. No
+browser or external database service is needed.
 
 For the approximately 47 GB disk described, a cautious first configuration is
 `MYCELIUM_CACHE_MB=4096` and `MYCELIUM_MAX_PEERS=16`. This allocates a 4 GiB
