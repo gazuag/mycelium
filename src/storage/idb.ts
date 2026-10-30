@@ -5,7 +5,7 @@ import type { InboxBackfillState } from '../object-layer/inbox-sync';
 import type { FeedCursor } from '../object-layer/types';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
 const PROFILE_STORE = 'profiles';
@@ -15,6 +15,7 @@ const FEED_CURSOR_STORE = 'feed_cursors';
 export const PEER_CONNECTION_OBSERVATION_STORE = 'peer_connection_observations';
 export const FIND_FORWARDING_OBSERVATION_STORE = 'find_forwarding_observations';
 export const OBJECT_SUPPLY_OBSERVATION_STORE = 'object_supply_observations';
+export const PEER_CANDIDATE_STORE = 'peer_candidates';
 let identityLoadPromise: Promise<CompleteLocalIdentityRecord | null> | null = null;
 
 interface InboxCursorRecord {
@@ -103,6 +104,10 @@ export async function openDatabase() {
           const store = db.createObjectStore(storeName, { keyPath: 'id' });
           store.createIndex('expires_at', 'expires_at');
         }
+      }
+      if (!db.objectStoreNames.contains(PEER_CANDIDATE_STORE)) {
+        const store = db.createObjectStore(PEER_CANDIDATE_STORE, { keyPath: 'peerId' });
+        store.createIndex('lastSeenAt', 'lastSeenAt');
       }
     };
 
@@ -449,7 +454,8 @@ export async function clearAllLocalData() {
         FEED_CURSOR_STORE,
         PEER_CONNECTION_OBSERVATION_STORE,
         FIND_FORWARDING_OBSERVATION_STORE,
-        OBJECT_SUPPLY_OBSERVATION_STORE
+        OBJECT_SUPPLY_OBSERVATION_STORE,
+        PEER_CANDIDATE_STORE
       ],
       'readwrite'
     );
@@ -463,7 +469,8 @@ export async function clearAllLocalData() {
       tx.objectStore(FEED_CURSOR_STORE),
       tx.objectStore(PEER_CONNECTION_OBSERVATION_STORE),
       tx.objectStore(FIND_FORWARDING_OBSERVATION_STORE),
-      tx.objectStore(OBJECT_SUPPLY_OBSERVATION_STORE)
+      tx.objectStore(OBJECT_SUPPLY_OBSERVATION_STORE),
+      tx.objectStore(PEER_CANDIDATE_STORE)
     ];
 
     stores.forEach((store) => store.clear());

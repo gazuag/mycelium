@@ -43,6 +43,13 @@ export interface DecryptDmObjectOptions {
   readonly expectedSenderEncryptionKey?: string;
 }
 
+export class DmDecryptionKeyUnavailableError extends Error {
+  constructor() {
+    super('Local direct-message decryption key is unavailable');
+    this.name = 'DmDecryptionKeyUnavailableError';
+  }
+}
+
 export async function createDmObject({
   identity,
   recipientSigningKey,
@@ -122,13 +129,25 @@ export async function decryptDmObject({
     throw new Error('Identity is neither the author nor the recipient');
   }
 
-  const key = await deriveDmKey(
-    typeof identity.encryptionPrivateKey === 'string'
+  let localPrivateKey: CryptoKey;
+  try {
+    localPrivateKey = typeof identity.encryptionPrivateKey === 'string'
       ? await importEncryptionPrivateKey(identity.encryptionPrivateKey)
-      : identity.encryptionKey,
-    await importEncryptionPublicKey(peerEncryptionKey),
-    createDmKeyContext(payload.sender_enc_key, payload.recipient_enc_key)
-  );
+      : identity.encryptionKey;
+  } catch {
+    throw new DmDecryptionKeyUnavailableError();
+  }
+  const peerPublicKey = await importEncryptionPublicKey(peerEncryptionKey);
+  let key: CryptoKey;
+  try {
+    key = await deriveDmKey(
+      localPrivateKey,
+      peerPublicKey,
+      createDmKeyContext(payload.sender_enc_key, payload.recipient_enc_key)
+    );
+  } catch {
+    throw new DmDecryptionKeyUnavailableError();
+  }
   const aad = createDmAad(object.author, object.recipient, payload.sender_enc_key, payload.recipient_enc_key);
   return await decryptDm(key, { ciphertext: payload.ciphertext, nonce: payload.nonce }, aad);
 }

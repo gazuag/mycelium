@@ -1,5 +1,6 @@
 import { isObjectExpired } from '../object-layer/envelope';
-import { DM_OBJECT_TYPE, validateDmPayload } from '../object-layer/dm-object';
+import { DM_OBJECT_TYPE, type DmObjectIdentity } from '../object-layer/dm-object';
+import { openDm } from '../object-layer/dm-inbox';
 import type { DistributedObject, ObjectStore } from '../object-layer/types';
 
 export const WEB_PUSH_NOTIFICATION_PREFERENCES_STORAGE_KEY = 'myceliumWebPushNotificationPreferences';
@@ -13,16 +14,18 @@ export interface WebPushNotificationPreferences {
   readonly followedPosts: boolean;
 }
 
-export interface WebPushNotificationIdentity {
-  readonly id: string;
-  readonly publicKey: string;
-  readonly encryptionPublicKey: string;
-}
+export type WebPushNotificationIdentity = DmObjectIdentity;
 
 export interface ClassifiedWebPushNotification {
   readonly category: WebPushNotificationCategory;
   readonly dedupeId: string;
 }
+
+export interface DeferredWebPushNotification {
+  readonly status: 'deferred';
+}
+
+export type WebPushNotificationClassification = ClassifiedWebPushNotification | DeferredWebPushNotification | null;
 
 export const DEFAULT_WEB_PUSH_NOTIFICATION_PREFERENCES: WebPushNotificationPreferences = {
   directMessages: true,
@@ -85,7 +88,7 @@ export async function classifyNewlyAcceptedObjectNotification(
     readonly isTombstoned: (objectId: string) => Promise<boolean>;
     readonly resolveSenderEncryptionKey: (author: string) => string | null;
   }
-): Promise<ClassifiedWebPushNotification | null> {
+): Promise<WebPushNotificationClassification> {
   const { identity, followedAuthorKeys, store, isTombstoned, resolveSenderEncryptionKey } = options;
   if (isObjectExpired(object)
     || object.author === identity.id
@@ -93,13 +96,17 @@ export async function classifyNewlyAcceptedObjectNotification(
     || await isTombstoned(object.object_id)) return null;
 
   if (object.object_type === DM_OBJECT_TYPE) {
-    const trustedSenderKey = resolveSenderEncryptionKey(object.author);
-    return object.recipient === identity.publicKey
-      && validateDmPayload(object.payload)
-      && trustedSenderKey !== null
-      && object.payload.sender_enc_key === trustedSenderKey
-      && object.payload.recipient_enc_key === identity.encryptionPublicKey
-      ? { category: 'directMessages', dedupeId: object.object_id }
+    if (object.recipient !== identity.publicKey) return null;
+    const opened = await openDm({
+      object,
+      identity,
+      resolveSenderEncryptionKey
+    });
+    if (opened.status === 'ok') {
+      return { category: 'directMessages', dedupeId: object.object_id };
+    }
+    return opened.status === 'unverified' || opened.status === 'unavailable'
+      ? { status: 'deferred' }
       : null;
   }
 

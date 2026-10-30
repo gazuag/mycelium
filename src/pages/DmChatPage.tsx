@@ -168,6 +168,8 @@ export function DmChatPage({
                       ? "Can't verify the sender yet. Connect with them once to exchange encryption keys."
                       : message.status === 'key_changed'
                         ? "This contact's encryption key changed. Verify with them before trusting new messages."
+                        : message.status === 'unavailable'
+                          ? 'This message cannot be opened right now. It may become available when your encryption key is restored.'
                         : 'This message could not be opened.'}
                   </p>}
               <span className="chat-timestamp">

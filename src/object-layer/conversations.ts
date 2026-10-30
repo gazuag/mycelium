@@ -7,7 +7,7 @@ import type { DeletionTombstone, DistributedObject, ObjectStore } from './types'
 import { decodeMarkdownMessage, type ExternalImageSize } from '../markdown/external-content';
 
 export type ConversationDirection = 'in' | 'out';
-export type ConversationMessageStatus = 'ok' | 'unverified' | 'key_changed' | 'invalid';
+export type ConversationMessageStatus = 'ok' | 'unverified' | 'key_changed' | 'unavailable' | 'invalid';
 
 export interface ConversationSummary {
   readonly counterparty: string;

@@ -8,7 +8,30 @@ import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 let ICE_SERVERS: RTCIceServer[] = FALLBACK_ICE_SERVERS;
 
 export const POST_REQUEST_LIMIT_MAX = MAX_FEED_PAGE_SIZE;
+export const PEER_GOSSIP_CAPABILITY = 'peer-gossip-v1';
+export const MAX_PEER_LIST_SIZE = 50;
+export const PEER_LIST_RESPONSE_TIMEOUT_MS = 5_000;
 const DEFAULT_POST_REQUEST_LIMIT = 100;
+const MAX_PEER_LIST_REQUEST_ID_LENGTH = 128;
+
+export interface PeerListExchangeCallbacks {
+  readonly getConnectedPeerIds: () => readonly string[];
+  readonly onPeerList: (sourcePeerId: string, peerIds: readonly string[]) => void;
+}
+
+function isValidPeerFingerprint(peerId: unknown): peerId is string {
+  return typeof peerId === 'string' && /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(peerId);
+}
+
+function normalizePeerFingerprint(peerId: unknown): string | null {
+  return isValidPeerFingerprint(peerId) ? peerId.toLowerCase() : null;
+}
+
+function isValidPeerListRequestId(requestId: unknown): requestId is string {
+  return typeof requestId === 'string'
+    && requestId.trim().length > 0
+    && requestId.length <= MAX_PEER_LIST_REQUEST_ID_LENGTH;
+}
 
 function normalizePostRequestLimit(value: unknown): number {
   const normalized = typeof value === 'number' ? value : Number(value);
@@ -74,9 +97,14 @@ export class PeerConnectionManager {
   private onEvent: (peerId: string, event: string) => void;
   private onProfileRequest: (peerId: string) => void;
   private onObjectPacket?: (peerId: string, packet: ObjectPacket) => void;
+  private readonly peerListExchange: PeerListExchangeCallbacks;
   private packetSigner?: PacketSigner;
   private helloSent = false;
   private remoteSupportsMyp = false;
+  private readonly remoteCapabilities = new Set<string>();
+  private peerListRequestStarted = false;
+  private pendingPeerListRequestId: string | null = null;
+  private peerListRequestTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private pingIntervalId: number | null = null;
   private capabilities: string[];
   private softwareVersion: string;
@@ -104,9 +132,13 @@ export class PeerConnectionManager {
     onEvent: (peerId: string, event: string) => void,
     onProfileRequest: (peerId: string) => void,
     packetSigner?: PacketSigner,
-    capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1'],
+    capabilities: string[] = ['profiles', 'posts', 'messages', 'relay-v1', PEER_GOSSIP_CAPABILITY],
     softwareVersion = 'mycelium-web/0.1',
-    onObjectPacket?: (peerId: string, packet: ObjectPacket) => void
+    onObjectPacket?: (peerId: string, packet: ObjectPacket) => void,
+    peerListExchange: PeerListExchangeCallbacks = {
+      getConnectedPeerIds: () => [],
+      onPeerList: () => {}
+    }
   ) {
     this.localId = localId;
     this.onState = onState;
@@ -121,6 +153,7 @@ export class PeerConnectionManager {
     this.onProfileRequest = onProfileRequest;
     this.packetSigner = packetSigner;
     this.onObjectPacket = onObjectPacket;
+    this.peerListExchange = peerListExchange;
     this.capabilities = capabilities;
     this.softwareVersion = softwareVersion;
     this.peerConnection = this.createConnection();
@@ -191,6 +224,8 @@ export class PeerConnectionManager {
           // ICE rarely recovers from 'failed'; tear down so the next attempt builds a fresh RTCPeerConnection.
           this.stopPingLoop();
           this.helloSent = false;
+          this.remoteCapabilities.clear();
+          this.clearPendingPeerListRequest();
           if (this.remoteId) {
             this.onClose(this.remoteId);
           }
@@ -263,6 +298,9 @@ export class PeerConnectionManager {
   private attachDataChannel(channel: RTCDataChannel) {
     const peerId = this.remoteId ?? '<unknown>';
     this.onEvent(peerId, `${this.connectionLabel()} data channel attached label=${channel.label} id=${channel.id ?? '<unknown>'}`);
+    this.remoteCapabilities.clear();
+    this.peerListRequestStarted = false;
+    this.clearPendingPeerListRequest();
     this.dataChannel = channel;
     this.dataChannel.onopen = () => {
       if (this.dataChannel !== channel) {
@@ -285,6 +323,8 @@ export class PeerConnectionManager {
       }
       this.onEvent(peerId, `${this.connectionLabel()} Data channel closed label=${channel.label} id=${channel.id ?? '<unknown>'}`);
       this.stopPingLoop();
+      this.remoteCapabilities.clear();
+      this.clearPendingPeerListRequest();
       this.onState(peerId, 'disconnected');
       this.onClose(peerId);
     };
@@ -337,8 +377,23 @@ export class PeerConnectionManager {
       }
       case 'HELLO': {
         const nickname = typeof packet.payload?.nickname === 'string' ? packet.payload.nickname : peerId;
-        const supported = Array.isArray(packet.payload?.capabilities) ? packet.payload.capabilities.join(', ') : 'none';
+        const advertisedCapabilities = packet.payload?.capabilities;
+        const capabilities = Array.isArray(advertisedCapabilities)
+          ? advertisedCapabilities.filter((capability: unknown): capability is string => typeof capability === 'string')
+          : [];
+        this.remoteCapabilities.clear();
+        capabilities.forEach((capability) => this.remoteCapabilities.add(capability));
+        const supported = Array.isArray(advertisedCapabilities) ? capabilities.join(', ') : 'none';
         this.onEvent(peerId, `HELLO received from ${nickname} capabilities=[${supported}]`);
+        this.requestPeerListOnce();
+        return;
+      }
+      case 'PEER_LIST_REQUEST': {
+        this.handlePeerListRequest(peerId, packet);
+        return;
+      }
+      case 'PEER_LIST_RESPONSE': {
+        this.handlePeerListResponse(peerId, packet);
         return;
       }
       case 'PING': {
@@ -395,6 +450,103 @@ export class PeerConnectionManager {
 
   public isDataChannelOpen() {
     return this.dataChannel?.readyState === 'open';
+  }
+
+  public supportsCapability(capability: string): boolean {
+    return this.isDataChannelOpen() && this.remoteCapabilities.has(capability);
+  }
+
+  private requestPeerListOnce(): void {
+    if (this.peerListRequestStarted
+      || !this.capabilities.includes(PEER_GOSSIP_CAPABILITY)
+      || !this.supportsCapability(PEER_GOSSIP_CAPABILITY)
+      || !this.remoteId) return;
+
+    this.peerListRequestStarted = true;
+    const requestId = createPacketId();
+    this.pendingPeerListRequestId = requestId;
+    this.peerListRequestTimer = globalThis.setTimeout(() => {
+      if (this.pendingPeerListRequestId !== requestId) return;
+      this.clearPendingPeerListRequest();
+      this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} peer-list response timed out requestId=${requestId}`);
+    }, PEER_LIST_RESPONSE_TIMEOUT_MS);
+
+    void this.sendPacket('PEER_LIST_REQUEST', { requestId }, true).catch((error: unknown) => {
+      if (this.pendingPeerListRequestId === requestId) this.clearPendingPeerListRequest();
+      this.onEvent(
+        this.remoteId ?? '<unknown>',
+        `${this.connectionLabel()} peer-list request failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+  }
+
+  private handlePeerListRequest(peerId: string, packet: MyceliumPacket): void {
+    const requestId = packet.payload?.requestId;
+    if (!isValidPeerListRequestId(requestId)
+      || packet.sender !== peerId
+      || packet.recipient !== this.localId
+      || !this.isDataChannelOpen()) {
+      this.onEvent(peerId, `${this.connectionLabel()} ignored malformed peer-list request`);
+      return;
+    }
+
+    let peerIds: string[];
+    try {
+      const excludedPeerIds = new Set([peerId.toLowerCase(), this.localId.toLowerCase()]);
+      peerIds = [...new Set(this.peerListExchange.getConnectedPeerIds()
+        .map(normalizePeerFingerprint)
+        .filter((candidate): candidate is string => candidate !== null && !excludedPeerIds.has(candidate))
+      )].slice(0, MAX_PEER_LIST_SIZE);
+    } catch (error) {
+      this.onEvent(
+        peerId,
+        `${this.connectionLabel()} failed to enumerate peer-list response: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return;
+    }
+
+    void this.sendPacket('PEER_LIST_RESPONSE', { requestId, peers: peerIds }, true).catch((error: unknown) => {
+      this.onEvent(
+        peerId,
+        `${this.connectionLabel()} peer-list response failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+  }
+
+  private handlePeerListResponse(peerId: string, packet: MyceliumPacket): void {
+    const requestId = packet.payload?.requestId;
+    const peers = packet.payload?.peers;
+    if (!isValidPeerListRequestId(requestId)
+      || requestId !== this.pendingPeerListRequestId
+      || packet.sender !== peerId
+      || packet.recipient !== this.localId) return;
+    if (!Array.isArray(peers) || peers.length > MAX_PEER_LIST_SIZE) {
+      this.onEvent(peerId, `${this.connectionLabel()} ignored malformed peer-list response requestId=${requestId}`);
+      return;
+    }
+
+    const excludedPeerIds = new Set([peerId.toLowerCase(), this.localId.toLowerCase()]);
+    const peerIds = [...new Set(peers
+      .map(normalizePeerFingerprint)
+      .filter((candidate): candidate is string => candidate !== null && !excludedPeerIds.has(candidate))
+    )];
+    this.clearPendingPeerListRequest();
+    try {
+      this.peerListExchange.onPeerList(peerId, peerIds);
+    } catch (error) {
+      this.onEvent(
+        peerId,
+        `${this.connectionLabel()} peer-list callback failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  private clearPendingPeerListRequest(): void {
+    if (this.peerListRequestTimer !== null) {
+      globalThis.clearTimeout(this.peerListRequestTimer);
+      this.peerListRequestTimer = null;
+    }
+    this.pendingPeerListRequestId = null;
   }
 
   public getDataChannelState() {
@@ -749,6 +901,8 @@ export class PeerConnectionManager {
     this.clearOfferRecoveryTimer();
     this.pendingIceCandidates = [];
     this.activeNegotiationId = null;
+    this.remoteCapabilities.clear();
+    this.clearPendingPeerListRequest();
   }
 
   private startOfferRecoveryTimer(peerId: string) {

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { clearAllLocalData, loadContacts, loadFeedCursor, loadInboxBackfillState, loadInboxCursor, openDatabase, saveContact, saveFeedCursor, saveInboxBackfillState, saveInboxCursor } from './idb';
+import { clearAllLocalData, loadContacts, loadFeedCursor, loadInboxBackfillState, loadInboxCursor, openDatabase, PEER_CANDIDATE_STORE, saveContact, saveFeedCursor, saveInboxBackfillState, saveInboxCursor } from './idb';
 import type { FeedCursor } from '../object-layer/types';
 
 const DATABASE_NAME = 'mycelium_p2p';
@@ -26,7 +26,7 @@ function deleteDatabase(): Promise<void> {
   });
 }
 
-function seedDatabase(version: 5 | 6 | 7 | 8): Promise<void> {
+function seedDatabase(version: 5 | 6 | 7 | 8 | 9): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, version);
     request.onupgradeneeded = () => {
@@ -42,13 +42,31 @@ function seedDatabase(version: 5 | 6 | 7 | 8): Promise<void> {
       chats.createIndex('timestamp', 'timestamp');
       db.createObjectStore('inbox_cursors', { keyPath: 'identity' });
       if (version >= 8) db.createObjectStore('feed_cursors', { keyPath: 'key' });
+      if (version >= 9) {
+        for (const storeName of [
+          'peer_connection_observations',
+          'find_forwarding_observations',
+          'object_supply_observations'
+        ]) {
+          db.createObjectStore(storeName, { keyPath: 'id' }).createIndex('expires_at', 'expires_at');
+        }
+      }
     };
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
       const tx = db.transaction([...PRESERVED_STORES, ...REMOVED_STORES, ...(version >= 8 ? ['feed_cursors'] : [])], 'readwrite');
       tx.objectStore('identity').put({ key: 'local', publicKey: 'preserved-key' });
-      tx.objectStore('contacts').put({ publicKey: 'preserved-contact' });
+      tx.objectStore('contacts').put({
+        publicKey: 'preserved-contact',
+        fingerprint: 'aa:bb:cc:dd:ee:ff:00:11',
+        displayName: 'Preserved contact',
+        addedAt: '2026-10-01T00:00:00.000Z',
+        followed: true,
+        online: true,
+        connected: true,
+        lastSeen: '2026-10-04T10:00:00.000Z'
+      });
       tx.objectStore('profiles').put({ author: 'preserved-author' });
       tx.objectStore('discovery_interactions').put({ id: 'preserved-interaction' });
       tx.objectStore('inbox_cursors').put({
@@ -76,20 +94,30 @@ function readRecord<T>(db: IDBDatabase, storeName: string, key: IDBValidKey): Pr
   });
 }
 
-async function expectUpgradedDatabase(version: 5 | 6 | 7 | 8): Promise<void> {
+async function expectUpgradedDatabase(version: 5 | 6 | 7 | 8 | 9): Promise<void> {
   await deleteDatabase();
   await seedDatabase(version);
   const db = await openDatabase();
 
-  expect(db.version).toBe(9);
+  expect(db.version).toBe(10);
   expect(db.objectStoreNames.contains('feed_cursors')).toBe(true);
   expect(db.objectStoreNames.contains('peer_connection_observations')).toBe(true);
   expect(db.objectStoreNames.contains('find_forwarding_observations')).toBe(true);
   expect(db.objectStoreNames.contains('object_supply_observations')).toBe(true);
+  expect(db.objectStoreNames.contains(PEER_CANDIDATE_STORE)).toBe(true);
   for (const storeName of PRESERVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(true);
   for (const storeName of REMOVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(false);
   await expect(readRecord(db, 'identity', 'local')).resolves.toMatchObject({ publicKey: 'preserved-key' });
-  await expect(readRecord(db, 'contacts', 'preserved-contact')).resolves.toBeDefined();
+  await expect(readRecord(db, 'contacts', 'preserved-contact')).resolves.toEqual({
+    publicKey: 'preserved-contact',
+    fingerprint: 'aa:bb:cc:dd:ee:ff:00:11',
+    displayName: 'Preserved contact',
+    addedAt: '2026-10-01T00:00:00.000Z',
+    followed: true,
+    online: true,
+    connected: true,
+    lastSeen: '2026-10-04T10:00:00.000Z'
+  });
   await expect(readRecord(db, 'profiles', 'preserved-author')).resolves.toBeDefined();
   await expect(readRecord(db, 'discovery_interactions', 'preserved-interaction')).resolves.toBeDefined();
   await expect(readRecord(db, 'inbox_cursors', 'preserved-identity')).resolves.toMatchObject({
@@ -151,16 +179,21 @@ describe('inbox cursor IndexedDB persistence', () => {
     await expectUpgradedDatabase(8);
   });
 
-  it('creates a fresh version 9 database with observation stores and no plaintext chat stores', async () => {
+  it('upgrades the current version 9 schema while preserving existing Contact records', async () => {
+    await expectUpgradedDatabase(9);
+  });
+
+  it('creates a fresh version 10 database with candidate and observation stores', async () => {
     await deleteDatabase();
     const db = await openDatabase();
 
-    expect(db.version).toBe(9);
+    expect(db.version).toBe(10);
     expect(db.objectStoreNames.contains('inbox_cursors')).toBe(true);
     expect(db.objectStoreNames.contains('feed_cursors')).toBe(true);
     expect(db.objectStoreNames.contains('peer_connection_observations')).toBe(true);
     expect(db.objectStoreNames.contains('find_forwarding_observations')).toBe(true);
     expect(db.objectStoreNames.contains('object_supply_observations')).toBe(true);
+    expect(db.objectStoreNames.contains(PEER_CANDIDATE_STORE)).toBe(true);
     for (const storeName of REMOVED_STORES) expect(db.objectStoreNames.contains(storeName)).toBe(false);
     db.close();
   });
@@ -220,7 +253,7 @@ describe('inbox cursor IndexedDB persistence', () => {
 
   it('persists lastReadAt through saveContact and loadContacts without a version bump', async () => {
     const db = await openDatabase();
-    expect(db.version).toBe(9);
+    expect(db.version).toBe(10);
     db.close();
 
     await saveContact({
@@ -278,7 +311,8 @@ describe('inbox cursor IndexedDB persistence', () => {
       'feed_cursors',
       'peer_connection_observations',
       'find_forwarding_observations',
-      'object_supply_observations'
+      'object_supply_observations',
+      PEER_CANDIDATE_STORE
     ], 'readwrite');
     tx.objectStore('identity').put({ key: 'local', publicKey: 'key' });
     tx.objectStore('contacts').put({ publicKey: 'contact' });
@@ -291,6 +325,7 @@ describe('inbox cursor IndexedDB persistence', () => {
       object_id: 'a'.repeat(64),
       updated_at: '2026-10-04T10:00:00.000Z'
     });
+    tx.objectStore(PEER_CANDIDATE_STORE).put({ peerId: 'clear-candidate' });
     for (const storeName of [
       'peer_connection_observations',
       'find_forwarding_observations',
@@ -317,10 +352,12 @@ describe('inbox cursor IndexedDB persistence', () => {
     await expect(readRecord(clearedDb, 'profiles', 'author')).resolves.toBeUndefined();
     await expect(readRecord(clearedDb, 'discovery_interactions', 'interaction')).resolves.toBeUndefined();
     await expect(readRecord(clearedDb, 'feed_cursors', 'clear-identity|clear-peer')).resolves.toBeUndefined();
+    await expect(readRecord(clearedDb, PEER_CANDIDATE_STORE, 'clear-candidate')).resolves.toBeUndefined();
     for (const storeName of [
       'peer_connection_observations',
       'find_forwarding_observations',
-      'object_supply_observations'
+      'object_supply_observations',
+      PEER_CANDIDATE_STORE
     ]) {
       await expect(readRecord(clearedDb, storeName, 'clear-me')).resolves.toBeUndefined();
     }
@@ -334,13 +371,13 @@ describe('inbox cursor IndexedDB persistence', () => {
 
     first.onversionchange?.(new IDBVersionChangeEvent('versionchange', {
       oldVersion: 8,
-      newVersion: 9
+      newVersion: 10
     }));
 
     expect(close).toHaveBeenCalledOnce();
     expect(() => first.transaction('contacts', 'readonly')).toThrow();
     const reopened = await openDatabase();
-    expect(reopened.version).toBe(9);
+    expect(reopened.version).toBe(10);
     reopened.close();
   });
 
@@ -361,7 +398,7 @@ describe('inbox cursor IndexedDB persistence', () => {
     staleConnection.close();
     const upgraded = await upgrade;
 
-    expect(upgraded.version).toBe(9);
+    expect(upgraded.version).toBe(10);
     expect(upgraded.objectStoreNames.contains('inbox_cursors')).toBe(true);
     upgraded.close();
     warning.mockRestore();

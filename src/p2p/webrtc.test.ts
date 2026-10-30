@@ -3,7 +3,15 @@ import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } fr
 import type { PeerSignalMessage } from './signalling';
 import type { PeerMetadata } from '../types';
 import type { MyceliumPacket } from './protocol';
-import { configureIceServers, PeerConnectionManager, POST_REQUEST_LIMIT_MAX } from './webrtc';
+import {
+  configureIceServers,
+  MAX_PEER_LIST_SIZE,
+  PEER_GOSSIP_CAPABILITY,
+  PeerConnectionManager,
+  PEER_LIST_RESPONSE_TIMEOUT_MS,
+  POST_REQUEST_LIMIT_MAX,
+  type PeerListExchangeCallbacks
+} from './webrtc';
 import { closeAndRemovePeerManager } from './peer-manager-registry';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
 
@@ -107,6 +115,8 @@ const fakeSocket = () => ({ send: vi.fn() } as unknown as WebSocket);
 
 function createManager(options: {
   localId?: string;
+  localCapabilities?: string[];
+  peerListExchange?: PeerListExchangeCallbacks;
   onRequestPosts?: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
   onMetadata?: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void;
   onEvent?: (peerId: string, event: string) => void;
@@ -124,12 +134,78 @@ function createManager(options: {
     noop,
     noop,
     options.onEvent ?? noop,
-    noop
+    noop,
+    undefined,
+    options.localCapabilities ?? ['profiles', 'posts', 'messages', 'relay-v1', PEER_GOSSIP_CAPABILITY],
+    undefined,
+    undefined,
+    options.peerListExchange
   );
 }
 
-function signal(type: PeerSignalMessage['type'], from = 'peer-b'): PeerSignalMessage {
-  return { type, from, to: 'peer-a', payload: { type, sdp: type, negotiationId: 'negotiation-test' } } as PeerSignalMessage;
+function signal(type: PeerSignalMessage['type'], from = 'peer-b', to = 'peer-a'): PeerSignalMessage {
+  return { type, from, to, payload: { type, sdp: type, negotiationId: 'negotiation-test' } } as PeerSignalMessage;
+}
+
+async function openDataChannel(
+  manager: PeerConnectionManager,
+  localId = 'peer-a',
+  remoteId = 'peer-b'
+): Promise<FakeDataChannel> {
+  const peerConnection = FakePeerConnection.instances[FakePeerConnection.instances.length - 1]!;
+  const socket = fakeSocket();
+  await manager.createOffer(remoteId, socket);
+  await manager.handleSignal(signal('answer', remoteId, localId), socket);
+  const channel = peerConnection.lastDataChannel!;
+  channel.readyState = 'open';
+  channel.onopen?.();
+  return channel;
+}
+
+function helloPacket(payload: Record<string, unknown>, sender = 'peer-b', recipient = 'peer-a'): MyceliumPacket {
+  return {
+    protocol: 'mycelium',
+    version: 1,
+    id: 'hello-test',
+    type: 'HELLO',
+    timestamp: new Date(0).toISOString(),
+    sender,
+    recipient,
+    payload,
+    signature: 'packet-signature'
+  };
+}
+
+function peerListPacket(
+  type: 'PEER_LIST_REQUEST' | 'PEER_LIST_RESPONSE',
+  payload: Record<string, unknown>,
+  sender = 'peer-b',
+  recipient: string | null = 'peer-a'
+): MyceliumPacket {
+  return {
+    protocol: 'mycelium',
+    version: 1,
+    id: `${type.toLowerCase()}-test`,
+    type,
+    timestamp: new Date(0).toISOString(),
+    sender,
+    recipient,
+    payload,
+    signature: 'packet-signature'
+  };
+}
+
+function receivePacket(channel: FakeDataChannel, packet: MyceliumPacket) {
+  channel.onmessage?.({ data: JSON.stringify(packet) } as MessageEvent);
+}
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve();
+}
+
+function peerFingerprint(index: number): string {
+  const hex = index.toString(16).padStart(16, '0');
+  return hex.match(/.{2}/g)!.join(':');
 }
 
 beforeEach(() => {
@@ -288,6 +364,290 @@ describe('POST_REQUEST limit handling', () => {
     expect(sendPacket).toHaveBeenNthCalledWith(1, 'OBJECT_BATCH', { objects: [object] });
     expect(sendPacket).toHaveBeenNthCalledWith(2, 'OBJECT_BATCH', { objects: [object], page });
     expect(batches).toEqual([{ objects: [object], page: undefined }, { objects: [object], page }]);
+  });
+});
+
+describe('HELLO peer capabilities', () => {
+  it('retains advertised capabilities and matches names exactly', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({
+      nickname: 'Peer B',
+      capabilities: ['profiles', 'peer-gossip-v1', 'relay-v1']
+    }));
+
+    expect(manager.supportsCapability('profiles')).toBe(true);
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(true);
+    expect(manager.supportsCapability('peer-gossip')).toBe(false);
+    manager.closeConnection();
+  });
+
+  it('treats a missing capabilities field as unsupported without disrupting older peers', async () => {
+    const events: string[] = [];
+    const manager = createManager({ onEvent: (_peerId, event) => events.push(event) });
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ nickname: 'Older Peer' }));
+
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(false);
+    expect(manager.isDataChannelOpen()).toBe(true);
+    expect(events).toContain('HELLO received from Older Peer capabilities=[none]');
+    manager.closeConnection();
+  });
+
+  it('treats a malformed capabilities field as supporting nothing', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: ['peer-gossip-v1'] }));
+    receivePacket(channel, helloPacket({ capabilities: 'peer-gossip-v1' }));
+
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(false);
+    manager.closeConnection();
+  });
+
+  it('ignores non-string entries while retaining valid string capabilities', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({
+      capabilities: ['peer-gossip-v1', 42, null, { name: 'profiles' }, 'relay-v1']
+    }));
+
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(true);
+    expect(manager.supportsCapability('42')).toBe(false);
+    expect(manager.supportsCapability('profiles')).toBe(false);
+    manager.closeConnection();
+  });
+
+  it('keeps capabilities isolated to their connection manager', async () => {
+    const firstManager = createManager();
+    const firstChannel = await openDataChannel(firstManager);
+    const secondManager = createManager();
+    const secondChannel = await openDataChannel(secondManager);
+    receivePacket(firstChannel, helloPacket({ capabilities: ['peer-gossip-v1'] }));
+
+    expect(firstManager.supportsCapability('peer-gossip-v1')).toBe(true);
+    expect(secondManager.supportsCapability('peer-gossip-v1')).toBe(false);
+    firstManager.closeConnection();
+    secondManager.closeConnection();
+  });
+
+  it('clears capabilities when the connection manager is destroyed', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: ['peer-gossip-v1'] }));
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(true);
+
+    manager.closeConnection();
+
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(false);
+  });
+
+  it('clears capabilities when the data channel closes', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: ['peer-gossip-v1'] }));
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(true);
+
+    channel.close();
+
+    expect(manager.supportsCapability('peer-gossip-v1')).toBe(false);
+  });
+});
+
+describe('direct peer-list gossip', () => {
+  it('advertises support and sends one request only after the remote advertises support', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    const hello = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'HELLO');
+    expect(hello?.payload.capabilities).toContain(PEER_GOSSIP_CAPABILITY);
+
+    receivePacket(channel, helloPacket({ capabilities: ['profiles', PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+    receivePacket(channel, helloPacket({ capabilities: [PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+
+    const requests = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .filter((packet) => packet.type === 'PEER_LIST_REQUEST');
+    expect(requests).toHaveLength(1);
+    expect(typeof requests[0].payload.requestId).toBe('string');
+    manager.closeConnection();
+  });
+
+  it('does not request a peer list from an older peer without the capability', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ nickname: 'Older Peer' }));
+    await flushMicrotasks();
+
+    expect(channel.send.mock.calls.map(([data]) => JSON.parse(data).type))
+      .not.toContain('PEER_LIST_REQUEST');
+    expect(manager.isDataChannelOpen()).toBe(true);
+    manager.closeConnection();
+  });
+
+  it('responds with only unique, valid currently connected peers, excluding requester and self', async () => {
+    const localId = peerFingerprint(1);
+    const requesterId = peerFingerprint(2);
+    const connectedPeer = peerFingerprint(3);
+    const manager = createManager({
+      localId,
+      peerListExchange: {
+        getConnectedPeerIds: () => [requesterId, localId, connectedPeer, connectedPeer.toUpperCase(), 'invalid-peer'],
+        onPeerList: noop
+      }
+    });
+    const channel = await openDataChannel(manager, localId, requesterId);
+
+    receivePacket(channel, peerListPacket(
+      'PEER_LIST_REQUEST',
+      { requestId: 'request-1' },
+      requesterId,
+      localId
+    ));
+    await flushMicrotasks();
+
+    const response = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_RESPONSE');
+    expect(response?.payload).toEqual({ requestId: 'request-1', peers: [connectedPeer] });
+    manager.closeConnection();
+  });
+
+  it('bounds response size after excluding invalid IDs and duplicates', async () => {
+    const localId = peerFingerprint(1);
+    const requesterId = peerFingerprint(2);
+    const candidates = Array.from({ length: MAX_PEER_LIST_SIZE + 10 }, (_, index) => peerFingerprint(index + 10));
+    const manager = createManager({
+      localId,
+      peerListExchange: {
+        getConnectedPeerIds: () => [...candidates, candidates[0], 'malformed-id', requesterId, localId],
+        onPeerList: noop
+      }
+    });
+    const channel = await openDataChannel(manager, localId, requesterId);
+    receivePacket(channel, peerListPacket(
+      'PEER_LIST_REQUEST',
+      { requestId: 'bounded-request' },
+      requesterId,
+      localId
+    ));
+    await flushMicrotasks();
+
+    const response = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_RESPONSE');
+    const peers = response?.payload.peers as string[];
+    expect(peers).toHaveLength(MAX_PEER_LIST_SIZE);
+    expect(new Set(peers).size).toBe(MAX_PEER_LIST_SIZE);
+    expect(peers).not.toContain(requesterId);
+    expect(peers).not.toContain(localId);
+    expect(peers).not.toContain('malformed-id');
+    manager.closeConnection();
+  });
+
+  it('delivers only a matching response from the connected peer to the App callback', async () => {
+    const candidates = [peerFingerprint(3), peerFingerprint(3), 'malformed', 'peer-a', 'peer-b'];
+    const received: Array<{ sourcePeerId: string; peerIds: readonly string[] }> = [];
+    const manager = createManager({
+      peerListExchange: {
+        getConnectedPeerIds: () => [],
+        onPeerList: (sourcePeerId, peerIds) => received.push({ sourcePeerId, peerIds })
+      }
+    });
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: [PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+    const request = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_REQUEST')!;
+    const requestId = request.payload.requestId as string;
+
+    receivePacket(channel, peerListPacket('PEER_LIST_RESPONSE', { requestId: 'unknown', peers: candidates }));
+    receivePacket(channel, peerListPacket(
+      'PEER_LIST_RESPONSE',
+      { requestId, peers: candidates },
+      'other-peer'
+    ));
+    expect(received).toEqual([]);
+
+    receivePacket(channel, peerListPacket('PEER_LIST_RESPONSE', { requestId, peers: candidates }));
+    expect(received).toEqual([{ sourcePeerId: 'peer-b', peerIds: [candidates[0]] }]);
+    manager.closeConnection();
+  });
+
+  it('cleans up pending requests after timeout and ignores late responses', async () => {
+    vi.useFakeTimers();
+    const received: string[][] = [];
+    const manager = createManager({
+      peerListExchange: {
+        getConnectedPeerIds: () => [],
+        onPeerList: (_sourcePeerId, peerIds) => received.push([...peerIds])
+      }
+    });
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: [PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+    const request = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_REQUEST')!;
+
+    await vi.advanceTimersByTimeAsync(PEER_LIST_RESPONSE_TIMEOUT_MS);
+    receivePacket(channel, peerListPacket('PEER_LIST_RESPONSE', {
+      requestId: request.payload.requestId,
+      peers: [peerFingerprint(3)]
+    }));
+
+    expect(received).toEqual([]);
+    manager.closeConnection();
+    vi.useRealTimers();
+  });
+
+  it('cleans up pending requests when the connection closes', async () => {
+    const received: string[][] = [];
+    const manager = createManager({
+      peerListExchange: {
+        getConnectedPeerIds: () => [],
+        onPeerList: (_sourcePeerId, peerIds) => received.push([...peerIds])
+      }
+    });
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, helloPacket({ capabilities: [PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+    const request = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_REQUEST')!;
+
+    channel.close();
+    receivePacket(channel, peerListPacket('PEER_LIST_RESPONSE', {
+      requestId: request.payload.requestId,
+      peers: [peerFingerprint(3)]
+    }));
+
+    expect(received).toEqual([]);
+    expect(manager.supportsCapability(PEER_GOSSIP_CAPABILITY)).toBe(false);
+    manager.closeConnection();
+  });
+
+  it('ignores malformed requests and oversized responses without closing the channel', async () => {
+    const manager = createManager();
+    const channel = await openDataChannel(manager);
+    receivePacket(channel, peerListPacket('PEER_LIST_REQUEST', { requestId: ' '.repeat(5) }));
+    receivePacket(channel, helloPacket({ capabilities: [PEER_GOSSIP_CAPABILITY] }));
+    await flushMicrotasks();
+    const request = channel.send.mock.calls
+      .map(([data]) => JSON.parse(data) as MyceliumPacket)
+      .find((packet) => packet.type === 'PEER_LIST_REQUEST')!;
+    receivePacket(channel, peerListPacket('PEER_LIST_RESPONSE', {
+      requestId: request.payload.requestId,
+      peers: Array.from({ length: MAX_PEER_LIST_SIZE + 1 }, (_, index) => peerFingerprint(index + 20))
+    }));
+
+    expect(manager.isDataChannelOpen()).toBe(true);
+    expect(channel.send.mock.calls.map(([data]) => JSON.parse(data).type))
+      .not.toContain('PEER_LIST_RESPONSE');
+    manager.closeConnection();
   });
 });
 

@@ -5,6 +5,11 @@ import type { DistributedObject, ObjectStore } from './types';
 const DEFAULT_MAX_PER_FLUSH = 50;
 const DEFAULT_OUTBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_RECENT_SEND_ATTEMPTS = 500;
+const OUTBOX_FLUSH_LOCK_NAME = 'mycelium-object-outbox-flush-v1';
+
+export interface OutboxFlushLockManager {
+  request<T>(name: string, callback: (lock: Lock | null) => Promise<T> | T): Promise<T>;
+}
 
 export interface OutboxServiceConfig {
   readonly maxPerFlush?: number;
@@ -19,6 +24,7 @@ export interface CreateOutboxServiceOptions {
   readonly connectedPeers: () => string[];
   readonly now?: () => Date;
   readonly config?: OutboxServiceConfig;
+  readonly lockManager?: OutboxFlushLockManager | null;
 }
 
 export interface OutboxFlushResult {
@@ -34,7 +40,8 @@ export function createOutboxService({
   resolveRecipientPeerId,
   connectedPeers,
   now = () => new Date(),
-  config = {}
+  config = {},
+  lockManager
 }: CreateOutboxServiceOptions): {
   enqueue(object: DistributedObject): Promise<void>;
   flush(): Promise<OutboxFlushResult>;
@@ -42,6 +49,9 @@ export function createOutboxService({
   getAttemptedTo(objectId: string): readonly string[];
 } {
   const maxPerFlush = config.maxPerFlush ?? DEFAULT_MAX_PER_FLUSH;
+  const flushLockManager = lockManager === undefined
+    ? typeof navigator !== 'undefined' && 'locks' in navigator ? navigator.locks : null
+    : lockManager;
   let inFlight: Promise<OutboxFlushResult> | null = null;
 
   const enqueue = async (object: DistributedObject): Promise<void> => {
@@ -147,7 +157,10 @@ export function createOutboxService({
 
   const flush = (): Promise<OutboxFlushResult> => {
     if (inFlight) return inFlight;
-    inFlight = performFlush().finally(() => {
+    const operation = flushLockManager
+      ? flushLockManager.request(OUTBOX_FLUSH_LOCK_NAME, performFlush)
+      : performFlush();
+    inFlight = operation.finally(() => {
       inFlight = null;
     });
     return inFlight;

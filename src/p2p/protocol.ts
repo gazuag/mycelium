@@ -14,6 +14,8 @@ export type MyceliumPacketType =
   | 'OBJECT_BATCH'
   | 'FIND'
   | 'FIND_RESPONSE'
+  | 'PEER_LIST_REQUEST'
+  | 'PEER_LIST_RESPONSE'
   | 'DISCOVERY_PUBLISH'
   | 'DISCOVERY_GET'
   | 'DISCOVERY_RESULT'

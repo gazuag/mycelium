@@ -1,11 +1,17 @@
 import { importEncryptionPublicKey } from '../crypto/dm-crypto';
 import { isObjectExpired, validateDistributedObject } from './envelope';
-import { DM_OBJECT_TYPE, decryptDmObject, validateDmPayload, type DmObjectIdentity } from './dm-object';
+import {
+  DM_OBJECT_TYPE,
+  DmDecryptionKeyUnavailableError,
+  decryptDmObject,
+  validateDmPayload,
+  type DmObjectIdentity
+} from './dm-object';
 import type { DistributedObject, ObjectStore } from './types';
 
 export type OpenDmResult =
   | { status: 'ok'; plaintext: string; counterparty: string }
-  | { status: 'unverified' | 'key_changed' | 'invalid' };
+  | { status: 'unverified' | 'key_changed' | 'unavailable' | 'invalid' };
 
 export type SenderEncryptionKeyResolver = (authorSigningKey: string) => Promise<string | null> | string | null;
 
@@ -51,7 +57,7 @@ export async function openDm({
     try {
       trustedSenderEncryptionKey = await resolveSenderEncryptionKey(object.author);
     } catch {
-      return { status: 'invalid' };
+      return { status: 'unverified' };
     }
     if (trustedSenderEncryptionKey === null) return { status: 'unverified' };
 
@@ -72,7 +78,8 @@ export async function openDm({
   try {
     const plaintext = await decryptDmObject({ object, identity, expectedSenderEncryptionKey });
     return { status: 'ok', plaintext, counterparty: isAuthor ? object.recipient! : object.author };
-  } catch {
+  } catch (error) {
+    if (error instanceof DmDecryptionKeyUnavailableError) return { status: 'unavailable' };
     return { status: 'invalid' };
   }
 }

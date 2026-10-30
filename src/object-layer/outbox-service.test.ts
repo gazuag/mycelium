@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IndexedDbOutboxStore, type OutboxEntry, type OutboxStore } from './local-store';
-import { createOutboxService } from './outbox-service';
+import { createOutboxService, type OutboxFlushLockManager } from './outbox-service';
 import type { DistributedObject } from './types';
 
 const NOW = new Date('2026-10-05T12:00:00.000Z');
@@ -84,6 +84,7 @@ function makeMemoryOutbox(): OutboxStore {
 function createHarness(options: {
   objects?: DistributedObject[];
   outbox?: OutboxStore;
+  lockManager?: OutboxFlushLockManager | null;
   connectedPeers?: string[];
   resolvePeer?: (recipient: string) => string | null;
   sendDirect?: (peerId: string, object: DistributedObject) => Promise<boolean>;
@@ -102,9 +103,29 @@ function createHarness(options: {
     resolveRecipientPeerId: options.resolvePeer ?? (() => 'recipient-peer'),
     connectedPeers: () => options.connectedPeers ?? ['recipient-peer'],
     now: () => NOW,
-    config: options.config
+    config: options.config,
+    lockManager: options.lockManager
   });
   return { service, outbox, objects, sendDirect, replicate };
+}
+
+function createSharedLockManager(): OutboxFlushLockManager {
+  let tail = Promise.resolve();
+  return {
+    async request<T>(_name: string, callback: (lock: Lock | null) => Promise<T> | T): Promise<T> {
+      const previous = tail;
+      let release!: () => void;
+      tail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await callback(null);
+      } finally {
+        release();
+      }
+    }
+  };
 }
 
 afterEach(() => {
@@ -393,6 +414,108 @@ describe('IndexedDbOutboxStore and outbox service', () => {
     await vi.waitFor(() => expect(replicate).toHaveBeenCalledTimes(1));
     finishReplication([]);
     await Promise.all([first, second]);
+  });
+
+  it('serializes flushes from separate tabs without losing the pending item or attempt count', async () => {
+    const object = makeObject('cross-tab-flush');
+    const outbox = makeMemoryOutbox();
+    const lockManager = createSharedLockManager();
+    let finishFirstSend!: (peers: string[]) => void;
+    let concurrentSends = 0;
+    let maximumConcurrentSends = 0;
+    let sendCount = 0;
+    const replicate = vi.fn(() => {
+      sendCount += 1;
+      concurrentSends += 1;
+      maximumConcurrentSends = Math.max(maximumConcurrentSends, concurrentSends);
+      if (sendCount === 1) {
+        return new Promise<string[]>((resolve) => {
+          finishFirstSend = (peers) => {
+            concurrentSends -= 1;
+            resolve(peers);
+          };
+        });
+      }
+      concurrentSends -= 1;
+      return Promise.resolve(['replica-peer']);
+    });
+    const firstTab = createHarness({ objects: [object], outbox, lockManager, replicate });
+    const secondTab = createHarness({ objects: [object], outbox, lockManager, replicate });
+    await firstTab.service.enqueue(object);
+
+    const firstFlush = firstTab.service.flush();
+    await vi.waitFor(() => expect(replicate).toHaveBeenCalledTimes(1));
+    const secondFlush = secondTab.service.flush();
+    await Promise.resolve();
+    expect(replicate).toHaveBeenCalledTimes(1);
+
+    finishFirstSend([]);
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(maximumConcurrentSends).toBe(1);
+    expect(replicate).toHaveBeenCalledTimes(2);
+    expect(await outbox.get(object.object_id)).toMatchObject({ attempts: 2 });
+  });
+
+  it('releases the cross-tab lock after a failed transmission so the waiting flush can retry', async () => {
+    const object = makeObject('cross-tab-failed-send', { recipient: 'recipient-signing-key' });
+    const outbox = makeMemoryOutbox();
+    const lockManager = createSharedLockManager();
+    let finishFirstSend!: () => void;
+    let sendCount = 0;
+    const sendDirect = vi.fn(async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        await new Promise<void>((resolve) => {
+          finishFirstSend = resolve;
+        });
+        throw new Error('first tab transmission failed');
+      }
+      return true;
+    });
+    const replicate = vi.fn(async () => []);
+    const firstTab = createHarness({ objects: [object], outbox, lockManager, sendDirect, replicate });
+    const secondTab = createHarness({ objects: [object], outbox, lockManager, sendDirect, replicate });
+    await firstTab.service.enqueue(object);
+
+    const firstFlush = firstTab.service.flush();
+    await vi.waitFor(() => expect(sendDirect).toHaveBeenCalledTimes(1));
+    const waitingFlush = secondTab.service.flush();
+    await Promise.resolve();
+    expect(sendDirect).toHaveBeenCalledTimes(1);
+
+    finishFirstSend();
+    await Promise.all([firstFlush, waitingFlush]);
+
+    expect(sendDirect).toHaveBeenCalledTimes(2);
+    expect(await firstTab.service.getEntry(object.object_id)).toMatchObject({
+      attempts: 2,
+      direct_send_attempted: true
+    });
+  });
+
+  it('keeps the existing best-effort behavior when Web Locks are unavailable', async () => {
+    const object = makeObject('no-web-lock-support');
+    const outbox = makeMemoryOutbox();
+    let finishFirstSend!: () => void;
+    let finishSecondSend!: () => void;
+    let started = 0;
+    const replicate = vi.fn(() => new Promise<string[]>((resolve) => {
+      started += 1;
+      if (started === 1) finishFirstSend = () => resolve([]);
+      else finishSecondSend = () => resolve([]);
+    }));
+    const firstTab = createHarness({ objects: [object], outbox, lockManager: null, replicate });
+    const secondTab = createHarness({ objects: [object], outbox, lockManager: null, replicate });
+    await firstTab.service.enqueue(object);
+
+    const flushes = [firstTab.service.flush(), secondTab.service.flush()];
+    await vi.waitFor(() => expect(replicate).toHaveBeenCalledTimes(2));
+    finishFirstSend();
+    finishSecondSend();
+    await Promise.all(flushes);
+
+    expect(await outbox.get(object.object_id)).not.toBeNull();
   });
 
   it('limits the number of entries processed in a single flush', async () => {

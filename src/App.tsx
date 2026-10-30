@@ -22,6 +22,7 @@ import {
   recordValidatedObjectSupply,
   type PeerIdentityEvidence
 } from './p2p/local-observations';
+import { createPeerCandidateIntake } from './p2p/peer-candidates';
 import { wrapFindTransport } from './object-layer/find-transport-adapter';
 import { createDmEvents } from './object-layer/dm-events';
 import { createInboxService } from './object-layer/inbox-service';
@@ -169,6 +170,7 @@ interface AppNavigationState {
 const APP_NAVIGATION_STATE_KEY = 'myceliumNavigation';
 const PUBLISH_TO_DISCOVERY_STORAGE_KEY = 'myceliumPublishToDiscovery';
 const PUSH_OUTBOX_FLUSH_COOLDOWN_MS = 30_000;
+const MAX_DEFERRED_DM_NOTIFICATION_IDS = 128;
 const PAGE_KEYS: PageKey[] = ['home', 'messages', 'relationships', 'discover', 'profile', 'myProfile', 'chat', 'settings'];
 
 function readAppNavigationState(state: unknown): AppNavigationState {
@@ -395,6 +397,8 @@ function App() {
   const postParentLookupRef = useRef<Map<string, { attemptedAt: number; promise: Promise<DistributedObject | null> }>>(new Map());
   const suppressPhase6FindResponsesRef = useRef(false);
   const webPushProcessingIdsRef = useRef(new Set<string>());
+  const deferredDmNotificationIdsRef = useRef(new Set<string>());
+  const processingDeferredDmNotificationIdsRef = useRef(new Set<string>());
   const webPushNotificationPreferencesRef = useRef(webPushNotificationPreferences);
   const requestPushOutboxFlush = useMemo(() => createPushWakeOutboxFlusher(async () => {
     await outboxServiceRef.current?.flush();
@@ -1033,9 +1037,26 @@ function App() {
   };
 
   const notifyNewlyAcceptedObject = async (object: DistributedObject) => {
+    const deferDmNotification = () => {
+      if (deferredDmNotificationIdsRef.current.has(object.object_id)) return;
+      if (deferredDmNotificationIdsRef.current.size >= MAX_DEFERRED_DM_NOTIFICATION_IDS) {
+        const oldestId = deferredDmNotificationIdsRef.current.values().next().value;
+        if (oldestId) deferredDmNotificationIdsRef.current.delete(oldestId);
+      }
+      deferredDmNotificationIdsRef.current.add(object.object_id);
+    };
+    const isDirectMessage = object.object_type === 'mycelium.dm';
+    if (isDirectMessage && !webPushNotificationPreferencesRef.current.directMessages) {
+      deferredDmNotificationIdsRef.current.delete(object.object_id);
+      return;
+    }
+
     const localIdentity = identityRef.current;
     const store = objectStoreRef.current;
-    if (!localIdentity || !store) return;
+    if (!localIdentity || !store) {
+      if (isDirectMessage) deferDmNotification();
+      return;
+    }
 
     try {
       const authorContact = contactsRef.current.find((contact) =>
@@ -1060,7 +1081,16 @@ function App() {
           isDeletionAwareObjectStore(store) && Boolean(await store.getDeletionTombstone(objectId))
         )
       });
-      if (!classification || !webPushNotificationPreferencesRef.current[classification.category]
+      if (!classification) {
+        deferredDmNotificationIdsRef.current.delete(object.object_id);
+        return;
+      }
+      if (!('category' in classification)) {
+        deferDmNotification();
+        return;
+      }
+      deferredDmNotificationIdsRef.current.delete(object.object_id);
+      if (!webPushNotificationPreferencesRef.current[classification.category]
         || typeof Notification === 'undefined' || Notification.permission !== 'granted'
         || !('serviceWorker' in navigator)) return;
 
@@ -1070,6 +1100,32 @@ function App() {
       addLog('A verified-object notification could not be displayed');
     }
   };
+  const notifyNewlyAcceptedObjectRef = useRef(notifyNewlyAcceptedObject);
+  notifyNewlyAcceptedObjectRef.current = notifyNewlyAcceptedObject;
+
+  useEffect(() => {
+    const store = objectStoreRef.current;
+    if (!identity || !store || deferredDmNotificationIdsRef.current.size === 0) return;
+    const retryDeferredNotifications = async () => {
+      for (const objectId of [...deferredDmNotificationIdsRef.current]) {
+        if (processingDeferredDmNotificationIdsRef.current.has(objectId)) continue;
+        processingDeferredDmNotificationIdsRef.current.add(objectId);
+        try {
+          const object = await store.get(objectId);
+          if (!object || object.object_type !== 'mycelium.dm') {
+            deferredDmNotificationIdsRef.current.delete(objectId);
+          } else {
+            await notifyNewlyAcceptedObjectRef.current(object);
+          }
+        } catch (error) {
+          addLog(`Deferred direct-message notification retry failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          processingDeferredDmNotificationIdsRef.current.delete(objectId);
+        }
+      }
+    };
+    void retryDeferredNotifications();
+  }, [identity, contacts, webPushNotificationPreferences]);
 
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
     const store = objectStoreRef.current;
@@ -2370,6 +2426,12 @@ function App() {
       undefined,
       (peer, packet) => {
         objectTransportRef.current?.handlePacket(peer, packet);
+      },
+      {
+        getConnectedPeerIds: () => objectTransportRef.current?.connectedPeers() ?? [],
+        onPeerList: createPeerCandidateIntake(identity.id, (sourcePeerId, error) => {
+          addLog(`Failed to store gossip peer candidates from ${sourcePeerId}: ${error instanceof Error ? error.message : String(error)}`);
+        })
       }
     );
 

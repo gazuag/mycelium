@@ -7,6 +7,7 @@ A privacy-first peer-to-peer social app prototype.
 - Generates a local cryptographic identity in the browser.
 - Stores identity data locally in IndexedDB.
 - Keeps bounded, expiring connection, FIND-forwarding, and validated object-supply observations in local IndexedDB. These observations are not shared or used for peer selection.
+- Retains peer IDs reported by connected peers in a separate, bounded candidate store. Candidates are advisory, are not Contacts or evidence of current reachability, and are not dialed automatically.
 - Exports those local observations from **Settings → Diagnostics → Local observations** as JSON without modifying the stored records.
 - Exports an identity backup file.
 - Connects two peers via WebRTC using a minimal signalling server.
@@ -43,6 +44,7 @@ than the remaining allowance before the client can abort it.
 - `src/crypto/identity.ts` — local keypair generation and fingerprint derivation.
 - `src/storage/idb.ts` — IndexedDB storage for local identity.
 - `src/p2p/local-observations.ts` — bounded local-only observations of direct connections, FIND forwarding, and validated object suppliers.
+- `src/p2p/peer-candidates.ts` — separate IndexedDB store for bounded, expiring peer-gossip candidates.
 - `src/p2p/signalling.ts` — WebSocket signalling connection.
 - `src/p2p/webrtc.ts` — WebRTC peer connection and data channel.
 - `src/services/discovery.ts` — discovery publish/fetch over the signalling WebSocket.
@@ -52,6 +54,18 @@ than the remaining allowance before the client can abort it.
 - `src/markdown/external-content.ts` — safe URL handling, Markdown image-size metadata, and bounded raster image loading.
 - `server.py` — Python WebSocket server handling signalling and discovery over one WebSocket endpoint.
 - `server_push.py` — separate TLS-only authenticated Web Push sender; it does not persist objects or subscriptions.
+
+## Peer-gossip candidates
+
+When a connected peer reports its currently connected peers through the
+capability-gated peer-list exchange, reported fingerprints are stored separately
+from Contacts. The local store retains at most 500 candidates for seven days
+after their latest report and permits at most 50 active candidates per reporting
+peer. It records bounded per-source provenance; repeated reports refresh
+freshness, while each source contributes to the observation count at most once
+per 24 hours (the count is capped at 1,000). These records do not indicate that
+a candidate is online, reachable, or trusted. They are not yet used to create
+Contacts or initiate connections.
 
 ## Install dependencies
 
@@ -193,6 +207,7 @@ An incoming valid push also asks any open app client to attempt the existing bou
 ## What travels directly between peers
 
 - All chat text via the WebRTC `RTCDataChannel`.
+- Capability-negotiated peer-list gossip via `PEER_LIST_REQUEST` and `PEER_LIST_RESPONSE`.
 - After the connection is established, no chat content is sent through the signalling server.
 
 ## Notes
@@ -356,9 +371,27 @@ capabilities = [
     "profiles",
     "posts",
     "messages",
-    "relay-v1"
+    "relay-v1",
+    "peer-gossip-v1"
 ]
 Peers should only use functionality supported by both sides.
+
+⸻
+
+## Direct Peer-List Exchange (`peer-gossip-v1`)
+
+Peers advertising `peer-gossip-v1` may exchange a bounded list over the
+existing WebRTC data channel:
+
+- `PEER_LIST_REQUEST` carries a unique `requestId`.
+- `PEER_LIST_RESPONSE` returns that ID and up to 50 valid peer fingerprints.
+
+The response contains only the responder's currently open, direct data-channel
+peers, excluding the requester and responder. A receiver correlates the
+response to its request and accepts it only from that connected peer. The
+returned IDs are advisory candidates, not proof of availability or identity;
+this exchange does not create contacts or initiate connections. Peers without
+the capability continue to interoperate without peer-list requests.
 
 ⸻
 
