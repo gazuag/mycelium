@@ -51,6 +51,9 @@ describe('SettingsPage', () => {
     expect(markup).toContain('never request notification permission or enable Web Push');
     expect(markup).toContain('Enable Web Push');
     expect(markup).toContain('requests notification permission only after you choose this action');
+    expect(markup).toContain('shares your subscription capability with peers you exchange authenticated profile information with');
+    expect(markup).toContain('so they can send notifications to this browser');
+    expect(markup).not.toContain('is not shown or shared');
     expect(markup).toContain('<h3>Diagnostics</h3>');
     expect(markup).toContain('>Export Local Observations</button>');
     expect(markup).toContain('Copy fingerprint');

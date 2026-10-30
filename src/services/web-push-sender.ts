@@ -1,7 +1,7 @@
 import type { Contact } from '../types';
 import { deriveFingerprint, signString } from '../crypto/identity';
 import { loadIdentity, type CompleteLocalIdentityRecord } from '../storage/idb';
-import { isWebPushCapability, webPushManager, type WebPushStatus } from './web-push';
+import { isWebPushCapability } from './web-push';
 import type { EncryptedWebPushRequest } from './web-push-encryption';
 
 const SENDER_URL = import.meta.env.VITE_WEB_PUSH_SENDER_URL as string | undefined;
@@ -15,7 +15,6 @@ export type WebPushSendResult =
   | { readonly status: 'rate-limited' }
   | { readonly status: 'temporary-failure' }
   | { readonly status: 'configuration-missing' }
-  | { readonly status: 'web-push-disabled' }
   | { readonly status: 'identity-unavailable' }
   | { readonly status: 'invalid-capability' }
   | { readonly status: 'request-rejected' };
@@ -33,7 +32,6 @@ export interface WebPushRequestFields {
 export interface WebPushSenderDependencies {
   readonly senderUrl?: string;
   readonly getIdentity: () => Promise<CompleteLocalIdentityRecord | null>;
-  readonly getWebPushStatus: () => Promise<WebPushStatus>;
   readonly fetcher?: typeof fetch;
 }
 
@@ -61,9 +59,6 @@ export function createWebPushSender(dependencies: WebPushSenderDependencies) {
   ): Promise<WebPushSendResult> => {
     const senderOrigin = normalizeSenderUrl(dependencies.senderUrl);
     if (!senderOrigin) return { status: 'configuration-missing' };
-
-    const status = await dependencies.getWebPushStatus().catch(() => null);
-    if (status?.state !== 'enabled') return { status: 'web-push-disabled' };
 
     const capability = recipient.webPush;
     if (!capability || !isWebPushCapability(capability) || encrypted.endpoint !== capability.endpoint) {
@@ -129,8 +124,7 @@ export function createWebPushSender(dependencies: WebPushSenderDependencies) {
 
 export const sendEncryptedWebPush = createWebPushSender({
   senderUrl: SENDER_URL,
-  getIdentity: loadIdentity,
-  getWebPushStatus: () => webPushManager.getStatus()
+  getIdentity: loadIdentity
 });
 
 function normalizeSenderUrl(value: string | undefined): string | null {

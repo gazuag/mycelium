@@ -56,13 +56,12 @@ describe('authenticated Web Push sender client', () => {
     await expect(verifySignedString(vector.publicKey, vector.canonical, vector.signature)).resolves.toBe(true);
   });
 
-  it('signs the encrypted request body and sends the bound headers to the configured HTTPS sender', async () => {
+  it('sends without requiring sender receive opt-in and signs the bound encrypted request', async () => {
     const identity = await createTestIdentity();
     const fetcher = vi.fn(async (_input: URL | RequestInfo, _init?: RequestInit) => new Response(null, { status: 202 }));
     const send = createWebPushSender({
       senderUrl: 'https://sender.example.test:9443',
       getIdentity: async () => identity,
-      getWebPushStatus: async () => ({ state: 'enabled', subscribed: true }),
       fetcher
     });
 
@@ -97,25 +96,30 @@ describe('authenticated Web Push sender client', () => {
     )).resolves.toBe(true);
   });
 
-  it('refuses to send when disabled, misconfigured, or given an invalid capability', async () => {
+  it('refuses to send when misconfigured or given an invalid capability', async () => {
     const identity = await createTestIdentity();
     const fetcher = vi.fn(async () => new Response(null, { status: 202 }));
-    const createSender = (senderUrl: string | undefined, enabled: boolean) => createWebPushSender({
+    const createSender = (senderUrl: string | undefined) => createWebPushSender({
       senderUrl,
       getIdentity: async () => identity,
-      getWebPushStatus: async () => ({ state: enabled ? 'enabled' : 'disabled', subscribed: false }),
       fetcher
     });
 
-    await expect(createSender(undefined, true)(encrypted, contact))
+    await expect(createSender(undefined)(encrypted, contact))
       .resolves.toEqual({ status: 'configuration-missing' });
-    await expect(createSender('https://sender.example.test/path', true)(encrypted, contact))
+    await expect(createSender('https://sender.example.test/path')(encrypted, contact))
       .resolves.toEqual({ status: 'configuration-missing' });
-    await expect(createSender('https://sender.example.test', false)(encrypted, contact))
-      .resolves.toEqual({ status: 'web-push-disabled' });
-    await expect(createSender('https://sender.example.test', true)(
+    await expect(createSender('https://sender.example.test')(
       encrypted,
       { ...contact, webPush: undefined }
+    )).resolves.toEqual({ status: 'invalid-capability' });
+    await expect(createSender('https://sender.example.test')(
+      { ...encrypted, endpoint: 'https://different.example.test/push' },
+      contact
+    )).resolves.toEqual({ status: 'invalid-capability' });
+    await expect(createSender('https://sender.example.test')(
+      encrypted,
+      { ...contact, webPush: { ...contact.webPush!, p256dh: '  ' } }
     )).resolves.toEqual({ status: 'invalid-capability' });
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -126,7 +130,6 @@ describe('authenticated Web Push sender client', () => {
     const send = createWebPushSender({
       senderUrl: 'https://sender.example.test',
       getIdentity: async () => identity,
-      getWebPushStatus: async () => ({ state: 'enabled', subscribed: true }),
       fetcher
     });
     const malformed: EncryptedWebPushRequest = { ...encrypted, body: new Uint8Array(10) };
@@ -147,7 +150,6 @@ describe('authenticated Web Push sender client', () => {
     const send = createWebPushSender({
       senderUrl: 'https://sender.example.test',
       getIdentity: async () => identity,
-      getWebPushStatus: async () => ({ state: 'enabled', subscribed: true }),
       fetcher: async () => new Response(null, { status: httpStatus })
     });
 
@@ -159,7 +161,6 @@ describe('authenticated Web Push sender client', () => {
     const send = createWebPushSender({
       senderUrl: 'https://sender.example.test',
       getIdentity: async () => identity,
-      getWebPushStatus: async () => ({ state: 'enabled', subscribed: true }),
       fetcher: async () => { throw new Error(endpoint); }
     });
 

@@ -305,7 +305,7 @@ export function SettingsPage({
                 </button>
               )}
             </div>
-            <p className="note">Enabling requests notification permission only after you choose this action. Your subscription stays in browser-managed storage and is not shown or shared by this setting.</p>
+            <p className="note">Enabling requests notification permission only after you choose this action. Mycelium shares your subscription capability with peers you exchange authenticated profile information with, so they can send notifications to this browser.</p>
           </div>
           <h4>Notification preferences</h4>
           <label className="checkbox-row">

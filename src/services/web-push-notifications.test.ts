@@ -229,7 +229,7 @@ describe('classification of newly accepted objects', () => {
     )).resolves.toBeNull();
   });
 
-  it('uses the signed reply notice target while deduplicating against its canonical reply post', async () => {
+  it('ignores reply notices without trusting their claimed canonical reply post', async () => {
     const target = object(TARGET_ID, 'mycelium.post', LOCAL_KEY);
     const replyNotice = object(REPLY_ID, 'mycelium.reply', 'reply-author', {
       reply_to: TARGET_ID,
@@ -239,7 +239,50 @@ describe('classification of newly accepted objects', () => {
     await expect(classifyNewlyAcceptedObjectNotification(replyNotice, {
       ...options,
       store: { get: vi.fn(async () => target) }
-    })).resolves.toEqual({ category: 'replies', dedupeId: 'd'.repeat(64) });
+    })).resolves.toBeNull();
+    await expect(classifyNewlyAcceptedObjectNotification(replyNotice, options)).resolves.toBeNull();
+    await expect(classifyNewlyAcceptedObjectNotification({
+      ...replyNotice,
+      payload: { reply_to: 'c'.repeat(64), reply_to_author: LOCAL_ID, reply_post_id: REPLY_ID }
+    }, {
+      ...options,
+      store: { get: vi.fn(async () => target) }
+    })).resolves.toBeNull();
+    await expect(classifyNewlyAcceptedObjectNotification({
+      ...replyNotice,
+      payload: { reply_to: TARGET_ID, reply_to_author: 'someone-else', reply_post_id: REPLY_ID }
+    }, {
+      ...options,
+      store: { get: vi.fn(async () => target) }
+    })).resolves.toBeNull();
+  });
+
+  it('notifies once for the canonical reply post after ignoring duplicate or fabricated notices', async () => {
+    const target = object(TARGET_ID, 'mycelium.post', LOCAL_KEY);
+    const canonicalReply = object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: TARGET_ID });
+    const store = { get: vi.fn(async (id: string) => id === TARGET_ID ? target : null) };
+    const replyOptions = { ...options, store };
+    const replyNotice = object('c'.repeat(64), 'mycelium.reply', 'reply-author', {
+      reply_to: TARGET_ID,
+      reply_to_author: LOCAL_ID,
+      reply_post_id: REPLY_ID
+    });
+    const storage = memoryStorage();
+    const showNotification = vi.fn(async () => undefined);
+
+    await expect(classifyNewlyAcceptedObjectNotification(replyNotice, replyOptions)).resolves.toBeNull();
+    await expect(classifyNewlyAcceptedObjectNotification(replyNotice, replyOptions)).resolves.toBeNull();
+    const classification = await classifyNewlyAcceptedObjectNotification(canonicalReply, replyOptions);
+    expect(classification).toEqual({ category: 'replies', dedupeId: REPLY_ID });
+    if (classification && 'category' in classification) {
+      expect(await showWebPushNotificationOnce(
+        { showNotification }, classification.category, classification.dedupeId, storage
+      )).toBe(true);
+      expect(await showWebPushNotificationOnce(
+        { showNotification }, classification.category, classification.dedupeId, storage
+      )).toBe(false);
+    }
+    expect(showNotification).toHaveBeenCalledTimes(1);
   });
 
   it('classifies followed-user posts and ignores self-authored, deleted, and unrelated objects', async () => {

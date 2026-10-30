@@ -110,7 +110,7 @@ export async function classifyNewlyAcceptedObjectNotification(
       : null;
   }
 
-  if (object.object_type !== 'mycelium.post' && object.object_type !== 'mycelium.reply') return null;
+  if (object.object_type !== 'mycelium.post') return null;
   const payload = isRecord(object.payload) ? object.payload : null;
   if (!payload) return null;
 
@@ -121,15 +121,7 @@ export async function classifyNewlyAcceptedObjectNotification(
       && (parent.author === identity.id || parent.author === identity.publicKey)
       && !isObjectExpired(parent)
       && !(await isTombstoned(parent.object_id))) {
-      if (object.object_type === 'mycelium.reply') {
-        const replyPostId = payload.reply_post_id;
-        if (typeof replyPostId === 'string' && OBJECT_ID_PATTERN.test(replyPostId)
-          && (payload.reply_to_author === identity.id || payload.reply_to_author === identity.publicKey)) {
-          return { category: 'replies', dedupeId: replyPostId };
-        }
-      } else {
-        return { category: 'replies', dedupeId: object.object_id };
-      }
+      return { category: 'replies', dedupeId: object.object_id };
     }
   }
 
