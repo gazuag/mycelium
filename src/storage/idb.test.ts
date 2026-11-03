@@ -270,6 +270,23 @@ describe('inbox cursor IndexedDB persistence', () => {
     }));
   });
 
+  it('persists a connection lastSeen timestamp across reloads', async () => {
+    const lastSeen = '2026-10-27T12:00:00.000Z';
+    await saveContact({
+      publicKey: 'last-seen-key',
+      fingerprint: 'last-seen-peer',
+      addedAt: '2026-10-01T00:00:00.000Z',
+      followed: false,
+      lastSeen
+    });
+
+    await expect(loadContacts()).resolves.toContainEqual(expect.objectContaining({
+      publicKey: 'last-seen-key',
+      fingerprint: 'last-seen-peer',
+      lastSeen
+    }));
+  });
+
   it('persists and clears an authenticated peer Web Push capability with its contact', async () => {
     const contact = {
       publicKey: 'push-capability-key',

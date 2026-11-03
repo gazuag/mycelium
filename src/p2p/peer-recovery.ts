@@ -12,7 +12,7 @@ export interface PeerRecoveryOptions {
   readonly discoverOnlinePeers: () => Promise<readonly string[]>;
   readonly getPeerUsefulnessEstimates?: (
     peerIds: readonly string[],
-    comparisonPeerIds: readonly string[]
+    connectedPeerIds: readonly string[]
   ) => Promise<readonly PeerUsefulnessEstimate[]>;
   readonly onPeerUsefulnessError?: (error: unknown) => void;
   readonly isAttemptInProgress: (peerId: string) => boolean;
@@ -71,7 +71,10 @@ export function prioritizePeerCandidates(
     && estimate.novel_object_weight > 0
   );
   const credibleCandidates = uniqueCandidates.filter((peerId) => hasCredibleUsefulness(estimatesByPeer.get(peerId)));
-  if (credibleCandidates.length === 0) return uniqueCandidates;
+  if (credibleCandidates.length === 0) {
+    const explorationCandidates = [...uniqueCandidates].sort((left, right) => left.localeCompare(right));
+    return rotateAfterPeer(explorationCandidates, rotation.lastExplorationPeerId);
+  }
 
   const explorationCandidates = uniqueCandidates.filter((peerId) => (
     !hasCredibleUsefulness(estimatesByPeer.get(peerId))
@@ -260,13 +263,10 @@ export class PeerRecoveryCoordinator {
           let orderedCandidates = prioritizedOnlinePeers;
           if (this.options.getPeerUsefulnessEstimates && orderedCandidates.length > 1) {
             try {
-              const comparisonPeerIds = [...new Set([
-                ...this.options.getConnectedPeers(),
-                ...orderedCandidates
-              ])];
+              const connectedPeerIds = [...new Set(this.options.getConnectedPeers())];
               const estimates = await this.options.getPeerUsefulnessEstimates(
                 orderedCandidates,
-                comparisonPeerIds
+                connectedPeerIds
               );
               const estimatesByPeer = new Map(estimates.map((estimate) => [estimate.peer_id, estimate]));
               candidateGroups = {

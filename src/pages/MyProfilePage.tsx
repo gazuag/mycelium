@@ -43,7 +43,7 @@ export function MyProfilePage({
       <div className="card profile-edit-card">
         <div className="profile-display-field">
           <span>Generated handle</span>
-          <span className="monospace">@{generatedNickname}</span>
+          <span className="monospace break-word">@{generatedNickname}</span>
         </div>
         <label>
           Display Name

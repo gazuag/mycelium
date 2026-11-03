@@ -2858,8 +2858,8 @@ function App() {
           isValidPeerFingerprint(contact.fingerprint) && typeof contact.lastSeen === 'string'
         ))
         .map((contact) => ({ peerId: contact.fingerprint, lastConnectedAt: contact.lastSeen })),
-      getPeerUsefulnessEstimates: (peerIds, comparisonPeerIds) =>
-        estimateLocalPeerUsefulness(peerIds, comparisonPeerIds),
+      getPeerUsefulnessEstimates: (peerIds, connectedPeerIds) =>
+        estimateLocalPeerUsefulness(peerIds, connectedPeerIds),
       onPeerUsefulnessError: (error) => {
         addLog(`Peer usefulness estimate unavailable; retaining existing candidate order: ${error instanceof Error ? error.message : String(error)}`);
       },

@@ -32,6 +32,38 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it('rotates the first candidate across successive rounds when no candidate is credible', async () => {
+  let coordinator: PeerRecoveryCoordinator;
+  const connectedPeers: string[] = [];
+  const attempts: string[] = [];
+  coordinator = new PeerRecoveryCoordinator({
+    getConnectedPeers: () => connectedPeers,
+    getPreviouslyConnectedPeers: () => [],
+    preferredTarget: 1,
+    discoverOnlinePeers: async () => ['explore-c', 'explore-a', 'explore-b'],
+    getPeerUsefulnessEstimates: async () => [],
+    isAttemptInProgress: () => false,
+    attemptPeer: async (peerId) => {
+      attempts.push(peerId);
+      connectedPeers.push(peerId);
+      coordinator.notifyConnectivityChanged();
+      return true;
+    }
+  });
+
+  coordinator.notifyConnectivityChanged();
+  await flushMicrotasks();
+  connectedPeers.length = 0;
+  coordinator.notifyConnectivityChanged();
+  await flushMicrotasks();
+  connectedPeers.length = 0;
+  coordinator.notifyConnectivityChanged();
+  await flushMicrotasks();
+
+  expect(attempts).toEqual(['explore-a', 'explore-b', 'explore-c']);
+  coordinator.dispose();
+});
+
 function usefulness(
   peerId: string,
   score: number,
@@ -78,6 +110,46 @@ describe('PeerRecoveryCoordinator', () => {
     coordinator.notifyConnectivityChanged();
     await flushMicrotasks();
     expect(discoveries).toBe(2);
+    coordinator.dispose();
+  });
+
+  it('applies active-attempt and backoff filtering after rotating uncredible candidates', async () => {
+    vi.useFakeTimers();
+    let coordinator: PeerRecoveryCoordinator;
+    const connectedPeers: string[] = [];
+    const attempts: string[] = [];
+    coordinator = new PeerRecoveryCoordinator({
+      getConnectedPeers: () => connectedPeers,
+      getPreviouslyConnectedPeers: () => [],
+      preferredTarget: 1,
+      discoverOnlinePeers: async () => ['peer-c', 'peer-a', 'peer-b'],
+      getPeerUsefulnessEstimates: async () => [],
+      isAttemptInProgress: (peerId) => peerId === 'peer-c',
+      attemptPeer: async (peerId) => {
+        attempts.push(peerId);
+        if (peerId === 'peer-a') {
+          connectedPeers.push(peerId);
+          coordinator.notifyConnectivityChanged();
+          return true;
+        }
+        return false;
+      },
+      peerBackoffBaseMs: 100,
+      peerBackoffMaxMs: 100,
+      retryDelaysMs: [10]
+    });
+
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    connectedPeers.length = 0;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    expect(attempts).toEqual(['peer-a', 'peer-b', 'peer-a']);
+
+    connectedPeers.length = 0;
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+    expect(attempts).toEqual(['peer-a', 'peer-b', 'peer-a', 'peer-a']);
     coordinator.dispose();
   });
 
@@ -388,16 +460,16 @@ describe('PeerRecoveryCoordinator', () => {
     coordinator.dispose();
   });
 
-  it('uses current connected peers with candidates as the usefulness comparison set', async () => {
+  it('uses only current connected peers as the usefulness comparison set', async () => {
     const connectedPeers = ['already-connected-peer'];
-    let receivedComparisonPeerIds: readonly string[] = [];
+    let receivedConnectedPeerIds: readonly string[] = [];
     const { coordinator } = createCoordinator({
       getConnectedPeers: () => connectedPeers,
       preferredTarget: 3,
       discoverOnlinePeers: async () => ['candidate-a', 'candidate-b'],
-      getPeerUsefulnessEstimates: async (peerIds, comparisonPeerIds) => {
+      getPeerUsefulnessEstimates: async (peerIds, connectedPeerIds) => {
         expect(peerIds).toEqual(['candidate-a', 'candidate-b']);
-        receivedComparisonPeerIds = comparisonPeerIds;
+        receivedConnectedPeerIds = connectedPeerIds;
         return [];
       }
     });
@@ -405,11 +477,7 @@ describe('PeerRecoveryCoordinator', () => {
     coordinator.notifyConnectivityChanged();
     await flushMicrotasks();
 
-    expect(receivedComparisonPeerIds).toEqual([
-      'already-connected-peer',
-      'candidate-a',
-      'candidate-b'
-    ]);
+    expect(receivedConnectedPeerIds).toEqual(['already-connected-peer']);
     coordinator.dispose();
   });
 

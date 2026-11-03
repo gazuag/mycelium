@@ -56,21 +56,21 @@ export function estimatePeerUsefulness(
   peerIds: readonly string[],
   observations: PeerUsefulnessObservations,
   now = Date.now(),
-  comparisonPeerIds: readonly string[] = peerIds
+  connectedPeerIds: readonly string[] = peerIds
 ): PeerUsefulnessEstimate[] {
   const activeObjects = getActiveObjectSupplies(observations.objectSupply ?? [], now);
-  const comparisonPeers = new Set([...comparisonPeerIds, ...peerIds]);
-  const supplierCountByObject = new Map<string, number>();
-  for (const object of activeObjects) {
-    if (!comparisonPeers.has(object.supplierPeerId)) continue;
-    const suppliers = supplierCountByObject.get(object.objectId) ?? 0;
-    supplierCountByObject.set(object.objectId, suppliers + 1);
-  }
-
   const activeFindResponses = getActiveFindResponses(observations.findForwarding ?? [], now);
   const uniquePeerIds = [...new Set(peerIds.filter((peerId) => typeof peerId === 'string' && peerId.length > 0))];
 
   return uniquePeerIds.map((peerId) => {
+    const comparisonPeers = new Set([...connectedPeerIds, peerId]);
+    const supplierCountByObject = new Map<string, number>();
+    for (const object of activeObjects) {
+      if (!comparisonPeers.has(object.supplierPeerId)) continue;
+      const suppliers = supplierCountByObject.get(object.objectId) ?? 0;
+      supplierCountByObject.set(object.objectId, suppliers + 1);
+    }
+
     const connection = (observations.connections ?? []).find((record) => (
       isUnexpired(record?.expires_at, now)
       && record.peer_id === peerId
@@ -144,7 +144,7 @@ export function estimatePeerUsefulness(
 
 export async function estimateLocalPeerUsefulness(
   peerIds: readonly string[],
-  comparisonPeerIds: readonly string[] = peerIds,
+  connectedPeerIds: readonly string[] = peerIds,
   now = Date.now()
 ): Promise<PeerUsefulnessEstimate[]> {
   const [connections, findForwarding, objectSupply] = await Promise.all([
@@ -152,7 +152,7 @@ export async function estimateLocalPeerUsefulness(
     loadFindForwardingObservations(now),
     loadObjectSupplyObservations(now)
   ]);
-  return estimatePeerUsefulness(peerIds, { connections, findForwarding, objectSupply }, now, comparisonPeerIds);
+  return estimatePeerUsefulness(peerIds, { connections, findForwarding, objectSupply }, now, connectedPeerIds);
 }
 
 function getIdentityEvidence(

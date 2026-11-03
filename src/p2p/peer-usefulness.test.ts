@@ -84,9 +84,9 @@ function estimate(
     findForwarding?: readonly FindForwardingObservation[];
     objectSupply?: readonly ObjectSupplyObservation[];
   } = {},
-  comparisonPeerIds: readonly string[] = peerIds
+  connectedPeerIds: readonly string[] = peerIds
 ) {
-  return estimatePeerUsefulness(peerIds, records, NOW, comparisonPeerIds);
+  return estimatePeerUsefulness(peerIds, records, NOW, connectedPeerIds);
 }
 
 describe('local peer usefulness estimation', () => {
@@ -153,6 +153,54 @@ describe('local peer usefulness estimation', () => {
     expect(estimates[1].redundant_objects).toBe(1);
     expect(estimates[1].distinct_verified_authors).toBe(1);
     expect(estimates[0].score).toBeGreaterThan(estimates[1].score);
+  });
+
+  it('does not compare unconnected online candidates against each other', () => {
+    const estimates = estimate(
+      ['peer-a', 'peer-b'],
+      {
+        objectSupply: [
+          supply('peer-a', 'shared-object', 'author-x'),
+          supply('peer-b', 'shared-object', 'author-x')
+        ]
+      },
+      []
+    );
+
+    expect(estimates.map(({ novel_object_weight }) => novel_object_weight)).toEqual([1, 1]);
+  });
+
+  it('excludes a shared object when its other supplier is currently connected', () => {
+    const [peerA] = estimate(
+      ['peer-a'],
+      {
+        objectSupply: [
+          supply('peer-a', 'shared-object', 'author-x'),
+          supply('peer-b', 'shared-object', 'author-x')
+        ]
+      },
+      ['peer-b']
+    );
+
+    expect(peerA.novel_object_weight).toBe(0);
+    expect(peerA.redundant_objects).toBe(1);
+  });
+
+  it('always includes the candidate while excluding disconnected historical peers and alternatives', () => {
+    const [peerA] = estimate(
+      ['peer-a'],
+      {
+        objectSupply: [
+          supply('peer-a', 'candidate-object', 'author-x'),
+          supply('disconnected-history', 'candidate-object', 'author-x'),
+          supply('unconnected-alternative', 'candidate-object', 'author-x')
+        ]
+      },
+      ['currently-connected']
+    );
+
+    expect(peerA.novel_object_weight).toBe(1);
+    expect(peerA.redundant_objects).toBe(0);
   });
 
   it('credits observed objects not seen from other comparison peers', () => {

@@ -104,6 +104,7 @@ describe('local topology observations', () => {
     const [closedObservation] = await loadConnectionObservations();
     expect(closedObservation.most_recent_disconnect).toBe(new Date(openedAt + 15_000).toISOString());
     expect(closedObservation.sessions[0].duration_ms).toBe(15_000);
+    expect(closedObservation.recent_failures).toEqual([]);
   });
 
   it('persists connection history with explicit verified and session-only identity evidence', async () => {
@@ -140,16 +141,28 @@ describe('local topology observations', () => {
     await recordFindForwarding('request-1', 'parent-peer', 'child-peer', 'pending', now);
     await recordFindForwarding('request-1', 'parent-peer', 'child-peer', 'responded', now + 1000);
     await recordFindForwarding('request-1', 'parent-peer', 'child-peer', 'pending', now + 2000);
+    await recordFindForwarding('request-2', 'parent-peer', 'other-child', 'pending', now + 3000);
+    await recordFindForwarding('request-2', 'parent-peer', 'other-child', 'failed', now + 4000);
 
-    await expect(loadFindForwardingObservations()).resolves.toEqual([expect.objectContaining({
-      request_id: 'request-1',
-      incoming_peer_id: 'parent-peer',
-      incoming_peer_identity_kind: 'session',
-      child_peer_id: 'child-peer',
-      child_peer_identity_kind: 'session',
-      status: 'responded',
-      observed_at: new Date(now).toISOString()
-    })]);
+    await expect(loadFindForwardingObservations()).resolves.toEqual([
+      expect.objectContaining({
+        request_id: 'request-1',
+        incoming_peer_id: 'parent-peer',
+        incoming_peer_identity_kind: 'session',
+        child_peer_id: 'child-peer',
+        child_peer_identity_kind: 'session',
+        status: 'responded',
+        observed_at: new Date(now).toISOString()
+      }),
+      expect.objectContaining({
+        request_id: 'request-2',
+        incoming_peer_id: 'parent-peer',
+        child_peer_id: 'other-child',
+        status: 'failed',
+        observed_at: new Date(now + 3000).toISOString()
+      })
+    ]);
+    await expect(loadConnectionObservations()).resolves.toEqual([]);
   });
 
   it('stores supplier and object author as distinct transfer fields', async () => {
