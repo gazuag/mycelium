@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { dedupeContactsByFingerprint } from './contact-utils';
+import { contactWithIdentityProfile, dedupeContactsByFingerprint } from './contact-utils';
+import type { IdentityObject } from './object-layer/identity-object';
 import type { Contact } from './types';
 
 function contact(lastReadAt?: string): Contact {
@@ -24,5 +25,37 @@ describe('contact unread read-state merging', () => {
       displayName: 'Merged contact',
       lastReadAt: '2026-10-04T12:00:00.000Z'
     });
+  });
+});
+
+describe('identity profile contact updates', () => {
+  it('does not make a retrieved profile a followed or trusted relationship', () => {
+    const profile: IdentityObject = {
+      object_id: 'profile-id',
+      object_type: 'mycelium.identity',
+      author: 'signing-key',
+      created_at: '2026-10-01T00:00:00.000Z',
+      payload: {
+        display_name: 'Retrieved name',
+        bio: '',
+        encryption_public_key: 'encryption-key',
+        encryption_key_binding: {
+          signing_public_key: 'signing-key',
+          encryption_public_key: 'encryption-key',
+          created_at: '2026-10-01T00:00:00.000Z',
+          signature: 'signature'
+        }
+      },
+      signature: 'signature',
+      replication_policy: {}
+    };
+    const updated = contactWithIdentityProfile(undefined, profile, 'peer-id');
+
+    expect(updated).toMatchObject({
+      fingerprint: 'peer-id',
+      displayName: 'Retrieved name',
+      followed: false
+    });
+    expect(updated).not.toHaveProperty('trusted');
   });
 });

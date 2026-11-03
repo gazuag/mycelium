@@ -120,6 +120,8 @@ function createManager(options: {
   onRequestPosts?: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
   onMetadata?: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void;
   onEvent?: (peerId: string, event: string) => void;
+  onIdentityProfileRequest?: (peerId: string, requestId: string) => void;
+  onIdentityProfileResponse?: (peerId: string, requestId: string, object: unknown) => void;
   onObject?: (peerId: string, object: DistributedObject) => void;
   onObjectsBatch?: (peerId: string, objects: DistributedObject[], page?: FeedPageMetadata) => void;
 } = {}) {
@@ -139,7 +141,9 @@ function createManager(options: {
     options.localCapabilities ?? ['profiles', 'posts', 'messages', 'relay-v1', PEER_GOSSIP_CAPABILITY],
     undefined,
     undefined,
-    options.peerListExchange
+    options.peerListExchange,
+    options.onIdentityProfileRequest,
+    options.onIdentityProfileResponse
   );
 }
 
@@ -198,6 +202,74 @@ function peerListPacket(
 function receivePacket(channel: FakeDataChannel, packet: MyceliumPacket) {
   channel.onmessage?.({ data: JSON.stringify(packet) } as MessageEvent);
 }
+
+describe('signed identity profile exchange', () => {
+  it('correlates one request per connection and permits a retry after reconnection', async () => {
+    const received: Array<{ peerId: string; requestId: string; object: unknown }> = [];
+    const manager = createManager({
+      onIdentityProfileResponse: (peerId, requestId, object) => received.push({ peerId, requestId, object })
+    });
+    const channel = await openDataChannel(manager);
+
+    await expect(manager.requestIdentityProfile('request-1')).resolves.toBe(true);
+    await expect(manager.requestIdentityProfile('request-2')).resolves.toBe(false);
+    expect(JSON.parse(channel.send.mock.calls[channel.send.mock.calls.length - 1]?.[0] as string)).toMatchObject({
+      type: 'IDENTITY_PROFILE_REQUEST',
+      payload: { requestId: 'request-1' }
+    });
+
+    receivePacket(channel, {
+      protocol: 'mycelium',
+      version: 1,
+      id: 'response-1',
+      type: 'IDENTITY_PROFILE_RESPONSE',
+      timestamp: new Date().toISOString(),
+      sender: 'peer-b',
+      recipient: 'peer-a',
+      payload: { requestId: 'request-1', object: { object_id: 'signed-profile' } },
+      signature: 'packet-signature'
+    });
+    expect(received).toEqual([{
+      peerId: 'peer-b',
+      requestId: 'request-1',
+      object: { object_id: 'signed-profile' }
+    }]);
+    await expect(manager.requestIdentityProfile('request-3')).resolves.toBe(false);
+
+    channel.close();
+    const reconnectedChannel = new FakeDataChannel(999);
+    (manager as any).attachDataChannel(reconnectedChannel);
+    reconnectedChannel.readyState = 'open';
+    reconnectedChannel.onopen?.();
+    await expect(manager.requestIdentityProfile('request-4')).resolves.toBe(true);
+    expect(JSON.parse(reconnectedChannel.send.mock.calls[reconnectedChannel.send.mock.calls.length - 1]?.[0] as string)).toMatchObject({
+      type: 'IDENTITY_PROFILE_REQUEST',
+      payload: { requestId: 'request-4' }
+    });
+    manager.closeConnection();
+  });
+
+  it('forwards well-formed incoming requests to the responder callback', () => {
+    const requests: Array<{ peerId: string; requestId: string }> = [];
+    const manager = createManager({
+      onIdentityProfileRequest: (peerId, requestId) => requests.push({ peerId, requestId })
+    });
+
+    (manager as any).handleMyceliumPacket({
+      type: 'IDENTITY_PROFILE_REQUEST',
+      sender: 'peer-b',
+      payload: { requestId: 'request-1' }
+    });
+    (manager as any).handleMyceliumPacket({
+      type: 'IDENTITY_PROFILE_REQUEST',
+      sender: 'peer-b',
+      payload: { requestId: ' ' }
+    });
+
+    expect(requests).toEqual([{ peerId: 'peer-b', requestId: 'request-1' }]);
+    manager.closeConnection();
+  });
+});
 
 async function flushMicrotasks() {
   for (let index = 0; index < 10; index += 1) await Promise.resolve();

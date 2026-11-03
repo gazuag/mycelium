@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { displayNameOrFallback, displayProfileBio, fingerprintToHumanName, shortPeerId } from './fingerprintNames';
+import { displayNameOrFallback, displayProfileBio, fingerprintToHumanName, resolvePeerDisplayName, shortPeerId } from './fingerprintNames';
 import { keyToUsername } from './usernameCodec';
 
 describe('peer identity display helpers', () => {
@@ -14,6 +14,12 @@ describe('peer identity display helpers', () => {
     const peerId = 'peer-1234';
     expect(shortPeerId(peerId)).toBe(peerId);
     expect(peerId).toBe('peer-1234');
+  });
+
+  it('prefers a signed profile name over authenticated metadata and falls back to metadata', () => {
+    expect(resolvePeerDisplayName(' Profile name ', 'Metadata name')).toBe('Profile name');
+    expect(resolvePeerDisplayName(undefined, ' Metadata name ')).toBe('Metadata name');
+    expect(resolvePeerDisplayName('  ', undefined)).toBeUndefined();
   });
 
   it('renders 64-bit fingerprints through the deterministic vocabulary codec', () => {

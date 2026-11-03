@@ -1,5 +1,5 @@
 import type { Contact } from '../types';
-import { displayNameOrFallback, displayProfileBio } from '../utils/fingerprintNames';
+import { displayNameOrFallback, displayProfileBio, resolvePeerDisplayName } from '../utils/fingerprintNames';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 
@@ -13,7 +13,13 @@ interface PersonRowProps {
 }
 
 export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutualLabel, metric }: PersonRowProps) {
-  const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey);
+  const displayName = displayNameOrFallback(
+    resolvePeerDisplayName(
+      contact.identityObject?.payload.display_name,
+      contact.authenticatedDisplayName
+    ) ?? contact.displayName,
+    contact.fingerprint || contact.publicKey
+  );
   const bio = displayProfileBio(
     contact.identityObject?.payload.bio ?? contact.profile?.bio,
     contact.fingerprint || contact.publicKey

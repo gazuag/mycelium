@@ -68,6 +68,32 @@ describe('recipient FIND queries', () => {
     expect(getFindQueryCriteria(packet)).toMatchObject({ recipient: 'recipient-signing-key', since: '2026-09-30T11:00:00.000Z' });
   });
 
+  it('round-trips the active authenticated author filter through FIND forwarding', async () => {
+    const packet = await buildFindPacket('requester', 'peer-a', [], undefined, 'connected-author-round-trip', 1, 'requester', undefined, {
+      object_type: 'mycelium.identity',
+      author_connected: true,
+      limit: 50
+    });
+    expect(packet.payload.author_connected).toBe(true);
+    expect(getFindQueryCriteria(packet)).toMatchObject({
+      object_type: 'mycelium.identity',
+      author_connected: true,
+      limit: 50
+    });
+
+    const forwarded = await buildForwardedFindPacket(
+      { object_type: 'mycelium.identity', author_connected: true, limit: 50 },
+      'connected-author-forwarded',
+      'peer-a',
+      'peer-b',
+      [],
+      0,
+      'requester',
+      new Date(Date.now() + 5000).toISOString()
+    );
+    expect(forwarded.payload.author_connected).toBe(true);
+  });
+
   it('round-trips the compound page cursor through FIND and forwarding', async () => {
     const pageBefore = {
       created_at: '2026-09-30T12:00:00.000Z',
@@ -122,6 +148,119 @@ describe('recipient FIND queries', () => {
     await expect(respondToFindPacket(packet, store, async (response) => { responses.push(response); }, 'local'))
       .resolves.toBe(true);
     expect(responses[0]?.payload.objects).toEqual([addressed]);
+  });
+
+  it('filters only to cached objects whose authors are currently connected and authenticated', async () => {
+    const store = createStore();
+    const connectedProfile = await createObject({ objectType: 'test.identity' });
+    const disconnectedCachedProfile = await createObject({ objectType: 'test.identity' });
+    await store.put(connectedProfile);
+    await store.put(disconnectedCachedProfile);
+    storedObjectIds.push(connectedProfile.object_id, disconnectedCachedProfile.object_id);
+
+    const query = { object_type: 'test.identity', author_connected: true } as const;
+    const connectedAuthors = new Set([connectedProfile.author, 'connected-without-cached-profile']);
+    const result = await findObjectsByFindQueryPage(store, query, connectedAuthors);
+
+    expect(result.objects).toEqual([connectedProfile]);
+    await expect(findObjectsByFindQueryPage(store, query)).resolves.toMatchObject({ objects: [] });
+    await expect(findObjectsByFindQueryPage(store, {
+      object_type: 'test.identity',
+      author_connected: false
+    }, connectedAuthors)).resolves.toMatchObject({ objects: [disconnectedCachedProfile] });
+    const ordinaryResult = await findObjectsByFindQueryPage(store, {
+      object_type: 'test.identity'
+    });
+    expect(ordinaryResult.objects.map((object) => object.object_id).sort()).toEqual(
+      [connectedProfile.object_id, disconnectedCachedProfile.object_id].sort()
+    );
+  });
+
+  it('answers a connected-author FIND with only locally available matching objects', async () => {
+    const store = createStore();
+    const connectedProfile = await createObject({ objectType: 'test.identity' });
+    const disconnectedProfile = await createObject({ objectType: 'test.identity' });
+    await store.put(connectedProfile);
+    await store.put(disconnectedProfile);
+    storedObjectIds.push(connectedProfile.object_id, disconnectedProfile.object_id);
+    const packet = await buildFindPacket('requester', 'local', [], undefined, 'connected-author-local', 0, 'requester', undefined, {
+      object_type: 'test.identity',
+      author_connected: true,
+      limit: 50
+    });
+    const responses: FindResponsePacket[] = [];
+
+    await expect(respondToFindPacket(
+      packet,
+      store,
+      async (response) => { responses.push(response); },
+      'local',
+      new Map(),
+      undefined,
+      new Set([connectedProfile.author])
+    )).resolves.toBe(true);
+    expect(responses[0]?.payload.objects).toEqual([connectedProfile]);
+  });
+
+  it('recognizes a false-only author_connected FIND and returns only disconnected authors', async () => {
+    const store = createStore();
+    const connectedObject = await createObject({ objectType: 'mycelium.post' });
+    const disconnectedObject = await createObject({ objectType: 'mycelium.post' });
+    await store.put(connectedObject);
+    await store.put(disconnectedObject);
+    storedObjectIds.push(connectedObject.object_id, disconnectedObject.object_id);
+    const packet = await buildFindPacket(
+      'requester',
+      'local',
+      [],
+      undefined,
+      'disconnected-author-only',
+      0,
+      'requester',
+      undefined,
+      { author_connected: false }
+    );
+    const connectedAuthors = new Set([connectedObject.author]);
+    const responses: FindResponsePacket[] = [];
+
+    expect(getFindQueryCriteria(packet)).toMatchObject({ author_connected: false });
+    await expect(respondToFindPacket(
+      packet,
+      store,
+      async (response) => { responses.push(response); },
+      'local',
+      new Map(),
+      undefined,
+      connectedAuthors
+    )).resolves.toBe(true);
+    expect(responses[0]?.payload.objects).toEqual([disconnectedObject]);
+  });
+
+  it('rejects malformed connected-author filters', async () => {
+    const store = createStore();
+    const packet = await buildFindPacket('requester', 'local', [], undefined, 'invalid-connected-author', 0, 'requester', undefined, {
+      object_type: 'test.identity',
+      author_connected: true
+    });
+    const malformed = {
+      ...packet,
+      payload: { ...packet.payload, author_connected: 'yes' }
+    };
+
+    await expect(respondToFindPacket(malformed, store, async () => undefined, 'local'))
+      .resolves.toBe(false);
+  });
+
+  it('keeps ordinary FIND queries independent of connected-author state', async () => {
+    const store = createStore();
+    const first = await createObject({ objectType: 'test.identity' });
+    const second = await createObject({ objectType: 'test.identity' });
+    await store.put(first);
+    await store.put(second);
+    storedObjectIds.push(first.object_id, second.object_id);
+
+    await expect(filterObjectsByFindQuery(store, { object_type: 'test.identity' }))
+      .resolves.toHaveLength(2);
   });
 
   it('declares compound cursor support when answering a cursor query', async () => {

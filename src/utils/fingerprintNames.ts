@@ -183,6 +183,13 @@ export function displayNameOrFallback(displayName: string | undefined, fingerpri
   return fingerprintToHumanName(fingerprint);
 }
 
+export function resolvePeerDisplayName(
+  identityProfileName: string | undefined,
+  authenticatedMetadataName: string | undefined
+): string | undefined {
+  return identityProfileName?.trim() || authenticatedMetadataName?.trim() || undefined;
+}
+
 export function displayProfileBio(bio: string | undefined, peerId: string): string | undefined {
   const trimmed = bio?.trim();
   if (!trimmed) return trimmed;

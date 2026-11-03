@@ -266,6 +266,28 @@ async function waitForPeerConnection(left: Peer, right: Peer) {
   }).toContain(left.identityId);
 }
 
+async function waitForAuthenticatedConnection(left: Peer, right: Peer) {
+  const authenticateFrom = async (peer: Peer, remote: Peer) => {
+    await expect.poll(async () => {
+      await peer.page.evaluate(async (peerId) => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        await api.sendAuthenticatedProfile(peerId);
+      }, remote.identityId);
+      return (await readPeerState(peer.page)).logs.some((entry) => entry.includes(
+        `Received authenticated connection metadata from ${remote.identityId}`
+      ));
+    }, {
+      timeout: 20_000,
+      message: `${peer.label} did not authenticate ${remote.label}; logs: ${(await readPeerState(peer.page)).logs.slice(-25).join('\n')}`
+    }).toBe(true);
+  };
+  await Promise.all([
+    authenticateFrom(left, right),
+    authenticateFrom(right, left)
+  ]);
+}
+
 async function createPeer(
   context: BrowserContext,
   label: string,
@@ -541,6 +563,327 @@ test('four independent browser peers record and export local topology observatio
     const diagnosticsPath = join(outputDirectory, 'peer-diagnostics.json');
     await writeFile(diagnosticsPath, JSON.stringify(report, null, 2));
     await testInfo.attach('multi-peer-observation-diagnostics', { path: diagnosticsPath, contentType: 'application/json' });
+    console.log(JSON.stringify(report, null, 2));
+  } finally {
+    try {
+      await Promise.all(contexts.map((context) => context.close()));
+    } finally {
+      try {
+        await browserInstance?.close();
+      } finally {
+        await signalling.stop();
+      }
+    }
+  }
+});
+
+test('FIND author_connected returns the responder’s live authenticated identity profiles', async ({}, testInfo) => {
+  test.setTimeout(240_000);
+  const signalling = await startSignallingServer();
+  let browserInstance: Browser | undefined;
+  const contexts: BrowserContext[] = [];
+  const diagnostics: BrowserDiagnostics[] = [];
+  const peers: Peer[] = [];
+  try {
+    browserInstance = await chromium.launch({ args: ['--ignore-certificate-errors'] });
+    const create = async (label: string) => {
+      const context = await browserInstance!.newContext({ ignoreHTTPSErrors: true });
+      contexts.push(context);
+      const peerDiagnostics: BrowserDiagnostics = { label, consoleErrors: [], pageErrors: [] };
+      diagnostics.push(peerDiagnostics);
+      const peer = await createPeer(context, label, signalling.endpoint, peerDiagnostics);
+      peers.push(peer);
+      return peer;
+    };
+    const createdPeers = await Promise.all(['peer-1', 'peer-2', 'peer-3', 'peer-4'].map(create));
+    const [requester, responder, relay, candidate] = [...createdPeers]
+      .sort((left, right) => left.identityId.localeCompare(right.identityId));
+
+    await waitForPeerConnection(responder, relay);
+    await waitForAuthenticatedConnection(responder, relay);
+    await waitForPeerConnection(responder, candidate);
+    await waitForAuthenticatedConnection(responder, candidate);
+
+    const relayCandidateState = await readPeerState(relay.page);
+    if (relayCandidateState.connectedPeers.includes(candidate.identityId)) {
+      await relay.page.evaluate((peerId) => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        api.disconnectPeer(peerId);
+      }, candidate.identityId);
+      await expect.poll(async () => (await readPeerState(relay.page)).connectedPeers, {
+        timeout: 15_000
+      }).not.toContain(candidate.identityId);
+    }
+
+    await waitForPeerConnection(requester, relay);
+    await waitForAuthenticatedConnection(requester, relay);
+
+    const relayProfiles = await relay.page.evaluate(async () => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.identityProfiles();
+    });
+    const relayProfile = relayProfiles.find((profile) => profile.peerId === relay.identityId);
+    expect(relayProfile).toBeTruthy();
+    const candidateProfile = await candidate.page.evaluate(async (peerId) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return (await api.identityProfiles()).find((profile) => profile.peerId === peerId) ?? null;
+    }, candidate.identityId);
+    expect(candidateProfile).toBeTruthy();
+    const requesterProfile = await requester.page.evaluate(async (peerId) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return (await api.identityProfiles()).find((profile) => profile.peerId === peerId) ?? null;
+    }, requester.identityId);
+    expect(requesterProfile).toBeTruthy();
+    const responderProfile = await responder.page.evaluate(async (peerId) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return (await api.identityProfiles()).find((profile) => profile.peerId === peerId) ?? null;
+    }, responder.identityId);
+    expect(responderProfile).toBeTruthy();
+
+    const connectedPostContent = 'connected-author generic FIND post';
+    const disconnectedPostContent = 'disconnected-author generic FIND post';
+    const requesterPostId = await requester.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.createLocalTestPost(content) ?? Promise.reject(new Error('Test API unavailable')),
+      connectedPostContent
+    );
+    await requester.page.evaluate(async ({ objectId, peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      await api.sendObject(objectId, peerId);
+    }, { objectId: requesterPostId, peerId: relay.identityId });
+    await expect.poll(async () => relay.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.objectIdForPost(content) ?? null,
+      connectedPostContent
+    ), { timeout: 15_000 }).toBe(requesterPostId);
+    const responderPostId = await responder.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.createLocalTestPost(content) ?? Promise.reject(new Error('Test API unavailable')),
+      'authenticated responder generic FIND post'
+    );
+    await responder.page.evaluate(async ({ objectId, peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      await api.sendObject(objectId, peerId);
+    }, { objectId: responderPostId, peerId: relay.identityId });
+    await expect.poll(async () => relay.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.objectIdForPost(content) ?? null,
+      'authenticated responder generic FIND post'
+    ), { timeout: 15_000 }).toBe(responderPostId);
+    const candidatePostId = await candidate.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.createLocalTestPost(content) ?? Promise.reject(new Error('Test API unavailable')),
+      disconnectedPostContent
+    );
+    await candidate.page.evaluate(async ({ objectId, peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      await api.sendObject(objectId, peerId);
+    }, { objectId: candidatePostId, peerId: responder.identityId });
+    await expect.poll(async () => responder.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.objectIdForPost(content) ?? null,
+      disconnectedPostContent
+    ), { timeout: 15_000 }).toBe(candidatePostId);
+    await responder.page.evaluate(async ({ objectId, peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      await api.sendObject(objectId, peerId);
+    }, { objectId: candidatePostId, peerId: relay.identityId });
+    await expect.poll(async () => relay.page.evaluate(
+      (content) => window.__MYCELIUM_E2E__?.objectIdForPost(content) ?? null,
+      disconnectedPostContent
+    ), { timeout: 15_000 }).toBe(candidatePostId);
+    await relay.page.evaluate((peerId) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      api.disconnectPeer(peerId);
+    }, candidate.identityId);
+    await expect.poll(async () => (await readPeerState(relay.page)).connectedPeers, {
+      timeout: 15_000
+    }).not.toContain(candidate.identityId);
+
+    const connectedPostAuthors = await requester.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findObjectsByQuery(peerId, 'mycelium.post', true, 0);
+    }, { peerId: relay.identityId });
+    expect(connectedPostAuthors.authors).toContain(requesterProfile!.author);
+    expect(connectedPostAuthors.authors).toContain(responderProfile!.author);
+    expect(connectedPostAuthors.authors).not.toContain(candidateProfile!.author);
+    const disconnectedPostAuthors = await requester.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findObjectsByQuery(peerId, 'mycelium.post', false, 0);
+    }, { peerId: relay.identityId });
+    expect(disconnectedPostAuthors.authors).toContain(candidateProfile!.author);
+    expect(disconnectedPostAuthors.authors).not.toContain(requesterProfile!.author);
+    expect(disconnectedPostAuthors.authors).not.toContain(responderProfile!.author);
+    const ordinaryPostAuthors = await requester.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findObjectsByQuery(peerId, 'mycelium.post', undefined, 0);
+    }, { peerId: relay.identityId });
+    expect(ordinaryPostAuthors.authors).toContain(requesterProfile!.author);
+    expect(ordinaryPostAuthors.authors).toContain(responderProfile!.author);
+    expect(ordinaryPostAuthors.authors).toContain(candidateProfile!.author);
+
+    await expect.poll(async () => {
+      const profiles = await responder.page.evaluate(async () => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        return api.identityProfiles();
+      });
+      return profiles.map((profile) => profile.peerId);
+    }, {
+      timeout: 20_000,
+      message: `Responder did not store both connected identity profiles; logs: ${(await readPeerState(responder.page)).logs.slice(-30).join('\n')}`
+    }).toEqual(expect.arrayContaining([relay.identityId, candidate.identityId]));
+
+    const trueResult = await requester.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findIdentityProfiles(peerId, true, 1);
+    }, { peerId: relay.identityId });
+    expect(trueResult.responderPeerId).toBe(relay.identityId);
+    expect(trueResult.authors).toContain(relayProfile!.author);
+    expect(trueResult.authors).toContain(candidateProfile!.author);
+
+    await expect.poll(async () => {
+      const profiles = await relay.page.evaluate(async () => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        return api.identityProfiles();
+      });
+      return profiles.map((profile) => profile.peerId);
+    }, { timeout: 20_000 }).toContain(requester.identityId);
+    const requesterBeforeRedial = await readPeerState(requester.page);
+    if (requesterBeforeRedial.connectedPeers.includes(candidate.identityId)) {
+      await requester.page.evaluate((peerId) => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        api.disconnectPeer(peerId);
+      }, candidate.identityId);
+      await expect.poll(async () => (await readPeerState(requester.page)).connectedPeers, {
+        timeout: 15_000
+      }).not.toContain(candidate.identityId);
+    }
+    const discoveryResult = await requester.page.evaluate(async () => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.discoverConnectedPeerProfiles();
+    });
+    expect(discoveryResult.discoveredPeerIds).toContain(candidate.identityId);
+    expect([
+      ...discoveryResult.connectedPeerIds,
+      ...discoveryResult.activeAttemptPeerIds
+    ]).toContain(candidate.identityId);
+    const requesterState = await readPeerState(requester.page);
+    expect(requesterState.followingPeerIds).not.toContain(responder.identityId);
+    expect(requesterState.followingPeerIds).not.toContain(candidate.identityId);
+    expect(requesterState.contacts.every((contact) => !contact.followed && !contact.follower)).toBe(true);
+
+    await relay.page.evaluate(async ({ objectId, peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      await api.sendObject(objectId, peerId);
+    }, { objectId: requesterProfile!.objectId, peerId: responder.identityId });
+    await expect.poll(async () => {
+      const profiles = await responder.page.evaluate(async () => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        return api.identityProfiles();
+      });
+      return profiles.map((profile) => profile.peerId);
+    }, {
+      timeout: 15_000
+    }).toContain(requester.identityId);
+
+    const responderState = await readPeerState(responder.page);
+    if (responderState.connectedPeers.includes(requester.identityId)) {
+      await responder.page.evaluate((peerId) => {
+        const api = window.__MYCELIUM_E2E__;
+        if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+        api.disconnectPeer(peerId);
+      }, requester.identityId);
+      await expect.poll(async () => (await readPeerState(responder.page)).connectedPeers, {
+        timeout: 15_000
+      }).not.toContain(requester.identityId);
+    }
+
+    const falseResult = await relay.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findIdentityProfiles(peerId, false, 0);
+    }, { peerId: responder.identityId });
+    expect(falseResult.responderPeerId).toBe(responder.identityId);
+    expect(falseResult.authors).not.toContain(relayProfile!.author);
+    expect(falseResult.authors).not.toContain(candidateProfile!.author);
+    expect(falseResult.authors).toContain(requesterProfile!.author);
+
+    const ordinaryResult = await relay.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findIdentityProfiles(peerId, undefined, 0);
+    }, { peerId: responder.identityId });
+    expect(ordinaryResult.authors).toContain(relayProfile!.author);
+    expect(ordinaryResult.authors).toContain(candidateProfile!.author);
+    expect(ordinaryResult.authors).toContain(requesterProfile!.author);
+
+    await Promise.all([responder, relay, requester].map((peer) => peer.page.evaluate((peerId) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      api.disconnectPeer(peerId);
+    }, candidate.identityId)));
+    await candidate.context.close();
+    await Promise.all([responder, relay, requester].map((peer) => expect.poll(
+      async () => (await readPeerState(peer.page)).connectedPeers,
+      {
+        timeout: 15_000,
+        message: `${peer.label} did not observe candidate disconnect`
+      }
+    ).not.toContain(candidate.identityId)));
+
+    const afterDisconnect = await relay.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findIdentityProfiles(peerId, true, 0);
+    }, { peerId: responder.identityId });
+    expect(afterDisconnect.responderPeerId).toBe(responder.identityId);
+    expect(afterDisconnect.authors).toContain(relayProfile!.author);
+    expect(afterDisconnect.authors).not.toContain(candidateProfile!.author);
+
+    const requesterAfterDisconnect = await requester.page.evaluate(async ({ peerId }) => {
+      const api = window.__MYCELIUM_E2E__;
+      if (!api) throw new Error('Development-only Mycelium test API is unavailable');
+      return api.findIdentityProfiles(peerId, true, 1);
+    }, { peerId: relay.identityId });
+    expect(requesterAfterDisconnect.authors).toContain(relayProfile!.author);
+    expect(requesterAfterDisconnect.authors).not.toContain(candidateProfile!.author);
+
+    for (const peerDiagnostics of diagnostics) {
+      expect(peerDiagnostics.pageErrors, `${peerDiagnostics.label} uncaught browser errors`).toEqual([]);
+    }
+    const report = {
+      topology: {
+        requester: requester.identityId,
+        responder: responder.identityId,
+        relay: relay.identityId,
+        candidate: candidate.identityId
+      },
+      trueResult,
+      falseResult,
+      ordinaryResult,
+      afterDisconnect,
+      requesterAfterDisconnect,
+      requesterState: await readPeerState(requester.page),
+      diagnostics
+    };
+    await testInfo.attach('author-connected-discovery', {
+      body: JSON.stringify(report, null, 2),
+      contentType: 'application/json'
+    });
     console.log(JSON.stringify(report, null, 2));
   } finally {
     try {

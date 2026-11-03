@@ -1,12 +1,145 @@
 import asyncio
+import base64
+import hashlib
 import importlib
 import json
 import os
 import sqlite3
+import subprocess
+import textwrap
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+
+def _canonicalize(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    if isinstance(value, list):
+        return '[{}]'.format(','.join(_canonicalize(item) for item in value))
+    return '{{{}}}'.format(','.join(
+        '{}:{}'.format(json.dumps(key, ensure_ascii=False), _canonicalize(value[key]))
+        for key in sorted(value)
+    ))
+
+
+def _public_key_string(key):
+    return base64.b64encode(key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo
+    )).decode('ascii')
+
+
+def _sign(key, message):
+    der_signature = key.sign(message.encode('utf-8'), ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(der_signature)
+    return base64.b64encode(r.to_bytes(32, 'big') + s.to_bytes(32, 'big')).decode('ascii')
+
+
+def generate_typescript_identity_profiles():
+    script = textwrap.dedent('''
+        import { createServer } from 'vite';
+
+        const vite = await createServer({
+          configFile: './vite.config.ts',
+          server: { middlewareMode: true },
+          appType: 'custom'
+        });
+        try {
+          const cryptoIdentity = await vite.ssrLoadModule('/src/crypto/identity.ts');
+          const dmCrypto = await vite.ssrLoadModule('/src/crypto/dm-crypto.ts');
+          const objectIdentity = await vite.ssrLoadModule('/src/object-layer/identity.ts');
+          const identityObject = await vite.ssrLoadModule('/src/object-layer/identity-object.ts');
+          const signingPair = await cryptoIdentity.generateIdentityKeyPair();
+          const publicKey = await cryptoIdentity.exportPublicKey(signingPair.publicKey);
+          const privateKey = await cryptoIdentity.exportPrivateKey(signingPair.privateKey);
+          const encryptionPair = await dmCrypto.generateEncryptionKeyPair();
+          const encryptionPublicKey = await dmCrypto.exportEncryptionPublicKey(encryptionPair.publicKey);
+          const identity = objectIdentity.createObjectIdentity({ id: 'interop-test', publicKey, privateKey });
+          const binding = await dmCrypto.createEncryptionKeyBinding({ publicKey, privateKey, encryptionPublicKey });
+          const createProfile = (displayName, createdAt) => identityObject.createSignedIdentityObject({
+            display_name: displayName,
+            bio: `Bio for ${displayName}`,
+            encryption_public_key: encryptionPublicKey,
+            encryption_key_binding: binding,
+            created_at: createdAt
+          }, identity);
+          const profiles = await Promise.all([
+            createProfile('TypeScript older profile', '2026-11-01T00:00:00.000Z'),
+            createProfile('TypeScript newer profile', '2026-11-02T00:00:00.000Z')
+          ]);
+          process.stdout.write(JSON.stringify(profiles));
+        } finally {
+          await vite.close();
+        }
+    ''')
+    return subprocess.run(
+        ['node', '--input-type=module', '-e', script],
+        cwd=Path(__file__).resolve().parent,
+        check=True,
+        capture_output=True,
+        text=True
+    ).stdout
+
+
+def make_identity_profile(
+    display_name,
+    created_at,
+    author_key=None,
+    object_signing_key=None,
+    binding_signing_key=None,
+    object_id=None
+):
+    author_key = author_key or ec.generate_private_key(ec.SECP256R1())
+    object_signing_key = object_signing_key or author_key
+    binding_signing_key = binding_signing_key or author_key
+    author = _public_key_string(author_key)
+    binding = {
+        'signing_public_key': _public_key_string(binding_signing_key),
+        'encryption_public_key': 'test-encryption-public-key',
+        'created_at': created_at
+    }
+    binding_message = json.dumps({
+        'domain': 'mycelium-enc-key-binding-v1',
+        'signing_public_key': binding['signing_public_key'],
+        'encryption_public_key': binding['encryption_public_key'],
+        'created_at': binding['created_at']
+    }, ensure_ascii=False, separators=(',', ':'))
+    payload = {
+        'display_name': display_name,
+        'bio': 'Profile for {}'.format(display_name),
+        'encryption_public_key': binding['encryption_public_key'],
+        'encryption_key_binding': {
+            **binding,
+            'signature': _sign(binding_signing_key, binding_message)
+        }
+    }
+    content = {
+        'object_type': 'mycelium.identity',
+        'author': author,
+        'created_at': created_at,
+        'payload': payload,
+        'replication_policy': {}
+    }
+    content_hash = hashlib.sha256(_canonicalize(content).encode('utf-8')).hexdigest()
+    object_id = object_id or hashlib.sha256((display_name + created_at).encode('utf-8')).hexdigest()
+    signature_payload = _canonicalize({
+        'domain': 'mycelium.object-signature.v3',
+        'object_id': object_id,
+        'content_hash': content_hash
+    })
+    return {
+        **content,
+        'object_id': object_id,
+        'signature': _sign(object_signing_key, signature_payload),
+        'object_id_version': 3,
+        'content_hash': content_hash
+    }
 
 
 class FakeWebSocket:
@@ -36,6 +169,7 @@ class DiscoveryObjectServerTests(unittest.TestCase):
 
     def setUp(self):
         self.server.DB_CONN.execute('DELETE FROM discovery_posts')
+        self.server.DB_CONN.execute('DELETE FROM discovery_profiles')
         self.server.DB_CONN.commit()
 
     def test_websocket_open_check_supports_legacy_and_current_apis(self):
@@ -98,6 +232,214 @@ class DiscoveryObjectServerTests(unittest.TestCase):
 
         rows = self.server.DB_CONN.execute('SELECT object_json FROM discovery_posts').fetchall()
         self.assertEqual(rows, [])
+
+    def test_identity_profiles_are_stored_separately_and_latest_wins(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        older = make_identity_profile('Older', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        newer = make_identity_profile('Newer', '2026-10-02T00:00:00.000Z', author_key=author_key)
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': newer}}))
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': older}}))
+
+        row = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (older['author'],)
+        ).fetchone()
+        self.assertEqual(json.loads(row[0]), newer)
+        self.assertEqual(self.server.DB_CONN.execute('SELECT COUNT(*) FROM discovery_posts').fetchone()[0], 0)
+        self.assertEqual(self.server.load_discovery_posts(10, None), [])
+
+    def test_profile_table_accepts_new_author_below_configured_capacity(self):
+        profile = make_identity_profile('First author', '2026-10-01T00:00:00.000Z')
+        with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 2):
+            asyncio.run(self.server.store_discovery_identity_profile(profile))
+
+        self.assertEqual(
+            self.server.DB_CONN.execute('SELECT COUNT(*) FROM discovery_profiles').fetchone()[0],
+            1
+        )
+
+    def test_profile_table_rejects_new_author_at_capacity_without_growing(self):
+        existing = make_identity_profile('Existing author', '2026-10-01T00:00:00.000Z')
+        newcomer = make_identity_profile('New author', '2026-10-02T00:00:00.000Z')
+        with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 1):
+            asyncio.run(self.server.store_discovery_identity_profile(existing))
+            asyncio.run(self.server.store_discovery_identity_profile(newcomer))
+
+        rows = self.server.DB_CONN.execute(
+            'SELECT author FROM discovery_profiles ORDER BY author'
+        ).fetchall()
+        self.assertEqual(rows, [(existing['author'],)])
+
+    def test_concurrent_new_authors_cannot_exceed_profile_capacity(self):
+        profiles = [
+            make_identity_profile(f'Concurrent author {index}', f'2026-10-{index + 1:02d}T00:00:00.000Z')
+            for index in range(8)
+        ]
+
+        async def publish_profiles():
+            with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 3):
+                await asyncio.gather(*(
+                    self.server.store_discovery_identity_profile(profile)
+                    for profile in profiles
+                ))
+
+        asyncio.run(publish_profiles())
+
+        self.assertEqual(
+            self.server.DB_CONN.execute('SELECT COUNT(*) FROM discovery_profiles').fetchone()[0],
+            3
+        )
+
+    def test_valid_existing_author_update_replaces_profile_at_capacity(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        existing = make_identity_profile('Existing old', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        newer = make_identity_profile('Existing new', '2026-10-02T00:00:00.000Z', author_key=author_key)
+        other = make_identity_profile('Other author', '2026-10-01T00:00:00.000Z')
+        with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 1):
+            asyncio.run(self.server.store_discovery_identity_profile(existing))
+            asyncio.run(self.server.store_discovery_identity_profile(newer))
+            asyncio.run(self.server.store_discovery_identity_profile(other))
+
+        rows = self.server.DB_CONN.execute(
+            'SELECT author, object_json FROM discovery_profiles'
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], existing['author'])
+        self.assertEqual(json.loads(rows[0][1]), newer)
+
+    def test_older_or_equal_profile_at_capacity_does_not_change_row_or_consume_capacity(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        existing = make_identity_profile('Existing', '2026-10-02T00:00:00.000Z', author_key=author_key)
+        older = make_identity_profile('Older', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        newcomer = make_identity_profile('New author', '2026-10-03T00:00:00.000Z')
+        with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 1):
+            asyncio.run(self.server.store_discovery_identity_profile(existing))
+            asyncio.run(self.server.store_discovery_identity_profile(older))
+            asyncio.run(self.server.store_discovery_identity_profile(existing))
+            asyncio.run(self.server.store_discovery_identity_profile(newcomer))
+
+        rows = self.server.DB_CONN.execute(
+            'SELECT author, object_json FROM discovery_profiles'
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], existing['author'])
+        self.assertEqual(json.loads(rows[0][1]), existing)
+
+    def test_invalid_profile_does_not_consume_profile_capacity(self):
+        invalid = make_identity_profile('Invalid author', '2026-10-02T00:00:00.000Z')
+        invalid['signature'] = base64.b64encode(b'\x00' * 64).decode('ascii')
+        valid_new_author = make_identity_profile('Valid new author', '2026-10-03T00:00:00.000Z')
+        with patch.object(self.server, 'MAX_DISCOVERY_PROFILES', 1):
+            asyncio.run(self.server.store_discovery_identity_profile(invalid))
+            asyncio.run(self.server.store_discovery_identity_profile(valid_new_author))
+
+        rows = self.server.DB_CONN.execute(
+            'SELECT author, object_json FROM discovery_profiles'
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], valid_new_author['author'])
+        self.assertEqual(json.loads(rows[0][1]), valid_new_author)
+
+    def test_typescript_generated_identity_profiles_validate_and_store_latest(self):
+        older, newer = json.loads(generate_typescript_identity_profiles())
+        self.assertTrue(self.server._validate_discovery_identity_profile(older))
+        self.assertTrue(self.server._validate_discovery_identity_profile(newer))
+
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': newer}}))
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': older}}))
+
+        row = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (newer['author'],)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(json.loads(row[0]), newer)
+
+    def test_identity_profile_version_tie_break_is_deterministic(self):
+        timestamp = '2026-10-02T00:00:00.000Z'
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        profile_a = make_identity_profile('Alphabetically first', timestamp, author_key=author_key, object_id='a' * 64)
+        profile_b = make_identity_profile('Alphabetically last', timestamp, author_key=author_key, object_id='b' * 64)
+
+        asyncio.run(self.server.store_discovery_identity_profile(profile_b))
+        asyncio.run(self.server.store_discovery_identity_profile(profile_a))
+        stored_json = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (profile_a['author'],)
+        ).fetchone()[0]
+        self.assertEqual(json.loads(stored_json), profile_b)
+
+    def test_forged_author_claim_cannot_replace_valid_identity_profile(self):
+        victim_key = ec.generate_private_key(ec.SECP256R1())
+        attacker_key = ec.generate_private_key(ec.SECP256R1())
+        valid = make_identity_profile('Valid profile', '2026-10-01T00:00:00.000Z', author_key=victim_key)
+        forged = make_identity_profile(
+            'Forged author claim',
+            '2026-10-03T00:00:00.000Z',
+            author_key=victim_key,
+            object_signing_key=attacker_key
+        )
+        asyncio.run(self.server.store_discovery_identity_profile(valid))
+        asyncio.run(self.server.store_discovery_identity_profile(forged))
+
+        stored = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (valid['author'],)
+        ).fetchone()
+        self.assertEqual(json.loads(stored[0]), valid)
+
+    def test_invalid_identity_signature_cannot_replace_valid_profile(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        valid = make_identity_profile('Valid profile', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        invalid_signature = {
+            **make_identity_profile('Tampered profile', '2026-10-03T00:00:00.000Z', author_key=author_key),
+            'signature': base64.b64encode(b'\x00' * 64).decode('ascii')
+        }
+        asyncio.run(self.server.store_discovery_identity_profile(valid))
+        asyncio.run(self.server.store_discovery_identity_profile(invalid_signature))
+
+        stored = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (valid['author'],)
+        ).fetchone()
+        self.assertEqual(json.loads(stored[0]), valid)
+
+    def test_mismatched_identity_binding_key_cannot_replace_valid_profile(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        other_key = ec.generate_private_key(ec.SECP256R1())
+        valid = make_identity_profile('Valid profile', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        mismatched_binding = make_identity_profile(
+            'Mismatched binding',
+            '2026-10-03T00:00:00.000Z',
+            author_key=author_key,
+            binding_signing_key=other_key
+        )
+        asyncio.run(self.server.store_discovery_identity_profile(valid))
+        asyncio.run(self.server.store_discovery_identity_profile(mismatched_binding))
+
+        stored = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (valid['author'],)
+        ).fetchone()
+        self.assertEqual(json.loads(stored[0]), valid)
+
+    def test_inconsistent_encryption_key_binding_cannot_replace_valid_profile(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        valid = make_identity_profile('Valid profile', '2026-10-01T00:00:00.000Z', author_key=author_key)
+        inconsistent = make_identity_profile(
+            'Inconsistent encryption key',
+            '2026-10-03T00:00:00.000Z',
+            author_key=author_key
+        )
+        inconsistent['payload']['encryption_public_key'] = 'different-encryption-key'
+        asyncio.run(self.server.store_discovery_identity_profile(valid))
+        asyncio.run(self.server.store_discovery_identity_profile(inconsistent))
+
+        stored = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (valid['author'],)
+        ).fetchone()
+        self.assertEqual(json.loads(stored[0]), valid)
 
     def test_migrates_legacy_post_json_not_null_schema(self):
         legacy_path = os.path.join(self.temp_dir.name, 'legacy.db')
@@ -427,6 +769,27 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         self.assertEqual(websocket.messages[0]['type'], 'POPULAR_PEERS_RESULT')
         self.assertEqual(websocket.messages[0]['payload']['requestId'], 'popular-request')
         self.assertEqual(websocket.messages[0]['payload']['peers'], [{'peer_id': 'popular-peer', 'activity_score': 1}])
+
+    def test_popular_peer_result_includes_profile_for_matching_author(self):
+        author_key = ec.generate_private_key(ec.SECP256R1())
+        profile = make_identity_profile('Popular author', '2026-10-02T00:00:00.000Z', author_key=author_key)
+        author = profile['author']
+        peer_id = self.server._peer_id_for_author(author)
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': profile}}))
+        self.store_object(
+            'popular-reply',
+            'mycelium.post',
+            'reply-author',
+            {'reply_to_author': peer_id, 'reply_to': '1' * 64}
+        )
+        websocket = FakeWebSocket()
+        asyncio.run(self.server.handle_popular_peers_get({'id': 'popular-request', 'sender': 'requester'}, websocket))
+
+        peers = websocket.messages[0]['payload']['peers']
+        self.assertEqual(len(peers), 1)
+        self.assertEqual(peers[0]['peer_id'], peer_id)
+        self.assertEqual(peers[0]['activity_score'], 1)
+        self.assertEqual(peers[0]['identity_profile'], profile)
 
 
 if __name__ == '__main__':

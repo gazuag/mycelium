@@ -38,6 +38,21 @@ describe('discovery object protocol', () => {
     expect(JSON.parse(socket.send.mock.calls[0][0]).payload.object).toEqual(object);
   });
 
+  it('publishes a signed identity object through DISCOVERY_PUBLISH', async () => {
+    const profile = {
+      ...(await postFixture()),
+      object_type: 'mycelium.identity',
+      payload: { display_name: 'Profile name' }
+    };
+    const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };
+
+    await expect(publishObject(profile, socket)).resolves.toBeUndefined();
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({
+      type: 'DISCOVERY_PUBLISH',
+      payload: { object: profile }
+    });
+  });
+
   it('rejects mycelium.dm without sending it to discovery', async () => {
     const object = { ...(await postFixture()), object_type: 'mycelium.dm' };
     const socket = { readyState: 1, send: vi.fn() } as unknown as WebSocket & { send: ReturnType<typeof vi.fn> };

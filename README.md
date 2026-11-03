@@ -199,10 +199,10 @@ An incoming valid push also asks any open app client to attempt the existing bou
 - `register` messages announce your peer ID.
 - `offer` / `answer` SDP messages used for WebRTC setup.
 - `ice-candidate` messages used to establish the peer route.
-- `DISCOVERY_PUBLISH` packets to store a public post.
+- `DISCOVERY_PUBLISH` packets to store public posts, recommendations, and signed identity profiles. Identity profiles are published independently when the local profile is created or updated.
 - `DISCOVERY_GET` packets to fetch public posts; the server replies with a `DISCOVERY_RESULT` packet.
 - `PEER_POOL_GET` / `PEER_POOL_RESULT` packets to fetch possible peers.
-- `POPULAR_PEERS_GET` / `POPULAR_PEERS_RESULT` packets to fetch popular reply targets.
+- `POPULAR_PEERS_GET` / `POPULAR_PEERS_RESULT` packets to fetch popular reply targets, optionally including their latest signed identity profiles.
 
 ## What travels directly between peers
 
@@ -480,7 +480,7 @@ They are never used peer-to-peer.
 DISCOVERY_PUBLISH
 ~~~
 
-Submit a signed public post.
+Submit a signed public post, recommendation, or identity profile. Identity profiles are retained separately as profile metadata and are not returned as discovery feed objects.
 
 ⸻
 
@@ -501,6 +501,8 @@ DISCOVERY_RESULT
 ~~~
 
 Returns a collection of signed posts.
+
+`POPULAR_PEERS_RESULT` keeps each peer's `peer_id` and `activity_score`, and may include its latest signed `identity_profile`. Clients validate the profile and peer-ID binding before storing or displaying its name.
 
 ⸻
 

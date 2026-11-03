@@ -44,6 +44,28 @@ describe('peer discovery WebSocket packets', () => {
     await expect(result).resolves.toEqual(popular);
   });
 
+  it('preserves an optional identity profile in popular-peer results', async () => {
+    const socket = fakeSocket();
+    const result = fetchPopularPeers(socket);
+    const request = await sentRequest(socket);
+    const profile = {
+      object_type: 'mycelium.identity',
+      author: 'signing-key',
+      payload: { display_name: 'Popular author' }
+    };
+    const response = await buildPacket('discovery-server', request.sender, 'POPULAR_PEERS_RESULT', {
+      requestId: request.id,
+      peers: [{ peer_id: 'peer-a', activity_score: 4, identity_profile: profile }]
+    });
+
+    expect(handlePeerDiscoveryResult(response)).toBe(true);
+    await expect(result).resolves.toEqual([{
+      peer_id: 'peer-a',
+      activity_score: 4,
+      identity_profile: profile
+    }]);
+  });
+
   it('accepts a legacy reply_count field without exposing it as an exact count', async () => {
     const socket = fakeSocket();
     const result = fetchPopularPeers(socket);

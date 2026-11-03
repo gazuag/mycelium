@@ -5,8 +5,8 @@ import { FollowButton } from '../components/FollowButton';
 import { PostCard } from '../components/PostCard';
 import { BlockButton } from '../components/BlockButton';
 import { PersonRow } from '../components/PersonRow';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
-import type { PopularPeer } from '../services/peer-discovery';
+import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
+import type { PopularPeerWithIdentityProfile } from '../services/peer-discovery';
 import { useDmUnread } from '../hooks/useDmUnread';
 
 interface DiscoverPageProps {
@@ -14,7 +14,7 @@ interface DiscoverPageProps {
   replyCounts?: ReadonlyMap<string, number>;
   contacts: Contact[];
   suggestedPeerIds?: string[];
-  popularPeers?: PopularPeer[];
+  popularPeers?: PopularPeerWithIdentityProfile[];
   initialTab?: 'posts' | 'people';
   myPeerId?: string;
   myPublicKey?: string;
@@ -104,9 +104,17 @@ export function DiscoverPage({
   const seenPopularAliases = new Set<string>();
   for (const popular of popularPeers) {
     if (popularPeople.length >= 10 || popular.peer_id === myPeerId || popular.peer_id === myPublicKey) continue;
-    const contact = contacts.find((candidate) =>
+    const knownContact = contacts.find((candidate) =>
       candidate.fingerprint === popular.peer_id || candidate.publicKey === popular.peer_id
-    ) ?? emptyPeer(popular.peer_id);
+    );
+    const contact = popular.identity_profile
+      ? {
+          ...(knownContact ?? emptyPeer(popular.peer_id)),
+          publicKey: popular.identity_profile.author,
+          displayName: popular.identity_profile.payload.display_name,
+          identityObject: popular.identity_profile
+        }
+      : knownContact ?? emptyPeer(popular.peer_id);
     const aliases = peerAliases(contact);
     if (aliases.some((alias) => seenPopularAliases.has(alias))) continue;
     aliases.forEach((alias) => seenPopularAliases.add(alias));
@@ -189,7 +197,14 @@ export function DiscoverPage({
               );
               const authorFingerprint = post.authorFingerprint || matchedContact?.fingerprint || post.object.author;
               const isOwnPost = authorFingerprint === myPeerId || post.object.author === myPublicKey;
-              const authorDisplayName = isOwnPost ? myDisplayName : matchedContact?.displayName;
+              const authorDisplayName = isOwnPost
+                ? myDisplayName
+                : matchedContact
+                  ? resolvePeerDisplayName(
+                      matchedContact.identityObject?.payload.display_name ?? matchedContact.displayName,
+                      matchedContact.authenticatedDisplayName
+                    )
+                  : undefined;
               const authorName = isOwnPost
                 ? displayNameOrFallback(myDisplayName, authorFingerprint)
                 : matchedContact

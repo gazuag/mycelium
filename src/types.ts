@@ -7,6 +7,7 @@ export interface Contact {
   publicKey: string;
   fingerprint: string;
   displayName?: string;
+  authenticatedDisplayName?: string;
   profile?: SignedProfile;
   identityObject?: IdentityObject;
   addedAt: string;

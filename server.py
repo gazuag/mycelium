@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import sqlite3
 import ssl
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 import websockets
 from websockets.server import WebSocketServerProtocol
 
@@ -31,7 +36,9 @@ def websocket_is_open(websocket: WebSocketServerProtocol) -> bool:
     return getattr(getattr(websocket, 'state', None), 'name', None) == 'OPEN'
 
 MAX_DISCOVERY_POSTS = int(os.environ.get('MAX_DISCOVERY_POSTS', '10000'))
+MAX_DISCOVERY_PROFILES = int(os.environ.get('MAX_DISCOVERY_PROFILES', '10000'))
 MAX_POST_SIZE = int(os.environ.get('MAX_POST_SIZE', '4096'))
+MAX_IDENTITY_PROFILE_SIZE = int(os.environ.get('MAX_IDENTITY_PROFILE_SIZE', '16384'))
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
 SIGNAL_QUEUE_TTL_SECONDS = int(os.environ.get('SIGNAL_QUEUE_TTL_SECONDS', '60'))
 MAX_QUEUED_SIGNALS_PER_CLIENT = int(os.environ.get('MAX_QUEUED_SIGNALS_PER_CLIENT', '32'))
@@ -119,6 +126,7 @@ def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             )
         ''')
         conn.execute('CREATE INDEX idx_received_at ON discovery_posts(received_at)')
+        _ensure_discovery_profiles_table(conn)
         conn.commit()
         return conn
 
@@ -155,8 +163,21 @@ def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
         if 'object_json' not in columns:
             raise sqlite3.DatabaseError('discovery_posts has neither object_json nor legacy post_json')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_received_at ON discovery_posts(received_at)')
-        conn.commit()
+    _ensure_discovery_profiles_table(conn)
+    conn.commit()
     return conn
+
+
+def _ensure_discovery_profiles_table(conn: sqlite3.Connection) -> None:
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS discovery_profiles (
+            author TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            object_id TEXT NOT NULL,
+            object_json TEXT NOT NULL
+        )
+    ''')
+
 
 DB_CONN = init_db()
 
@@ -439,7 +460,26 @@ def load_popular_peers(limit: int = 10) -> List[dict]:
     ]
     random.shuffle(ranked)
     ranked.sort(key=lambda item: -item[1])
-    return [{'peer_id': peer_id, 'activity_score': score} for peer_id, score in ranked[:max(0, limit)]]
+    profile_rows = DB_CONN.execute(
+        'SELECT author, object_json FROM discovery_profiles'
+    ).fetchall()
+    profiles_by_peer = {}
+    for author, object_json in profile_rows:
+        peer_id = _peer_id_for_author(author)
+        try:
+            profile = json.loads(object_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(profile, dict):
+            profiles_by_peer[peer_id] = profile
+    return [
+        {
+            'peer_id': peer_id,
+            'activity_score': score,
+            **({'identity_profile': profiles_by_peer[peer_id]} if peer_id in profiles_by_peer else {})
+        }
+        for peer_id, score in ranked[:max(0, limit)]
+    ]
 
 
 def build_peer_discovery_result_packet(response_type: str, peers, request_id: Optional[str], recipient: Optional[str]):
@@ -490,7 +530,9 @@ async def handle_discovery_publish(message: dict) -> None:
         logging.warning('DISCOVERY_PUBLISH missing object payload')
         return
     raw_object_json = json.dumps(object_payload)
-    if len(raw_object_json) > MAX_POST_SIZE:
+    object_type = object_payload.get('object_type')
+    max_object_size = MAX_IDENTITY_PROFILE_SIZE if object_type == 'mycelium.identity' else MAX_POST_SIZE
+    if len(raw_object_json) > max_object_size:
         logging.warning('DISCOVERY_PUBLISH object too large, ignoring')
         return
     required_keys = {'object_id', 'object_type', 'author', 'created_at', 'payload', 'signature'}
@@ -505,6 +547,9 @@ async def handle_discovery_publish(message: dict) -> None:
     object_content = object_payload['payload']
     if not isinstance(object_id, str) or not object_id or not isinstance(author, str) or not author or not isinstance(object_content, dict):
         logging.warning('DISCOVERY_PUBLISH invalid object envelope, ignoring')
+        return
+    if object_type == 'mycelium.identity':
+        await store_discovery_identity_profile(object_payload)
         return
     received_at = datetime.utcnow().isoformat() + 'Z'
     object_tags = object_content.get('tags', [])
@@ -521,6 +566,291 @@ async def handle_discovery_publish(message: dict) -> None:
         logging.exception('Failed to persist discovery object %s from %s; keeping signalling session alive', object_id, author)
         return
     logging.info('Stored discovery object %s from %s tags=%s', object_id, author, tags)
+
+
+def _identity_profile_version_key(profile: dict) -> Tuple[float, str]:
+    created_at = profile.get('created_at')
+    timestamp = float('-inf')
+    if isinstance(created_at, str):
+        try:
+            parsed = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = parsed.timestamp()
+        except (ValueError, OverflowError):
+            pass
+    object_id = profile.get('object_id')
+    return timestamp, object_id if isinstance(object_id, str) else ''
+
+
+def _canonicalize_profile_value(value) -> str:
+    if value is None:
+        return 'null'
+    if value is True:
+        return 'true'
+    if value is False:
+        return 'false'
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError('Non-finite JSON number')
+        if value == 0:
+            return '0'
+        rendered = repr(value).lower()
+        if 'e' not in rendered:
+            return rendered[:-2] if rendered.endswith('.0') else rendered
+        mantissa, exponent_text = rendered.split('e')
+        exponent = int(exponent_text)
+        if -6 <= exponent < 21:
+            sign = '-' if mantissa.startswith('-') else ''
+            digits = mantissa.lstrip('-').replace('.', '')
+            decimal_position = mantissa.lstrip('-').find('.')
+            if decimal_position < 0:
+                decimal_position = len(mantissa.lstrip('-'))
+            decimal_position += exponent
+            if decimal_position <= 0:
+                return '{}0.{}{}'.format(sign, '0' * -decimal_position, digits)
+            if decimal_position >= len(digits):
+                return '{}{}{}'.format(sign, digits, '0' * (decimal_position - len(digits)))
+            return '{}{}.{}'.format(sign, digits[:decimal_position], digits[decimal_position:])
+        mantissa = mantissa[:-2] if mantissa.endswith('.0') else mantissa
+        sign = '+' if exponent >= 0 else ''
+        return '{}e{}{}'.format(mantissa, sign, exponent)
+    if isinstance(value, list):
+        return '[{}]'.format(','.join(_canonicalize_profile_value(item) for item in value))
+    if isinstance(value, dict):
+        return '{{{}}}'.format(','.join(
+            '{}:{}'.format(
+                json.dumps(key, ensure_ascii=False, separators=(',', ':')),
+                _canonicalize_profile_value(value[key])
+            )
+            for key in sorted(value, key=lambda item: item.encode('utf-16-be', 'surrogatepass'))
+        ))
+    raise ValueError('Value is not JSON serializable')
+
+
+def _profile_signing_key(author: str):
+    try:
+        der = base64.b64decode(author, validate=True)
+        key = serialization.load_der_public_key(der)
+    except (ValueError, TypeError, UnsupportedAlgorithm):
+        return None
+    if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
+        return None
+    return key
+
+
+def _verify_profile_signature(author: str, message: str, signature: str) -> bool:
+    key = _profile_signing_key(author)
+    if key is None:
+        return False
+    try:
+        raw_signature = base64.b64decode(signature, validate=True)
+        if len(raw_signature) != 64:
+            return False
+        der_signature = utils.encode_dss_signature(
+            int.from_bytes(raw_signature[:32], 'big'),
+            int.from_bytes(raw_signature[32:], 'big')
+        )
+        key.verify(der_signature, message.encode('utf-8'), ec.ECDSA(hashes.SHA256()))
+        return True
+    except (InvalidSignature, ValueError, TypeError, UnicodeEncodeError):
+        return False
+
+
+def _valid_profile_timestamp(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return True
+    except ValueError:
+        return False
+
+
+def _is_json_value(value) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
+    return False
+
+
+def _validate_discovery_identity_profile(profile: dict) -> bool:
+    if not isinstance(profile, dict) or profile.get('object_type') != 'mycelium.identity':
+        return False
+    author = profile.get('author')
+    object_id = profile.get('object_id')
+    signature = profile.get('signature')
+    payload = profile.get('payload')
+    policy = profile.get('replication_policy')
+    if (not isinstance(author, str) or not author
+            or not isinstance(object_id, str) or len(object_id) != 64
+            or any(character not in '0123456789abcdef' for character in object_id)
+            or not isinstance(signature, str) or not signature
+            or not isinstance(payload, dict) or not isinstance(policy, dict)
+            or not _valid_profile_timestamp(profile.get('created_at'))):
+        return False
+    if ('recipient' in profile and (not isinstance(profile['recipient'], str) or not profile['recipient'])
+            or 'expires_at' in profile and not _valid_profile_timestamp(profile['expires_at'])
+            or 'sequence' in profile and (
+                not isinstance(profile['sequence'], int)
+                or isinstance(profile['sequence'], bool)
+                or profile['sequence'] < 0
+                or profile['sequence'] > 9007199254740991
+            )):
+        return False
+    if not _is_json_value(payload) or not _is_json_value(policy):
+        return False
+    replication_budget = policy.get('replication_budget')
+    if replication_budget is not None and (
+        not isinstance(replication_budget, int)
+        or isinstance(replication_budget, bool)
+        or replication_budget < 0
+        or replication_budget > 9007199254740991
+    ):
+        return False
+    if 'expires_at' in policy and not _valid_profile_timestamp(policy['expires_at']):
+        return False
+
+    display_name = payload.get('display_name')
+    bio = payload.get('bio')
+    encryption_public_key = payload.get('encryption_public_key')
+    binding = payload.get('encryption_key_binding')
+    if (not isinstance(display_name, str) or not isinstance(bio, str)
+            or not isinstance(encryption_public_key, str)
+            or not isinstance(binding, dict)
+            or binding.get('signing_public_key') != author
+            or binding.get('encryption_public_key') != encryption_public_key
+            or not _valid_profile_timestamp(binding.get('created_at'))
+            or not isinstance(binding.get('signature'), str)):
+        return False
+
+    try:
+        binding_message = json.dumps({
+            'domain': 'mycelium-enc-key-binding-v1',
+            'signing_public_key': binding['signing_public_key'],
+            'encryption_public_key': binding['encryption_public_key'],
+            'created_at': binding['created_at']
+        }, ensure_ascii=False, separators=(',', ':'))
+        if not _verify_profile_signature(
+            author,
+            binding_message,
+            binding['signature']
+        ):
+            return False
+        object_content = {
+            key: profile[key]
+            for key in (
+                'object_type', 'author', 'recipient', 'created_at',
+                'expires_at', 'sequence', 'payload', 'replication_policy'
+            )
+            if key in profile
+        }
+        version = profile.get('object_id_version')
+        if version is None:
+            if 'content_hash' in profile or 'author_proof' in profile:
+                return False
+            canonical_content = _canonicalize_profile_value(object_content)
+            if hashlib.sha256(canonical_content.encode('utf-8')).hexdigest() != object_id:
+                return False
+            return _verify_profile_signature(author, canonical_content, signature)
+
+        canonical_content = _canonicalize_profile_value(object_content)
+        content_hash = hashlib.sha256(canonical_content.encode('utf-8')).hexdigest()
+        if profile.get('content_hash') != content_hash:
+            return False
+        if version == 2:
+            if not isinstance(profile.get('author_proof'), str):
+                return False
+            expected_object_id = hashlib.sha256(_canonicalize_profile_value({
+                'domain': 'mycelium.object-id.v2',
+                'author': author,
+                'content_hash': content_hash
+            }).encode('utf-8')).hexdigest()
+            if expected_object_id != object_id or not _verify_profile_signature(
+                author,
+                _canonicalize_profile_value({
+                    'domain': 'mycelium.object-author-proof.v2',
+                    'author': author,
+                    'content_hash': content_hash
+                }),
+                profile['author_proof']
+            ):
+                return False
+            return _verify_profile_signature(author, canonical_content, signature)
+        if version == 3:
+            if 'author_proof' in profile:
+                return False
+            return _verify_profile_signature(
+                author,
+                _canonicalize_profile_value({
+                    'domain': 'mycelium.object-signature.v3',
+                    'object_id': object_id,
+                    'content_hash': content_hash
+                }),
+                signature
+            )
+        return False
+    except (KeyError, TypeError, ValueError, UnicodeEncodeError):
+        return False
+
+
+async def store_discovery_identity_profile(profile: dict) -> None:
+    if not _validate_discovery_identity_profile(profile):
+        logging.warning('DISCOVERY_PUBLISH identity profile failed signature or structure validation, ignoring')
+        return
+    author = profile['author']
+    try:
+        DB_CONN.execute('BEGIN IMMEDIATE')
+        current_row = DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (author,)
+        ).fetchone()
+        if current_row:
+            try:
+                current_profile = json.loads(current_row[0])
+            except (TypeError, json.JSONDecodeError):
+                current_profile = {}
+            if isinstance(current_profile, dict) \
+                    and _identity_profile_version_key(profile) <= _identity_profile_version_key(current_profile):
+                DB_CONN.rollback()
+                logging.info('Ignored non-newer identity profile for %s', author)
+                return
+        else:
+            profile_count = DB_CONN.execute(
+                'SELECT COUNT(*) FROM discovery_profiles'
+            ).fetchone()[0]
+            if profile_count >= MAX_DISCOVERY_PROFILES:
+                DB_CONN.rollback()
+                logging.info(
+                    'Rejected new discovery identity profile for %s: profile table is at capacity (%d)',
+                    author,
+                    MAX_DISCOVERY_PROFILES
+                )
+                return
+        DB_CONN.execute(
+            '''INSERT INTO discovery_profiles (author, created_at, object_id, object_json)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(author) DO UPDATE SET
+                   created_at = excluded.created_at,
+                   object_id = excluded.object_id,
+                   object_json = excluded.object_json''',
+            (author, str(profile.get('created_at', '')), str(profile.get('object_id', '')), json.dumps(profile))
+        )
+        DB_CONN.commit()
+    except sqlite3.Error:
+        DB_CONN.rollback()
+        logging.exception('Failed to persist identity profile from %s; keeping signalling session alive', author)
+        return
+    logging.info('Stored latest discovery identity profile for %s', author)
 
 
 async def handle_client(websocket: WebSocketServerProtocol) -> None:

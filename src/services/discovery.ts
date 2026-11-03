@@ -11,7 +11,7 @@ import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
 const MAX_BATCH_SIZE = 30;
 const RESPONSE_TIMEOUT_MS = 15000;
 const WEBSOCKET_OPEN = 1;
-const DISCOVERY_PUBLISHABLE_OBJECT_TYPES = new Set(['mycelium.post', 'mycelium.recommendation']);
+const DISCOVERY_PUBLISHABLE_OBJECT_TYPES = new Set(['mycelium.post', 'mycelium.recommendation', 'mycelium.identity']);
 
 // Pending DISCOVERY_GET responses keyed by outgoing packet id.
 const pendingDiscoveryRequests = new Map<string, (objects: DistributedObject[]) => void>();

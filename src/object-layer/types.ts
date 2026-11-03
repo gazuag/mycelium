@@ -141,6 +141,7 @@ export interface PostRequestPacket {
 export interface FindQueryCriteria {
   readonly object_type?: string;
   readonly author?: string;
+  readonly author_connected?: boolean;
   readonly recipient?: string;
   readonly created_after?: string;
   readonly created_before?: string;
@@ -158,7 +159,7 @@ export interface FindPacket {
   readonly timestamp: string;
   readonly sender: string;
   readonly recipient: string | null;
-  readonly payload: { readonly requested_objects: readonly string[]; readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string; readonly object_type?: string; readonly author?: string; readonly recipient?: string; readonly created_after?: string; readonly created_before?: string; readonly page_before?: { readonly created_at: string; readonly object_id: string }; readonly since?: string; readonly limit?: number; readonly order?: 'created_at_desc' };
+  readonly payload: { readonly requested_objects: readonly string[]; readonly object_id: string; readonly requestId: string; readonly ttl: number; readonly expiresAt: string; readonly origin?: string; readonly object_type?: string; readonly author?: string; readonly author_connected?: boolean; readonly recipient?: string; readonly created_after?: string; readonly created_before?: string; readonly page_before?: { readonly created_at: string; readonly object_id: string }; readonly since?: string; readonly limit?: number; readonly order?: 'created_at_desc' };
   readonly signature: string;
 }
 

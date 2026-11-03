@@ -2,12 +2,12 @@ import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { createEncryptionKeyBinding, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
-import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair } from '../crypto/identity';
-import { buildObjectBatchPacket, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, sendObjectBatches } from './transport';
+import { deriveFingerprint, exportPrivateKey, exportPublicKey, generateIdentityKeyPair } from '../crypto/identity';
+import { buildObjectBatchPacket, findObjectsFromCandidatesByFindQueryPage, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, sendObjectBatches } from './transport';
 import { createObjectIdentity } from './identity';
 import { createSignedIdentityObject, validateIdentityObject, type IdentityObject } from './identity-object';
 import { IndexedDbObjectStore } from './local-store';
-import { getLatestIdentityObject, getLatestIdentityObjects } from './profile-object';
+import { findLatestIdentityObjectsByConnectionQuery, getLatestIdentityObject, getLatestIdentityObjects, storeDiscoveredIdentityProfiles, storeRequestedIdentityProfile } from './profile-object';
 import type { DistributedObject, ObjectStore, ObjectTransport } from './types';
 import { createSignedObject, validateObject } from './envelope';
 
@@ -83,6 +83,54 @@ function createTransport(
 }
 
 describe('replicated identity profile objects', () => {
+  it('stores a requested profile only when its signature and peer author match', async () => {
+    const identity = await createTestIdentity();
+    const otherIdentity = await createTestIdentity();
+    const expectedPeerId = await deriveFingerprint(identity.publicKey);
+    const profile = await createProfile(identity, 'Requested profile', new Date(Date.now() + 1_000).toISOString());
+    const otherProfile = await createProfile(otherIdentity, 'Other peer', new Date(Date.now() + 1_000).toISOString());
+    const invalidProfile = {
+      ...profile,
+      payload: Object.assign({}, profile.payload, { display_name: 'Tampered name' })
+    };
+    const store = createMemoryStore();
+
+    await expect(storeRequestedIdentityProfile(store, invalidProfile, expectedPeerId)).resolves.toBeNull();
+    await expect(storeRequestedIdentityProfile(store, otherProfile, expectedPeerId)).resolves.toBeNull();
+    expect(await store.query({ object_type: 'mycelium.identity' })).toHaveLength(0);
+
+    await expect(storeRequestedIdentityProfile(store, profile, expectedPeerId)).resolves.toMatchObject({
+      author: identity.publicKey,
+      payload: { display_name: 'Requested profile' }
+    });
+    expect(await getLatestIdentityObject(store, identity.publicKey)).toMatchObject({
+      payload: { display_name: 'Requested profile' }
+    });
+  });
+
+  it('accepts a newer valid discovery profile and preserves it over older server copies', async () => {
+    const identity = await createTestIdentity();
+    const peerId = await deriveFingerprint(identity.publicKey);
+    const localProfile = await createProfile(identity, 'Local version', '2026-10-10T00:00:00.000Z');
+    const serverNewer = await createProfile(identity, 'Server update', '2026-10-11T00:00:00.000Z');
+    const staleServerCopy = await createProfile(identity, 'Stale server copy', '2026-10-09T00:00:00.000Z');
+    const store = createMemoryStore();
+    await store.put(localProfile);
+
+    await expect(storeRequestedIdentityProfile(store, serverNewer, peerId)).resolves.toMatchObject({
+      object_id: serverNewer.object_id,
+      payload: { display_name: 'Server update' }
+    });
+    await expect(storeRequestedIdentityProfile(store, staleServerCopy, peerId)).resolves.toMatchObject({
+      object_id: serverNewer.object_id,
+      payload: { display_name: 'Server update' }
+    });
+    await expect(getLatestIdentityObject(store, identity.publicKey)).resolves.toMatchObject({
+      object_id: serverNewer.object_id,
+      payload: { display_name: 'Server update' }
+    });
+  });
+
   it('creates signed profile versions with extensible metadata and signed timestamps', async () => {
     const identity = await createTestIdentity();
     const first = await createProfile(identity, 'Alice', '2026-10-01T00:00:00.000Z', {
@@ -145,6 +193,101 @@ describe('replicated identity profile objects', () => {
       payload: { display_name: 'Current Name' }
     });
     await expect(getLatestIdentityObjects(store)).resolves.toEqual([newer]);
+  });
+
+  it('persists discovered profiles and derives candidate IDs from signing authors', async () => {
+    const identity = await createTestIdentity();
+    const profile = await createProfile(identity, 'Discovered Peer', '2026-10-08T00:00:00.000Z');
+    const store = createMemoryStore();
+
+    await expect(storeDiscoveredIdentityProfiles(store, [profile, profile], 'local-peer'))
+      .resolves.toEqual([await deriveFingerprint(identity.publicKey)]);
+    await expect(getLatestIdentityObject(store, identity.publicKey)).resolves.toEqual(profile);
+  });
+
+  it('selects only available identity profiles for connected authenticated authors', async () => {
+    const connectedIdentity = await createTestIdentity();
+    const disconnectedIdentity = await createTestIdentity();
+    const connectedProfile = await createProfile(connectedIdentity, 'Connected', '2026-10-08T00:00:00.000Z');
+    const disconnectedProfile = await createProfile(disconnectedIdentity, 'Disconnected', '2026-10-08T00:00:00.000Z');
+    const store = createMemoryStore();
+    await store.put(connectedProfile);
+    await store.put(disconnectedProfile);
+
+    const localProfiles = await getLatestIdentityObjects(store);
+    const page = findObjectsFromCandidatesByFindQueryPage(
+      localProfiles,
+      { object_type: 'mycelium.identity', author_connected: true, limit: 50 },
+      new Set([connectedProfile.author, 'connected-without-profile'])
+    );
+
+    expect(page.objects).toEqual([connectedProfile]);
+  });
+
+  it('matches connected and disconnected profile authors against current authenticated connections', async () => {
+    const connectedIdentity = await createTestIdentity();
+    const disconnectedIdentity = await createTestIdentity();
+    const connectedProfile = await createProfile(connectedIdentity, 'Connected', '2026-10-08T00:00:00.000Z');
+    const disconnectedProfile = await createProfile(disconnectedIdentity, 'Disconnected', '2026-10-08T00:00:00.000Z');
+    const store = createMemoryStore();
+    await store.put(connectedProfile);
+    await store.put(disconnectedProfile);
+    const connectedPeerIds = [await deriveFingerprint(connectedProfile.author)];
+
+    await expect(findLatestIdentityObjectsByConnectionQuery(
+      store,
+      { object_type: 'mycelium.identity', author_connected: true, limit: 50 },
+      () => connectedPeerIds
+    )).resolves.toMatchObject({ objects: [connectedProfile] });
+    await expect(findLatestIdentityObjectsByConnectionQuery(
+      store,
+      { object_type: 'mycelium.identity', author_connected: false, limit: 50 },
+      () => connectedPeerIds
+    )).resolves.toMatchObject({ objects: [disconnectedProfile] });
+  });
+
+  it('uses the current authenticated connection set after asynchronous profile loading', async () => {
+    const identity = await createTestIdentity();
+    const profile = await createProfile(identity, 'Disconnected during lookup', '2026-10-08T00:00:00.000Z');
+    const store = createMemoryStore();
+    await store.put(profile);
+    const originalQuery = store.query;
+    let releaseQuery: (() => void) | undefined;
+    let queryStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { queryStarted = resolve; });
+    const held = new Promise<void>((resolve) => { releaseQuery = resolve; });
+    store.query = async (criteria) => {
+      queryStarted?.();
+      await held;
+      return originalQuery(criteria);
+    };
+    let connectedPeerIds = [await deriveFingerprint(profile.author)];
+
+    const resultPromise = findLatestIdentityObjectsByConnectionQuery(
+      store,
+      { object_type: 'mycelium.identity', author_connected: true, limit: 50 },
+      () => connectedPeerIds
+    );
+    await started;
+    connectedPeerIds = [];
+    releaseQuery?.();
+
+    await expect(resultPromise).resolves.toMatchObject({ objects: [] });
+  });
+
+  it('does not replace a newer stored profile with a stale discovered profile', async () => {
+    const identity = await createTestIdentity();
+    const older = await createProfile(identity, 'Old Name', '2026-10-09T00:00:00.000Z');
+    const newer = await createProfile(identity, 'New Name', '2026-10-10T00:00:00.000Z');
+    const store = createMemoryStore();
+    await store.put(newer);
+
+    await expect(storeDiscoveredIdentityProfiles(store, [older], 'local-peer'))
+      .resolves.toEqual([await deriveFingerprint(identity.publicKey)]);
+    await expect(getLatestIdentityObject(store, identity.publicKey)).resolves.toMatchObject({
+      object_id: newer.object_id,
+      payload: { display_name: 'New Name' }
+    });
   });
 
   it('replicates the profile through ordinary object packets and serves it from a cache while the author is offline', async () => {

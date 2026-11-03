@@ -1,4 +1,23 @@
 import type { Contact } from './types';
+import type { IdentityObject } from './object-layer/identity-object';
+
+export function contactWithIdentityProfile(
+  previous: Contact | undefined,
+  profile: IdentityObject,
+  fingerprint: string
+): Contact {
+  return {
+    ...previous,
+    publicKey: profile.author,
+    fingerprint,
+    displayName: profile.payload.display_name,
+    identityObject: profile,
+    addedAt: previous?.addedAt ?? new Date().toISOString(),
+    followed: previous?.followed ?? false,
+    online: previous?.online ?? false,
+    connected: previous?.connected ?? false
+  };
+}
 
 export function dedupeContactsByFingerprint(items: Contact[]): Contact[] {
   const mergedByFingerprint = new Map<string, Contact>();

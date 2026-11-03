@@ -1,6 +1,7 @@
-import type { ConnectionState } from '../types';
+import type { ConnectionState, Contact } from '../types';
 import { BrandLogo } from './BrandLogo';
 import { CompactUsername } from './CompactUsername';
+import { resolvePeerDisplayName } from '../utils/fingerprintNames';
 
 interface AppHeaderProps {
   collapsed: boolean;
@@ -9,6 +10,7 @@ interface AppHeaderProps {
   signallingStatus: string;
   connectedPeers: number;
   connectedPeerIds: string[];
+  contacts: Contact[];
   syncStatus: string;
   myFingerprint?: string;
   onPeerProfileClick: (peerId: string) => void;
@@ -22,6 +24,7 @@ export function AppHeader({
   signallingStatus,
   connectedPeers,
   connectedPeerIds,
+  contacts,
   syncStatus,
   myFingerprint,
   onPeerProfileClick,
@@ -36,6 +39,7 @@ export function AppHeader({
       ? 'Connecting to network'
       : 'Disconnected. See diagnostics';
   const statusLabel = isGood ? 'Connected' : isWarning ? 'Connecting' : 'Disconnected';
+  const contactsByPeerId = new Map(contacts.map((contact) => [contact.fingerprint, contact]));
 
   return (
     <header className={`app-header card ${collapsed ? 'collapsed' : ''}`}>
@@ -65,7 +69,14 @@ export function AppHeader({
             <strong>Open peer connections</strong>
             {connectedPeerIds.length > 0 ? connectedPeerIds.map((peerId) => (
               <div className="connected-peer" key={peerId}>
-                <CompactUsername peerId={peerId} onProfileClick={onPeerProfileClick} />
+                <CompactUsername
+                  peerId={peerId}
+                  displayName={resolvePeerDisplayName(
+                    contactsByPeerId.get(peerId)?.identityObject?.payload.display_name,
+                    contactsByPeerId.get(peerId)?.authenticatedDisplayName
+                  )}
+                  onProfileClick={onPeerProfileClick}
+                />
                 <code>{peerId}</code>
               </div>
             )) : <span className="connected-peer-empty">No open data channels</span>}

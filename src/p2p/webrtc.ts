@@ -96,6 +96,8 @@ export class PeerConnectionManager {
   private onClose: (peerId: string) => void;
   private onEvent: (peerId: string, event: string) => void;
   private onProfileRequest: (peerId: string) => void;
+  private onIdentityProfileRequest: (peerId: string, requestId: string) => void;
+  private onIdentityProfileResponse: (peerId: string, requestId: string, object: unknown) => void;
   private onObjectPacket?: (peerId: string, packet: ObjectPacket) => void;
   private readonly peerListExchange: PeerListExchangeCallbacks;
   private packetSigner?: PacketSigner;
@@ -118,6 +120,9 @@ export class PeerConnectionManager {
   private destroyed = false;
   private awaitingIncomingChannel = false;
   private offerRecoveryTimerId: ReturnType<typeof globalThis.setTimeout> | null = null;
+  private pendingIdentityProfileRequestId: string | null = null;
+  private identityProfileRequestResolved = false;
+  private identityProfileRequestTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 
   constructor(
     localId: string,
@@ -138,7 +143,9 @@ export class PeerConnectionManager {
     peerListExchange: PeerListExchangeCallbacks = {
       getConnectedPeerIds: () => [],
       onPeerList: () => {}
-    }
+    },
+    onIdentityProfileRequest: (peerId: string, requestId: string) => void = () => {},
+    onIdentityProfileResponse: (peerId: string, requestId: string, object: unknown) => void = () => {}
   ) {
     this.localId = localId;
     this.onState = onState;
@@ -151,6 +158,8 @@ export class PeerConnectionManager {
     this.onClose = onClose;
     this.onEvent = onEvent;
     this.onProfileRequest = onProfileRequest;
+    this.onIdentityProfileRequest = onIdentityProfileRequest;
+    this.onIdentityProfileResponse = onIdentityProfileResponse;
     this.packetSigner = packetSigner;
     this.onObjectPacket = onObjectPacket;
     this.peerListExchange = peerListExchange;
@@ -298,6 +307,7 @@ export class PeerConnectionManager {
   private attachDataChannel(channel: RTCDataChannel) {
     const peerId = this.remoteId ?? '<unknown>';
     this.onEvent(peerId, `${this.connectionLabel()} data channel attached label=${channel.label} id=${channel.id ?? '<unknown>'}`);
+    this.clearIdentityProfileRequest(false);
     this.remoteCapabilities.clear();
     this.peerListRequestStarted = false;
     this.clearPendingPeerListRequest();
@@ -325,6 +335,7 @@ export class PeerConnectionManager {
       this.stopPingLoop();
       this.remoteCapabilities.clear();
       this.clearPendingPeerListRequest();
+      this.clearIdentityProfileRequest(false);
       this.onState(peerId, 'disconnected');
       this.onClose(peerId);
     };
@@ -412,6 +423,18 @@ export class PeerConnectionManager {
       }
       case 'PROFILE_REQUEST': {
         this.onProfileRequest(peerId);
+        return;
+      }
+      case 'IDENTITY_PROFILE_REQUEST': {
+        const requestId = parseRequestId(packet.payload?.requestId);
+        if (requestId && requestId.length <= 128) this.onIdentityProfileRequest(peerId, requestId);
+        return;
+      }
+      case 'IDENTITY_PROFILE_RESPONSE': {
+        const requestId = parseRequestId(packet.payload?.requestId);
+        if (!requestId || requestId !== this.pendingIdentityProfileRequestId) return;
+        this.clearIdentityProfileRequest(true);
+        this.onIdentityProfileResponse(peerId, requestId, packet.payload?.object ?? null);
         return;
       }
       case 'PROFILE_RESPONSE':
@@ -669,6 +692,42 @@ export class PeerConnectionManager {
     void this.sendPacket('PROFILE_REQUEST', {});
   }
 
+  public async requestIdentityProfile(requestId: string): Promise<boolean> {
+    if (!requestId.trim() || requestId.length > 128) throw new Error('Invalid identity profile request ID');
+    if (!this.isDataChannelOpen() || this.identityProfileRequestResolved || this.pendingIdentityProfileRequestId) return false;
+    this.pendingIdentityProfileRequestId = requestId;
+    this.identityProfileRequestTimer = globalThis.setTimeout(() => {
+      if (this.pendingIdentityProfileRequestId !== requestId) return;
+      this.clearIdentityProfileRequest(false);
+      this.onEvent(this.remoteId ?? '<unknown>', 'Identity profile request timed out');
+    }, 10_000);
+    try {
+      await this.sendPacket('IDENTITY_PROFILE_REQUEST', { requestId }, true);
+      return true;
+    } catch (error) {
+      if (this.pendingIdentityProfileRequestId === requestId) this.clearIdentityProfileRequest(false);
+      throw error;
+    }
+  }
+
+  public async sendIdentityProfileResponse(requestId: string, object: unknown): Promise<void> {
+    if (!requestId.trim() || requestId.length > 128) throw new Error('Invalid identity profile request ID');
+    await this.sendPacket('IDENTITY_PROFILE_RESPONSE', { requestId, object }, true);
+  }
+
+  public allowIdentityProfileRequestRetry() {
+    this.clearIdentityProfileRequest(false);
+  }
+
+  private clearIdentityProfileRequest(resolved: boolean) {
+    if (this.identityProfileRequestTimer !== null) {
+      globalThis.clearTimeout(this.identityProfileRequestTimer);
+      this.identityProfileRequestTimer = null;
+    }
+    this.pendingIdentityProfileRequestId = null;
+    this.identityProfileRequestResolved = resolved;
+  }
+
   public sendRequestPosts(
     since: string | null = null,
     limit = 100,
@@ -886,6 +945,7 @@ export class PeerConnectionManager {
   public closeConnection() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.clearIdentityProfileRequest(false);
     this.onEvent(this.remoteId ?? '<unknown>', `${this.connectionLabel()} closeConnection called connectionId=${this.localConnectionId} negotiationId=${this.activeNegotiationId ?? '<none>'} iceGathering=${this.peerConnection.iceGatheringState} iceConnection=${this.peerConnection.iceConnectionState} connection=${this.peerConnection.connectionState} signaling=${this.peerConnection.signalingState} dataChannel=${this.dataChannel?.readyState ?? 'none'} ${describeSctp(this.peerConnection)}`);
     const channel = this.dataChannel;
     this.dataChannel = null;

@@ -7,9 +7,9 @@ import { IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
 import { PeerRecipientPicker, filterPeersByHandlePrefix, relationshipContacts, peerMentionHandle } from '../components/PeerRecipientPicker';
-import { displayNameOrFallback } from '../utils/fingerprintNames';
+import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
 import { activeMentionAt, insertMention, mentionsPresentInText, type ActiveMention } from '../utils/postMentions';
-import type { PopularPeer } from '../services/peer-discovery';
+import type { PopularPeerWithIdentityProfile } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
 import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
 import { resizeTextareaToRows } from '../utils/textarea';
@@ -42,7 +42,7 @@ interface HomePageProps {
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   onHide: (objectId: string) => void;
   onDelete?: (objectId: string) => void;
-  popularPeers?: PopularPeer[];
+  popularPeers?: PopularPeerWithIdentityProfile[];
   onFollowPeer?: (peerId: string) => void;
 }
 
@@ -294,25 +294,34 @@ export function HomePage({
           </div>
           {popularPeers.length === 0 ? <p className="note">No popular posters found yet.</p> : (
             <div className="popular-posters-list">
-              {popularPeers.map(({ peer_id: peerId }) => (
-                <div className="popular-poster-item" key={peerId}>
-                  <span>
-                    <CompactUsername
-                      peerId={peerId}
-                      displayName={displayNameOrFallback(
-                        contacts.find((contact) => contact.fingerprint === peerId || contact.publicKey === peerId)?.displayName,
-                        peerId
-                      )}
-                      onProfileClick={onAuthorClick}
-                    /> <span className="note">Reply activity</span>
-                  </span>
-                  {onFollowPeer ? (
-                    <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
-                      {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
-                    </button>
-                  ) : null}
-                </div>
-              ))}
+              {popularPeers.map((popularPeer) => {
+                const peerId = popularPeer.peer_id;
+                const contact = contacts.find((candidate) =>
+                  candidate.fingerprint === peerId || candidate.publicKey === peerId
+                );
+                const identityName = popularPeer.identity_profile?.payload.display_name
+                  ?? contact?.identityObject?.payload.display_name;
+                const displayName = displayNameOrFallback(
+                  resolvePeerDisplayName(identityName, contact?.authenticatedDisplayName) ?? contact?.displayName,
+                  peerId
+                );
+                return (
+                  <div className="popular-poster-item" key={peerId}>
+                    <span>
+                      <CompactUsername
+                        peerId={peerId}
+                        displayName={displayName}
+                        onProfileClick={onAuthorClick}
+                      /> <span className="note">Reply activity</span>
+                    </span>
+                    {onFollowPeer ? (
+                      <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
+                        {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

@@ -80,6 +80,7 @@ export async function buildFindPacket(
     ...(origin ? { origin } : {}),
     ...(query?.object_type ? { object_type: query.object_type } : {}),
     ...(query?.author ? { author: query.author } : {}),
+    ...(query?.author_connected === undefined ? {} : { author_connected: query.author_connected }),
     ...(query?.recipient ? { recipient: query.recipient } : {}),
     ...(query?.created_after ? { created_after: query.created_after } : {}),
     ...(query?.created_before ? { created_before: query.created_before } : {}),
@@ -334,6 +335,8 @@ export async function receiveFindResponsePacket(
 export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | null {
   const objectType = typeof packet.payload?.object_type === 'string' ? packet.payload.object_type : undefined;
   const author = typeof packet.payload?.author === 'string' ? packet.payload.author : undefined;
+  const authorConnected = packet.payload?.author_connected;
+  if (authorConnected !== undefined && typeof authorConnected !== 'boolean') return null;
   const rawRecipient = packet.payload?.recipient;
   const recipient = typeof rawRecipient === 'string' && rawRecipient.trim().length > 0 ? rawRecipient : undefined;
   if (rawRecipient !== undefined && recipient === undefined) return null;
@@ -351,18 +354,30 @@ export function getFindQueryCriteria(packet: FindPacket): FindQueryCriteria | nu
   const since = typeof packet.payload?.since === 'string' ? packet.payload.since : undefined;
   const rawLimit = packet.payload?.limit;
   const order = packet.payload?.order === 'created_at_desc' ? packet.payload.order : undefined;
-  const hasQuery = Boolean(objectType || author || recipient || createdAfter || createdBefore || pageBefore || since || rawLimit !== undefined || order);
+  const hasQuery = Boolean(objectType || author || authorConnected !== undefined || recipient || createdAfter || createdBefore || pageBefore || since || rawLimit !== undefined || order);
   if (!hasQuery) return null;
   const limit = typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit > 0
     ? Math.min(rawLimit, MAX_FIND_QUERY_LIMIT)
     : MAX_FIND_QUERY_LIMIT;
-  return { object_type: objectType, author, recipient, created_after: createdAfter, created_before: createdBefore, page_before: pageBefore, since, limit, order };
+  return {
+    object_type: objectType,
+    author,
+    ...(authorConnected === undefined ? {} : { author_connected: authorConnected }),
+    recipient,
+    created_after: createdAfter,
+    created_before: createdBefore,
+    page_before: pageBefore,
+    since,
+    limit,
+    order
+  };
 }
 
 export function buildLocalQueryCriteria(parsedCriteria: FindQueryCriteria): FindQueryCriteria {
   return {
     object_type: parsedCriteria.object_type,
     author: parsedCriteria.author,
+    ...(parsedCriteria.author_connected === undefined ? {} : { author_connected: parsedCriteria.author_connected }),
     ...(parsedCriteria.recipient === undefined ? {} : { recipient: parsedCriteria.recipient }),
     created_after: parsedCriteria.created_after,
     created_before: parsedCriteria.created_before,
@@ -398,28 +413,44 @@ export async function buildForwardedFindPacket(
 
 export async function findObjectsByFindQueryPage(
   store: ObjectStore,
-  query: FindQueryCriteria
+  query: FindQueryCriteria,
+  connectedAuthors: ReadonlySet<string> = new Set()
 ): Promise<{ objects: DistributedObject[]; hasMore: boolean }> {
   const objects = await store.query(query.recipient === undefined ? undefined : { recipient: query.recipient });
-  return applyFindQueryPageLimit(filterObjectsMatchingFindQuery(objects, query), query);
+  return findObjectsFromCandidatesByFindQueryPage(objects, query, connectedAuthors);
+}
+
+export function findObjectsFromCandidatesByFindQueryPage(
+  candidates: readonly DistributedObject[],
+  query: FindQueryCriteria,
+  connectedAuthors: ReadonlySet<string> = new Set()
+): { objects: DistributedObject[]; hasMore: boolean } {
+  return applyFindQueryPageLimit(
+    filterObjectsMatchingFindQuery([...candidates], query, connectedAuthors),
+    query
+  );
 }
 
 export async function filterObjectsByFindQuery(
   store: ObjectStore,
-  query: FindQueryCriteria
+  query: FindQueryCriteria,
+  connectedAuthors: ReadonlySet<string> = new Set()
 ): Promise<DistributedObject[]> {
   const objects = await store.query(query.recipient === undefined ? undefined : { recipient: query.recipient });
-  return applyFindQueryLimit(filterObjectsMatchingFindQuery(objects, query), query);
+  return applyFindQueryLimit(filterObjectsMatchingFindQuery(objects, query, connectedAuthors), query);
 }
 
 function filterObjectsMatchingFindQuery(
   objects: DistributedObject[],
-  query: FindQueryCriteria
+  query: FindQueryCriteria,
+  connectedAuthors: ReadonlySet<string>
 ): DistributedObject[] {
   return objects.filter((object) => {
     if (isObjectExpired(object)) return false;
     if (query.object_type && object.object_type !== query.object_type) return false;
     if (query.author && object.author !== query.author) return false;
+    if (query.author_connected !== undefined
+      && connectedAuthors.has(object.author) !== query.author_connected) return false;
     if (query.recipient !== undefined && object.recipient !== query.recipient) return false;
     const createdAt = Date.parse(object.created_at);
     if (query.created_after && createdAt < Date.parse(query.created_after)) return false;
@@ -691,9 +722,12 @@ export async function respondToFindPacket(
   send: (packet: FindResponsePacket) => Promise<void>,
   sender: string,
   requestCache = new Map<string, number>(),
-  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: FindQueryCriteria }) => Promise<void>
+  forwardRequest?: (request: { objectId: string; objectIds?: string[]; localObjects?: DistributedObject[]; requestId: string; ttl: number; fromPeer: string; origin: string; expiresAt: string; query?: FindQueryCriteria }) => Promise<void>,
+  connectedAuthors: ReadonlySet<string> = new Set()
 ): Promise<boolean> {
   if (!isMyceliumPacket(packet) || packet.type !== 'FIND') return false;
+  const rawAuthorConnected = packet.payload?.author_connected;
+  if (rawAuthorConnected !== undefined && typeof rawAuthorConnected !== 'boolean') return false;
   const rawRecipient = packet.payload?.recipient;
   if (rawRecipient !== undefined && (typeof rawRecipient !== 'string' || rawRecipient.trim().length === 0)) return false;
   const objectIds = getFindObjectIds(packet as FindPacket);
@@ -720,7 +754,7 @@ export async function respondToFindPacket(
     let localObjects: DistributedObject[] = [];
     let localHasMore = false;
     if (queryCriteria) {
-      const localPage = await findObjectsByFindQueryPage(store, queryCriteria);
+      const localPage = await findObjectsByFindQueryPage(store, queryCriteria, connectedAuthors);
       localHasMore = localPage.hasMore;
       for (const object of localPage.objects) {
         if (await validateObject(object)) localObjects.push(object);

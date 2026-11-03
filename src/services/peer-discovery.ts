@@ -1,8 +1,14 @@
 import { buildPacket, isMyceliumPacket } from '../p2p/protocol';
+import type { IdentityObject } from '../object-layer/identity-object';
 
 export interface PopularPeer {
   peer_id: string;
   activity_score: number;
+  identity_profile?: unknown;
+}
+
+export interface PopularPeerWithIdentityProfile extends Omit<PopularPeer, 'identity_profile'> {
+  identity_profile?: IdentityObject;
 }
 
 type PendingPeerDiscovery = {
@@ -32,11 +38,21 @@ export function handlePeerDiscoveryResult(packet: unknown): boolean {
   } else {
     pending.resolve(peers.flatMap((peer) => {
       if (!peer || typeof peer !== 'object') return [];
-      const value = peer as { peer_id?: unknown; activity_score?: unknown; reply_count?: unknown };
+      const value = peer as {
+        peer_id?: unknown;
+        activity_score?: unknown;
+        reply_count?: unknown;
+        identity_profile?: unknown;
+      };
       const score = typeof value.activity_score === 'number' ? value.activity_score : value.reply_count;
-      return typeof value.peer_id === 'string' && typeof score === 'number'
-        ? [{ peer_id: value.peer_id, activity_score: score }]
-        : [];
+      if (typeof value.peer_id !== 'string' || typeof score !== 'number') return [];
+      return [{
+        peer_id: value.peer_id,
+        activity_score: score,
+        ...(value.identity_profile && typeof value.identity_profile === 'object' && !Array.isArray(value.identity_profile)
+          ? { identity_profile: value.identity_profile }
+          : {})
+      }];
     }));
   }
   return true;

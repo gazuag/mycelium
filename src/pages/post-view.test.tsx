@@ -436,7 +436,7 @@ describe('LocalPostView UI migration', () => {
       />
     );
     expect(myProfile).toContain('Generated handle');
-    expect(myProfile).toMatch(/profile-display-field"><span>Generated handle<\/span><span class="monospace">@[^<]+<\/span>/);
+    expect(myProfile).toMatch(/profile-display-field"><span>Generated handle<\/span><span class="monospace break-word">@[^<]+<\/span>/);
     expect(myProfile).not.toContain('readonly=""');
     expect(myProfile).toContain('Display Name');
     expect(myProfile).not.toContain('Home Feed Mix');
@@ -976,5 +976,51 @@ describe('relationship and discovery people UI', () => {
     expect(markup).toContain('Popular posters right now.');
     expect(markup).toContain('Reply activity');
     expect(markup).toContain('Follow');
+  });
+
+  it('uses the verified popular-peer identity profile display name', () => {
+    const profile = {
+      object_id: 'profile-id',
+      object_type: 'mycelium.identity',
+      author: 'signing-key',
+      created_at: '2026-10-01T00:00:00.000Z',
+      payload: {
+        display_name: 'Suggested Profile Name',
+        bio: '',
+        encryption_public_key: 'encryption-key',
+        encryption_key_binding: {
+          signing_public_key: 'signing-key',
+          encryption_public_key: 'encryption-key',
+          created_at: '2026-10-01T00:00:00.000Z',
+          signature: 'signature'
+        }
+      },
+      signature: 'signature',
+      replication_policy: {}
+    } as const;
+    const markup = renderToStaticMarkup(
+      <HomePage
+        posts={[]}
+        contacts={[]}
+        popularPeers={[{
+          peer_id: 'aa:bb:cc:dd:ee:ff:00:22',
+          activity_score: 3,
+          identity_profile: profile
+        }]}
+        onFollowPeer={noop}
+        postText=""
+        onPostTextChange={noop}
+        onSubmitPost={noop}
+        canCreatePost
+        onAuthorClick={noop}
+        onLike={noop}
+        onDislike={noop}
+        onReply={noop}
+        onHide={noop}
+      />
+    );
+
+    expect(markup).toContain('Suggested Profile Name');
+    expect(markup).not.toContain('class="peer-name-primary">Peer</span>');
   });
 });
