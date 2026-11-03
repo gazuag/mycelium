@@ -166,6 +166,22 @@ describe('authenticated Web Push sender client', () => {
 
     await expect(send(encrypted, contact)).resolves.toEqual({ status: 'temporary-failure' });
   });
+
+  it('reports a timed out request as unknown and does not retry', async () => {
+    const identity = await createTestIdentity();
+    const fetcher = vi.fn((_input: URL | RequestInfo, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    }));
+    const send = createWebPushSender({
+      senderUrl: 'https://sender.example.test',
+      getIdentity: async () => identity,
+      fetcher,
+      timeoutMs: 10
+    });
+
+    await expect(send(encrypted, contact)).resolves.toEqual({ status: 'delivery-unknown' });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
 });
 
 async function createTestIdentity(): Promise<CompleteLocalIdentityRecord> {

@@ -1,4 +1,4 @@
-import type { Contact } from '../types';
+import type { Contact, WebPushCapability } from '../types';
 import { deriveFingerprint, signString } from '../crypto/identity';
 import { loadIdentity, type CompleteLocalIdentityRecord } from '../storage/idb';
 import { isWebPushCapability } from './web-push';
@@ -8,12 +8,14 @@ const SENDER_URL = import.meta.env.VITE_WEB_PUSH_SENDER_URL as string | undefine
 const REQUEST_PATH = '/v1/push';
 const REQUEST_TTL_SECONDS = 300;
 const DOMAIN = 'mycelium-web-push-request-v1';
+export const WEB_PUSH_REQUEST_TIMEOUT_MS = 8_000;
 
 export type WebPushSendResult =
   | { readonly status: 'accepted' }
   | { readonly status: 'invalid-subscription' }
   | { readonly status: 'rate-limited' }
   | { readonly status: 'temporary-failure' }
+  | { readonly status: 'delivery-unknown' }
   | { readonly status: 'configuration-missing' }
   | { readonly status: 'identity-unavailable' }
   | { readonly status: 'invalid-capability' }
@@ -33,6 +35,7 @@ export interface WebPushSenderDependencies {
   readonly senderUrl?: string;
   readonly getIdentity: () => Promise<CompleteLocalIdentityRecord | null>;
   readonly fetcher?: typeof fetch;
+  readonly timeoutMs?: number;
 }
 
 export function canonicalizeWebPushRequestV1(fields: WebPushRequestFields): string {
@@ -55,12 +58,12 @@ export function canonicalizeWebPushRequestV1(fields: WebPushRequestFields): stri
 export function createWebPushSender(dependencies: WebPushSenderDependencies) {
   return async (
     encrypted: EncryptedWebPushRequest,
-    recipient: Contact
+    recipient: Contact | WebPushCapability
   ): Promise<WebPushSendResult> => {
     const senderOrigin = normalizeSenderUrl(dependencies.senderUrl);
     if (!senderOrigin) return { status: 'configuration-missing' };
 
-    const capability = recipient.webPush;
+    const capability = isWebPushCapability(recipient) ? recipient : recipient.webPush;
     if (!capability || !isWebPushCapability(capability) || encrypted.endpoint !== capability.endpoint) {
       return { status: 'invalid-capability' };
     }
@@ -94,23 +97,36 @@ export function createWebPushSender(dependencies: WebPushSenderDependencies) {
     });
     const signature = await signString(identity.privateKey, canonical);
 
+    const controller = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timeoutId = setTimeout(() => {
+        resolve(null);
+        controller.abort();
+      }, dependencies.timeoutMs ?? WEB_PUSH_REQUEST_TIMEOUT_MS);
+    });
     try {
-      const response = await (dependencies.fetcher ?? fetch)(new URL(REQUEST_PATH, senderOrigin), {
-        method: 'POST',
-        headers: {
-          'Content-Encoding': 'aes128gcm',
-          'Content-Type': 'application/octet-stream',
-          'TTL': ttl,
-          'X-Mycelium-Public-Key': identity.publicKey,
-          'X-Mycelium-Fingerprint': fingerprint,
-          'X-Mycelium-Timestamp': timestamp,
-          'X-Mycelium-Nonce': nonce,
-          'X-Mycelium-Signature': signature,
-          'X-Mycelium-Endpoint': capability.endpoint
-        },
-        body: toArrayBuffer(body),
-        redirect: 'error'
-      });
+      const response = await Promise.race([
+        (dependencies.fetcher ?? fetch)(new URL(REQUEST_PATH, senderOrigin), {
+          method: 'POST',
+          headers: {
+            'Content-Encoding': 'aes128gcm',
+            'Content-Type': 'application/octet-stream',
+            'TTL': ttl,
+            'X-Mycelium-Public-Key': identity.publicKey,
+            'X-Mycelium-Fingerprint': fingerprint,
+            'X-Mycelium-Timestamp': timestamp,
+            'X-Mycelium-Nonce': nonce,
+            'X-Mycelium-Signature': signature,
+            'X-Mycelium-Endpoint': capability.endpoint
+          },
+          body: toArrayBuffer(body),
+          redirect: 'error',
+          signal: controller.signal
+        }),
+        timeout
+      ]);
+      if (!response) return { status: 'delivery-unknown' };
       if (response.status === 202) return { status: 'accepted' };
       if (response.status === 404 || response.status === 410) return { status: 'invalid-subscription' };
       if (response.status === 429) return { status: 'rate-limited' };
@@ -118,6 +134,8 @@ export function createWebPushSender(dependencies: WebPushSenderDependencies) {
       return { status: 'request-rejected' };
     } catch {
       return { status: 'temporary-failure' };
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
   };
 }
