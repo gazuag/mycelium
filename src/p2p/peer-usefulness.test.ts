@@ -83,9 +83,10 @@ function estimate(
     connections?: readonly PeerConnectionObservation[];
     findForwarding?: readonly FindForwardingObservation[];
     objectSupply?: readonly ObjectSupplyObservation[];
-  } = {}
+  } = {},
+  comparisonPeerIds: readonly string[] = peerIds
 ) {
-  return estimatePeerUsefulness(peerIds, records, NOW);
+  return estimatePeerUsefulness(peerIds, records, NOW, comparisonPeerIds);
 }
 
 describe('local peer usefulness estimation', () => {
@@ -137,7 +138,7 @@ describe('local peer usefulness estimation', () => {
     });
   });
 
-  it('discounts overlap when another supplier delivered the same object', () => {
+  it('excludes objects observed from another peer in the comparison set', () => {
     const estimates = estimate(['peer-a', 'peer-b'], {
       objectSupply: [
         supply('peer-a', 'unique-object', 'author-a'),
@@ -146,24 +147,68 @@ describe('local peer usefulness estimation', () => {
       ]
     });
 
-    expect(estimates[0].novel_object_weight).toBe(1.5);
-    expect(estimates[1].novel_object_weight).toBe(0.5);
+    expect(estimates[0].novel_object_weight).toBe(1);
+    expect(estimates[1].novel_object_weight).toBe(0);
     expect(estimates[0].redundant_objects).toBe(1);
     expect(estimates[1].redundant_objects).toBe(1);
+    expect(estimates[1].distinct_verified_authors).toBe(1);
     expect(estimates[0].score).toBeGreaterThan(estimates[1].score);
   });
 
-  it('does not increase confidence by counting one retrieval as both FIND and object evidence', () => {
-    const objectOnly = estimate(['child-peer'], {
-      objectSupply: [supply('child-peer', 'find-result', 'author')]
-    })[0];
-    const bothCategories = estimate(['child-peer'], {
-      objectSupply: [supply('child-peer', 'find-result', 'author')],
-      findForwarding: [findResponse('same-retrieval', 'origin-peer', 'child-peer')]
+  it('credits observed objects not seen from other comparison peers', () => {
+    const [peerA] = estimate(['peer-a'], {
+      objectSupply: [supply('peer-a', 'object-x', 'author-x')]
+    }, ['peer-a', 'peer-b']);
+
+    expect(peerA.novel_object_weight).toBe(1);
+  });
+
+  it('does not discount an object because of a historical supplier outside the comparison set', () => {
+    const [peerA] = estimate(['peer-a'], {
+      objectSupply: [
+        supply('peer-a', 'object-x', 'author-x'),
+        supply('historical-peer-c', 'object-x', 'author-x')
+      ]
+    }, ['peer-a', 'peer-b']);
+
+    expect(peerA.novel_object_weight).toBe(1);
+    expect(peerA.redundant_objects).toBe(0);
+  });
+
+  it('credits different objects to their respective suppliers', () => {
+    const estimates = estimate(['peer-a', 'peer-b'], {
+      objectSupply: [
+        supply('peer-a', 'object-x', 'author-x'),
+        supply('peer-b', 'object-y', 'author-y')
+      ]
+    });
+
+    expect(estimates.map(({ novel_object_weight }) => novel_object_weight)).toEqual([1, 1]);
+  });
+
+  it("treats a single-peer comparison set as all of that peer's observed supply", () => {
+    const [peerA] = estimate(['peer-a'], {
+      objectSupply: [
+        supply('peer-a', 'object-x', 'author-x'),
+        supply('peer-a', 'object-y', 'author-y')
+      ]
+    });
+
+    expect(peerA.novel_object_weight).toBe(2);
+    expect(peerA.redundant_objects).toBe(0);
+  });
+
+  it('does not let FIND responsiveness increase information score or confidence', () => {
+    const objectOnly = estimate(['child-peer'], {})[0];
+    const findOnly = estimate(['child-peer'], {
+      findForwarding: [findResponse('find-only', 'origin-peer', 'child-peer')]
     })[0];
 
-    expect(bothCategories.score).toBeGreaterThan(objectOnly.score);
-    expect(bothCategories.confidence).toBe(objectOnly.confidence);
+    expect(findOnly.responsive_forwarded_origins).toBe(1);
+    expect(findOnly.forwarded_response_weight).toBe(1);
+    expect(findOnly.novel_object_weight).toBe(0);
+    expect(findOnly.score).toBe(objectOnly.score);
+    expect(findOnly.confidence).toBe(objectOnly.confidence);
   });
 
   it('decays old object and FIND evidence by their configured half-lives', () => {
@@ -208,6 +253,17 @@ describe('local peer usefulness estimation', () => {
     expect(result.score).toBe(sameEvidenceWithoutDuplicateFind.score);
     expect(result.score).toBeLessThanOrEqual(0.95);
     expect(result.confidence).toBeLessThanOrEqual(1);
+  });
+
+  it('does not give repeated supplier/object records additional distinct-object novelty', () => {
+    const object = supply('peer-a', 'one-object', 'one-author');
+    const single = estimate(['peer-a'], { objectSupply: [object] })[0];
+    const repeated = estimate(['peer-a'], {
+      objectSupply: [object, { ...object }, { ...object }]
+    })[0];
+
+    expect(repeated.distinct_validated_objects).toBe(1);
+    expect(repeated.novel_object_weight).toBe(single.novel_object_weight);
   });
 
   it('caps usefulness evidence and score despite many distinct objects and origins', () => {

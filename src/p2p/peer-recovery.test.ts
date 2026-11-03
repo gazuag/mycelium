@@ -36,7 +36,8 @@ function usefulness(
   peerId: string,
   score: number,
   confidence: number,
-  novelObjectWeight = 1
+  novelObjectWeight = 1,
+  forwardedResponseWeight = 0
 ): PeerUsefulnessEstimate {
   return {
     peer_id: peerId,
@@ -48,7 +49,7 @@ function usefulness(
     redundant_objects: 0,
     responsive_forwarded_origins: 0,
     novel_object_weight: novelObjectWeight,
-    forwarded_response_weight: 0,
+    forwarded_response_weight: forwardedResponseWeight,
     score,
     confidence
   };
@@ -387,6 +388,31 @@ describe('PeerRecoveryCoordinator', () => {
     coordinator.dispose();
   });
 
+  it('uses current connected peers with candidates as the usefulness comparison set', async () => {
+    const connectedPeers = ['already-connected-peer'];
+    let receivedComparisonPeerIds: readonly string[] = [];
+    const { coordinator } = createCoordinator({
+      getConnectedPeers: () => connectedPeers,
+      preferredTarget: 3,
+      discoverOnlinePeers: async () => ['candidate-a', 'candidate-b'],
+      getPeerUsefulnessEstimates: async (peerIds, comparisonPeerIds) => {
+        expect(peerIds).toEqual(['candidate-a', 'candidate-b']);
+        receivedComparisonPeerIds = comparisonPeerIds;
+        return [];
+      }
+    });
+
+    coordinator.notifyConnectivityChanged();
+    await flushMicrotasks();
+
+    expect(receivedComparisonPeerIds).toEqual([
+      'already-connected-peer',
+      'candidate-a',
+      'candidate-b'
+    ]);
+    coordinator.dispose();
+  });
+
   it('falls back to existing candidate order when usefulness estimation fails', async () => {
     const attempts: string[] = [];
     const errors: unknown[] = [];
@@ -448,6 +474,18 @@ describe('prioritizePeerCandidates', () => {
       estimates,
       { lastExplorationPeerId: 'new-peer-b' }
     )[0]).toBe('new-peer-a');
+  });
+
+  it('keeps FIND-responsive peers without object novelty in the exploration group', () => {
+    const ordered = prioritizePeerCandidates(
+      ['find-only-peer', 'object-novel-peer'],
+      [
+        usefulness('find-only-peer', 0.9, 0.9, 0, 2),
+        usefulness('object-novel-peer', 0.8, 0.8)
+      ]
+    );
+
+    expect(ordered[0]).toBe('find-only-peer');
   });
 
   it('keeps lower-scored candidates eligible after higher-scored candidates', () => {

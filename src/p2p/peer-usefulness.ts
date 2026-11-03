@@ -55,11 +55,14 @@ interface ActiveFindResponse {
 export function estimatePeerUsefulness(
   peerIds: readonly string[],
   observations: PeerUsefulnessObservations,
-  now = Date.now()
+  now = Date.now(),
+  comparisonPeerIds: readonly string[] = peerIds
 ): PeerUsefulnessEstimate[] {
   const activeObjects = getActiveObjectSupplies(observations.objectSupply ?? [], now);
+  const comparisonPeers = new Set([...comparisonPeerIds, ...peerIds]);
   const supplierCountByObject = new Map<string, number>();
   for (const object of activeObjects) {
+    if (!comparisonPeers.has(object.supplierPeerId)) continue;
     const suppliers = supplierCountByObject.get(object.objectId) ?? 0;
     supplierCountByObject.set(object.objectId, suppliers + 1);
   }
@@ -85,14 +88,21 @@ export function estimatePeerUsefulness(
     const objects = activeObjects.filter((object) => object.supplierPeerId === peerId);
     const objectIds = new Set(objects.map((object) => object.objectId));
     const authorWeights = new Map<string, number>();
+    const novelAuthorWeights = new Map<string, number>();
     let redundantObjects = 0;
     for (const object of objects) {
-      const suppliers = supplierCountByObject.get(object.objectId) ?? 1;
-      if (suppliers > 1) redundantObjects += 1;
-      const weight = object.weight / suppliers;
       authorWeights.set(
         object.author,
-        Math.min(MAX_AUTHOR_REACH_WEIGHT, (authorWeights.get(object.author) ?? 0) + weight)
+        Math.min(MAX_AUTHOR_REACH_WEIGHT, (authorWeights.get(object.author) ?? 0) + object.weight)
+      );
+      const suppliers = supplierCountByObject.get(object.objectId) ?? 1;
+      if (suppliers > 1) {
+        redundantObjects += 1;
+        continue;
+      }
+      novelAuthorWeights.set(
+        object.author,
+        Math.min(MAX_AUTHOR_REACH_WEIGHT, (novelAuthorWeights.get(object.author) ?? 0) + object.weight)
       );
     }
 
@@ -106,16 +116,13 @@ export function estimatePeerUsefulness(
       );
     }
 
-    const novelObjectWeight = Math.min(MAX_OBJECT_REACH_WEIGHT, sum(authorWeights.values()));
+    const novelObjectWeight = Math.min(MAX_OBJECT_REACH_WEIGHT, sum(novelAuthorWeights.values()));
     const forwardedResponseWeight = Math.min(MAX_FIND_REACH_WEIGHT, sum(findWeightsByOrigin.values()));
     const objectEvidence = novelObjectWeight;
-    const findEvidence = forwardedResponseWeight * 0.25;
-    const evidence = objectEvidence + findEvidence;
-    const independentEvidence = Math.max(objectEvidence, findEvidence);
-    const confidence = clamp(1 - Math.exp(-independentEvidence / 3), 0, 1);
+    const confidence = clamp(1 - Math.exp(-objectEvidence / 3), 0, 1);
     const score = Math.min(
       MAX_SCORE,
-      0.5 + (MAX_SCORE - 0.5) * (evidence / (evidence + 2))
+      0.5 + (MAX_SCORE - 0.5) * (objectEvidence / (objectEvidence + 2))
     );
 
     return {
@@ -137,6 +144,7 @@ export function estimatePeerUsefulness(
 
 export async function estimateLocalPeerUsefulness(
   peerIds: readonly string[],
+  comparisonPeerIds: readonly string[] = peerIds,
   now = Date.now()
 ): Promise<PeerUsefulnessEstimate[]> {
   const [connections, findForwarding, objectSupply] = await Promise.all([
@@ -144,7 +152,7 @@ export async function estimateLocalPeerUsefulness(
     loadFindForwardingObservations(now),
     loadObjectSupplyObservations(now)
   ]);
-  return estimatePeerUsefulness(peerIds, { connections, findForwarding, objectSupply }, now);
+  return estimatePeerUsefulness(peerIds, { connections, findForwarding, objectSupply }, now, comparisonPeerIds);
 }
 
 function getIdentityEvidence(

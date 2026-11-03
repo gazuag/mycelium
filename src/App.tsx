@@ -399,7 +399,12 @@ function App() {
   const [, setDmServiceRevision] = useState(0);
   const dmOutboxIntervalRef = useRef<number | null>(null);
   const findRequestCacheRef = useRef<Map<string, number>>(new Map());
-  const findRequestRouteRef = useRef<Map<string, { upstreamPeer: string; expiresAt: number }>>(new Map());
+  const findRequestRouteRef = useRef<Map<string, {
+    upstreamPeer: string;
+    expiresAt: number;
+    childPeer?: string;
+    failureTimeout?: number;
+  }>>(new Map());
   const findAggregationRef = useRef<Map<string, { aggregation: FindAggregation; requestedObjectIds: Set<string>; upstreamPeer: string; origin: string; expiresAt: string }>>(new Map());
   const waitingPeerIntervalsRef = useRef<Map<string, number>>(new Map());
   const peerElectionFallbackTimersRef = useRef<Map<string, number>>(new Map());
@@ -955,16 +960,15 @@ function App() {
   };
 
   const updateContactStateAndPersist = (peerId: string, updates: Partial<Contact>) => {
-    setContacts((prev) => {
-      const next = prev.map((contact) => (contact.fingerprint === peerId ? { ...contact, ...updates } : contact));
-      const updated = next.find((contact) => contact.fingerprint === peerId);
-      if (updated) {
-        void saveContact(updated).catch((error: unknown) => {
-          addLog(`Failed to persist contact state for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      }
-      return next;
-    });
+    const contact = contactsRef.current.find((candidate) => candidate.fingerprint === peerId);
+    if (contact) {
+      void saveContact({ ...contact, ...updates }).catch((error: unknown) => {
+        addLog(`Failed to persist contact state for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    setContacts((prev) => prev.map((candidate) => (
+      candidate.fingerprint === peerId ? { ...candidate, ...updates } : candidate
+    )));
   };
 
   const resolvePostParentFromPeers: PostParentResolver = async (objectId) => {
@@ -1139,6 +1143,44 @@ function App() {
     void retryDeferredNotifications();
   }, [identity, contacts, webPushNotificationPreferences]);
 
+  const setFindRequestRoute = (
+    requestId: string,
+    upstreamPeer: string,
+    expiresAt: number,
+    childPeer?: string
+  ) => {
+    deleteFindRequestRoute(requestId);
+    const route: {
+      upstreamPeer: string;
+      expiresAt: number;
+      childPeer?: string;
+      failureTimeout?: number;
+    } = { upstreamPeer, expiresAt, ...(childPeer ? { childPeer } : {}) };
+    findRequestRouteRef.current.set(requestId, route);
+    if (childPeer) {
+      route.failureTimeout = window.setTimeout(() => {
+        if (findRequestRouteRef.current.get(requestId) !== route) return;
+        findRequestRouteRef.current.delete(requestId);
+        route.failureTimeout = undefined;
+        void recordFindForwarding(requestId, upstreamPeer, childPeer, 'failed')
+          .catch((error: unknown) => addLog(`Failed to record FIND forwarding timeout: ${error instanceof Error ? error.message : String(error)}`));
+      }, Math.max(0, expiresAt - Date.now()));
+    }
+  };
+
+  const clearFindRequestRouteFailureTimeout = (requestId: string, childPeer: string) => {
+    const route = findRequestRouteRef.current.get(requestId);
+    if (route?.childPeer !== childPeer || route.failureTimeout === undefined) return;
+    window.clearTimeout(route.failureTimeout);
+    route.failureTimeout = undefined;
+  };
+
+  const deleteFindRequestRoute = (requestId: string) => {
+    const route = findRequestRouteRef.current.get(requestId);
+    if (route?.failureTimeout !== undefined) window.clearTimeout(route.failureTimeout);
+    findRequestRouteRef.current.delete(requestId);
+  };
+
   const handleObjectPacket = async (peerId: string, packet: ObjectPacket) => {
     const store = objectStoreRef.current;
     if (!store) return;
@@ -1146,7 +1188,11 @@ function App() {
     for (const [requestId, route] of findRequestRouteRef.current.entries()) {
       if (route.expiresAt <= now) {
         addLog(`PHASE6 ROUTE CLEANUP requestId=${requestId} upstream=${route.upstreamPeer} expiresAt=${route.expiresAt} now=${now}`);
-        findRequestRouteRef.current.delete(requestId);
+        if (route.childPeer) {
+          void recordFindForwarding(requestId, route.upstreamPeer, route.childPeer, 'failed')
+            .catch((error: unknown) => addLog(`Failed to record FIND forwarding timeout: ${error instanceof Error ? error.message : String(error)}`));
+        }
+        deleteFindRequestRoute(requestId);
       }
     }
     for (const [seenRequestId, expiresAt] of findRequestCacheRef.current.entries()) {
@@ -1251,7 +1297,7 @@ function App() {
             if (findAggregationRef.current.get(requestId)?.aggregation === aggregation) {
               findAggregationRef.current.delete(requestId);
             }
-            findRequestRouteRef.current.delete(requestId);
+            deleteFindRequestRoute(requestId);
             findRequestCacheRef.current.delete(requestId);
             addLog(`PHASE6 AGG CLEANUP AFTER DELETE requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
           }
@@ -1263,7 +1309,7 @@ function App() {
           origin: typeof packet.payload.origin === 'string' ? packet.payload.origin : packet.sender,
           expiresAt
         });
-        findRequestRouteRef.current.set(requestId, { upstreamPeer: peerId, expiresAt: expiresAtMs });
+        setFindRequestRoute(requestId, peerId, expiresAtMs);
         addLog(`PHASE 6 aggregation state created: requestId=${requestId} upstream=${peerId} requested=${requestedObjectIds.length}`);
         addLog(`PHASE6 AGG CREATED local=${identityRef.current?.id ?? 'unknown'} requestId=${requestId} upstream=${peerId} children=${nextPeers.join(',') || 'none'} requested=${requestedObjectIds.length} localHits=${localObjects.length}`);
         addLog(`PHASE6 AGG STORED requestId=${requestId} aggregationPresent=${findAggregationRef.current.has(requestId)} routePresent=${findRequestRouteRef.current.has(requestId)} cachePresent=${findRequestCacheRef.current.has(requestId)}`);
@@ -1317,7 +1363,7 @@ function App() {
       if (typeof packet.payload?.requestId === 'string' && typeof packet.payload?.expiresAt === 'string') {
         const expiresAtMs = Date.parse(packet.payload.expiresAt);
         if (!Number.isNaN(expiresAtMs) && now < expiresAtMs) {
-          findRequestRouteRef.current.set(packet.payload.requestId, { upstreamPeer: peerId, expiresAt: expiresAtMs });
+          setFindRequestRoute(packet.payload.requestId, peerId, expiresAtMs);
         }
       }
       const handled = await respondToFindPacket(
@@ -1344,7 +1390,8 @@ function App() {
               response.payload.has_more
             );
             if (!shouldRetainFindRequestRoute(peerId, route, aggregationState)) {
-              findRequestRouteRef.current.delete(response.payload.requestId);
+              clearFindRequestRouteFailureTimeout(response.payload.requestId, peerId);
+              deleteFindRequestRoute(response.payload.requestId);
             } else {
               addLog(`OBJECT FIND_RESPONSE route retained: requestId=${response.payload.requestId} sender=${peerId} remainingChildren=${aggregationState?.aggregation.pendingChildren().join(', ') || 'none'}`);
             }
@@ -1376,7 +1423,7 @@ function App() {
               query?.order === 'created_at_desc' && query.limit !== undefined ? true : undefined,
               query?.order === 'created_at_desc' && query.limit !== undefined ? false : undefined
             );
-            findRequestRouteRef.current.delete(requestId);
+            deleteFindRequestRoute(requestId);
             await objectTransportRef.current?.send(fromPeer, emptyResponse);
             return;
           }
@@ -1392,7 +1439,7 @@ function App() {
             expiresAt,
             query
           );
-          findRequestRouteRef.current.set(requestId, { upstreamPeer: fromPeer, expiresAt: Date.parse(expiresAt) });
+          setFindRequestRoute(requestId, fromPeer, Date.parse(expiresAt), nextPeer);
           addLog(`OBJECT FIND forwarded: requestId=${requestId} ${fromPeer} -> ${nextPeer} ttl=${ttl} expiresAt=${expiresAt}`);
           try {
             await objectTransportRef.current?.send(nextPeer, forwardedPacket);
@@ -1401,7 +1448,7 @@ function App() {
           } catch (error) {
             void recordFindForwarding(requestId, fromPeer, nextPeer, 'failed')
               .catch((recordError: unknown) => addLog(`Failed to record FIND forwarding failure: ${recordError instanceof Error ? recordError.message : String(recordError)}`));
-            findRequestRouteRef.current.delete(requestId);
+            deleteFindRequestRoute(requestId);
             findRequestCacheRef.current.delete(requestId);
             throw error;
           }
@@ -1452,6 +1499,7 @@ function App() {
       addLog(`PHASE6 RESPONSE PATH CHECK requestId=${requestId ?? 'unknown'} aggregationPresent=${Boolean(aggregationState)} routePresent=${Boolean(route)} routeUpstream=${route?.upstreamPeer ?? 'none'} sender=${peerId}`);
       addLog(`OBJECT FIND_RESPONSE received from ${peerId}: requestId=${requestId ?? 'unknown'} route=${route?.upstreamPeer ?? 'none'}`);
       if (route && route.upstreamPeer !== peerId) {
+        clearFindRequestRouteFailureTimeout(requestId!, peerId);
         void recordFindForwarding(requestId!, route.upstreamPeer, peerId, 'responded')
           .catch((error: unknown) => addLog(`Failed to record FIND forwarding response: ${error instanceof Error ? error.message : String(error)}`));
         const shouldRetainRoute = shouldRetainFindRequestRoute(peerId, route, aggregationState);
@@ -1490,7 +1538,7 @@ function App() {
             packet.payload.has_more
           );
         if (!shouldRetainRoute) {
-          findRequestRouteRef.current.delete(requestId!);
+          deleteFindRequestRoute(requestId!);
         }
         addLog(`OBJECT FIND_RESPONSE relayed: requestId=${requestId} ${peerId} -> ${route.upstreamPeer}`);
         await objectTransportRef.current?.send(route.upstreamPeer, relayed);
@@ -2130,6 +2178,13 @@ function App() {
     peerCapacityRef.current?.release(peerId);
   };
 
+  const recordPeerAttemptFailure = (peerId: string) => {
+    const failureId = peerAttemptObservationIdsRef.current.get(peerId);
+    if (!failureId) return;
+    void recordConnectionFailure(peerId, failureId)
+      .catch((error: unknown) => addLog(`Failed to record connection attempt failure for ${peerId}: ${error instanceof Error ? error.message : String(error)}`));
+  };
+
   const settlePeerRecoveryAttempt = (peerId: string, connected: boolean) => {
     const resolve = peerRecoveryAttemptResolversRef.current.get(peerId);
     peerRecoveryAttemptResolversRef.current.delete(peerId);
@@ -2178,15 +2233,11 @@ function App() {
     activePeerAttemptsRef.current.add(peerId);
     peerAttemptObservationIdsRef.current.set(peerId, newConnectionAttemptObservationId());
     peerAttemptTimeoutsRef.current.set(peerId, window.setTimeout(() => {
-      const failureId = peerAttemptObservationIdsRef.current.get(peerId);
       peerAttemptTimeoutsRef.current.delete(peerId);
       activePeerAttemptsRef.current.delete(peerId);
       peerCapacityRef.current?.release(peerId);
       addLog(`Peer ${peerId} connection attempt timed out after ${Math.round(timeoutMs / 1000)} seconds`);
-      if (failureId) {
-        void recordConnectionFailure(peerId, failureId)
-          .catch((error: unknown) => addLog(`Failed to record connection attempt failure for ${peerId}: ${error instanceof Error ? error.message : String(error)}`));
-      }
+      recordPeerAttemptFailure(peerId);
       settlePeerRecoveryAttempt(peerId, false);
       const manager = peerManagersRef.current[peerId];
       if (manager && !manager.isDataChannelOpen()) {
@@ -2261,6 +2312,7 @@ function App() {
             const currentManager = peerManagersRef.current[peer];
             if (currentManager !== manager || currentManager.isDataChannelOpen()) return;
             addLog(`Peer ${peer} remained ICE-disconnected; replacing its connection manager`);
+            recordPeerAttemptFailure(peer);
             settlePeerRecoveryAttempt(peer, false);
             closeAndRemoveAuthenticatedPeerManager(peer, currentManager);
             peerRecoveryRef.current?.notifyConnectivityChanged();
@@ -2560,6 +2612,7 @@ function App() {
         clearPeerDisconnectedTimeout(peer);
         clearPeerWaitingInterval(peer);
         clearPeerElectionFallback(peer);
+        recordPeerAttemptFailure(peer);
         settlePeerRecoveryAttempt(peer, false);
         feedDisconnectSubscribersRef.current.forEach((subscriber) => subscriber(peer));
         for (const [requestId, state] of findAggregationRef.current.entries()) {
@@ -2583,6 +2636,7 @@ function App() {
       (peer: string, event: string) => {
         if (!isCurrentManager(peer)) return;
         if (/connection=failed|(?:offer|answer|ICE).*(?:failed|error|timeout)/i.test(event)) {
+          recordPeerAttemptFailure(peer);
           addLog(redactNetworkAddresses(`Peer ${peer} connection failed: ${event}`));
         }
         addLog(redactNetworkAddresses(`Peer ${peer}: ${event}`));
@@ -2651,11 +2705,8 @@ function App() {
       return;
     }
     void manager.createOffer(peerId, socket).catch((error: unknown) => {
-      const failureId = peerAttemptObservationIdsRef.current.get(peerId);
-      if (failureId) {
-        void recordConnectionFailure(peerId, failureId)
-          .catch((recordError: unknown) => addLog(`Failed to record connection attempt failure for ${peerId}: ${recordError instanceof Error ? recordError.message : String(recordError)}`));
-      }
+      if (peerManagersRef.current[peerId] !== manager) return;
+      recordPeerAttemptFailure(peerId);
       settlePeerRecoveryAttempt(peerId, false);
       addLog(`Peer ${peerId} connection failed: ${error instanceof Error ? error.message : String(error)}`);
       if (peerManagersRef.current[peerId] === manager && !manager.isDataChannelOpen()) {
@@ -2807,7 +2858,8 @@ function App() {
           isValidPeerFingerprint(contact.fingerprint) && typeof contact.lastSeen === 'string'
         ))
         .map((contact) => ({ peerId: contact.fingerprint, lastConnectedAt: contact.lastSeen })),
-      getPeerUsefulnessEstimates: estimateLocalPeerUsefulness,
+      getPeerUsefulnessEstimates: (peerIds, comparisonPeerIds) =>
+        estimateLocalPeerUsefulness(peerIds, comparisonPeerIds),
       onPeerUsefulnessError: (error) => {
         addLog(`Peer usefulness estimate unavailable; retaining existing candidate order: ${error instanceof Error ? error.message : String(error)}`);
       },
@@ -3067,6 +3119,8 @@ function App() {
             try {
               await manager.handleSignal(message, socket);
             } catch (error) {
+              if (peerManagersRef.current[peerId] !== manager) return;
+              recordPeerAttemptFailure(peerId);
               settlePeerRecoveryAttempt(peerId, false);
               addLog(`Peer ${peerId} signalling negotiation failed: ${error instanceof Error ? error.message : String(error)}`);
               closeAndRemoveAuthenticatedPeerManager(peerId, manager);

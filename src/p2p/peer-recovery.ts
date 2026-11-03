@@ -10,7 +10,10 @@ export interface PeerRecoveryOptions {
   readonly getPendingPeerIds?: () => readonly string[];
   readonly getPreviouslyConnectedPeers: () => readonly PreviouslyConnectedPeer[];
   readonly discoverOnlinePeers: () => Promise<readonly string[]>;
-  readonly getPeerUsefulnessEstimates?: (peerIds: readonly string[]) => Promise<readonly PeerUsefulnessEstimate[]>;
+  readonly getPeerUsefulnessEstimates?: (
+    peerIds: readonly string[],
+    comparisonPeerIds: readonly string[]
+  ) => Promise<readonly PeerUsefulnessEstimate[]>;
   readonly onPeerUsefulnessError?: (error: unknown) => void;
   readonly isAttemptInProgress: (peerId: string) => boolean;
   readonly attemptPeer: (peerId: string) => Promise<boolean>;
@@ -65,7 +68,7 @@ export function prioritizePeerCandidates(
   const hasCredibleUsefulness = (estimate: PeerUsefulnessEstimate | undefined): estimate is PeerUsefulnessEstimate => (
     estimate !== undefined
     && estimate.confidence >= MIN_USEFULNESS_SELECTION_CONFIDENCE
-    && (estimate.novel_object_weight > 0 || estimate.forwarded_response_weight > 0)
+    && estimate.novel_object_weight > 0
   );
   const credibleCandidates = uniqueCandidates.filter((peerId) => hasCredibleUsefulness(estimatesByPeer.get(peerId)));
   if (credibleCandidates.length === 0) return uniqueCandidates;
@@ -103,7 +106,7 @@ function rotateAfterPeer(peerIds: readonly string[], previousPeerId?: string): s
 function isCredibleUsefulness(estimate: PeerUsefulnessEstimate | undefined): estimate is PeerUsefulnessEstimate {
   return estimate !== undefined
     && estimate.confidence >= MIN_USEFULNESS_SELECTION_CONFIDENCE
-    && (estimate.novel_object_weight > 0 || estimate.forwarded_response_weight > 0);
+  && estimate.novel_object_weight > 0;
 }
 
 export class PeerConnectionCapacity {
@@ -257,7 +260,14 @@ export class PeerRecoveryCoordinator {
           let orderedCandidates = prioritizedOnlinePeers;
           if (this.options.getPeerUsefulnessEstimates && orderedCandidates.length > 1) {
             try {
-              const estimates = await this.options.getPeerUsefulnessEstimates(orderedCandidates);
+              const comparisonPeerIds = [...new Set([
+                ...this.options.getConnectedPeers(),
+                ...orderedCandidates
+              ])];
+              const estimates = await this.options.getPeerUsefulnessEstimates(
+                orderedCandidates,
+                comparisonPeerIds
+              );
               const estimatesByPeer = new Map(estimates.map((estimate) => [estimate.peer_id, estimate]));
               candidateGroups = {
                 explorationPeerIds: new Set(orderedCandidates.filter((peerId) => (
