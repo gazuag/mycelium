@@ -170,6 +170,15 @@ evidence category to avoid summing correlated object and FIND evidence.
 - Set `VITE_METERED_APP_DOMAIN` to the Metered app hostname when building. An optional `VITE_EXTRA_SIGNAL_ORIGIN` may add one additional `wss://` origin to `connect-src`.
 - To enable the optional sender client, set `VITE_WEB_PUSH_PUBLIC_KEY` to the VAPID public key and `VITE_WEB_PUSH_SENDER_URL` to the HTTPS sender origin before building. The generated CSP adds only that exact sender origin. Leave the sender URL unset to keep the client sending path unavailable.
 
+## Deploying the frontend to Cloudflare Workers
+
+- `wrangler.toml` configures the existing Vite output in `dist` as static assets with SPA fallback and enables Workers Preview URLs. It intentionally declares no production route or custom domain; `unfilter.ing` remains dashboard-managed.
+- Use `npm run build` as the Workers Build command, `npx wrangler deploy` as the production deploy command, and `npx wrangler preview` as the Preview command. The corresponding local scripts are `npm run deploy` and `npm run deploy:preview`.
+- Wrangler 4.135.0 and later requires Node.js 22 or later; configure the Workers Build runtime and local deployment environment accordingly.
+- Configure `main` as the production branch and enable Preview builds for other branches, including `dev`. Complete Cloudflare's one-time Worker Previews setup before relying on Preview builds for an existing Worker.
+- Set `VITE_METERED_APP_DOMAIN` and `VITE_METERED_API_KEY` as Workers Build variables for both production and Preview builds. They are inputs to Vite and are embedded in the generated frontend bundle; Wrangler runtime variables do not replace them.
+- Preview deployments are independently addressable through their Cloudflare `workers.dev` Preview URLs. This repository does not configure `dev.unfilter.ing`; if that hostname is desired, enable it for Preview traffic only in the Cloudflare dashboard, without enabling it for production.
+
 ## Server configuration
 
 - The frontend defaults to `wss://discover.unfilter.ing:8443` for all server communication (signalling and discovery).
