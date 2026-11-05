@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { SettingsPage } from './SettingsPage';
 import { DEFAULT_WEB_PUSH_NOTIFICATION_PREFERENCES } from '../services/web-push-notifications';
+import packageJson from '../../package.json';
 
 describe('SettingsPage', () => {
   it('separates settings from diagnostics and keeps Add Peer in the Settings panel', () => {
@@ -55,6 +56,7 @@ describe('SettingsPage', () => {
     expect(markup).toContain('so they can send notifications to this browser');
     expect(markup).not.toContain('is not shown or shared');
     expect(markup).toContain('<h3>Diagnostics</h3>');
+    expect(markup).toContain(`<p class="note">${packageJson.version}</p>`);
     expect(markup).toContain('>Export Local Observations</button>');
     expect(markup).toContain('Copy fingerprint');
     expect(markup).toContain('my-peer-id');
