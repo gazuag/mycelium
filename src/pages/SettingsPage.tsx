@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import packageJson from '../../package.json';
 import type { LogCategory, LogEntry } from '../App';
 import {
   BYTES_PER_MB,
@@ -729,6 +730,11 @@ export function SettingsPage({
       <div className="card">
         <section>
           <h3>Diagnostics</h3>
+        </section>
+        <section>
+          <h4>Application</h4>
+          <p><strong>Version</strong></p>
+          <p className="note">{packageJson.version}</p>
         </section>
         <section>
           <h4>Identity</h4>
