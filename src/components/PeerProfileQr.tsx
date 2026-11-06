@@ -29,7 +29,7 @@ export function PeerProfileQr({ peerId, displayName }: PeerProfileQrProps) {
 
     void import('qrcode').then(({ default: QRCode }) => QRCode.toDataURL(url, {
       errorCorrectionLevel: 'M',
-      margin: 2,
+      margin: 4,
       width: 240
     })).then((dataUrl) => {
       if (active) setQrCode(dataUrl);
