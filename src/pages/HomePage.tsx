@@ -11,6 +11,7 @@ import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerpr
 import { activeMentionAt, insertMention, mentionsPresentInText, type ActiveMention } from '../utils/postMentions';
 import type { PopularPeerWithIdentityProfile } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
 import { resizeTextareaToRows } from '../utils/textarea';
 import {
@@ -35,6 +36,7 @@ interface HomePageProps {
   canCreatePost: boolean;
   onAuthorClick: (peerId: string) => void;
   myPeerId?: string;
+  myProfilePicture?: IdentityProfilePicture | null;
   myDisplayName?: string;
   onOpenPost?: (postId: string) => void;
   onLike: (objectId: string) => void;
@@ -63,6 +65,7 @@ export function HomePage({
   canCreatePost,
   onAuthorClick,
   myPeerId,
+  myProfilePicture,
   myDisplayName = '',
   onOpenPost,
   onLike,
@@ -229,7 +232,7 @@ export function HomePage({
             aria-label="View your profile"
             disabled={!myPeerId}
           >
-            <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" />
+            <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" profilePicture={myProfilePicture} />
           </button>
           <div className="markdown-compose-field">
             <MarkdownComposer
@@ -379,6 +382,9 @@ export function HomePage({
                 authorDisplayName={authorDisplayName}
                 authorId={matchingContact?.fingerprint ?? authorFingerprint}
                 authorOnline={matchingContact?.online === true}
+                authorProfilePicture={isOwnPost
+                  ? myProfilePicture ?? undefined
+                  : matchingContact?.profilePicture ?? matchingContact?.identityObject?.payload.profile_picture}
                 onAuthorClick={onAuthorClick}
                 onOpenPost={onOpenPost ? () => onOpenPost(objectId) : undefined}
                 onLike={() => onLike(objectId)}

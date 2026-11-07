@@ -15,6 +15,7 @@ import {
   type IdentityObjectPayload
 } from './identity-object';
 import type { ObjectIdentity } from './types';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -72,6 +73,54 @@ describe('signed identity objects', () => {
     };
 
     expect(await validateIdentityObject(tampered)).toBe(false);
+  });
+
+  it('signs the profile picture as part of the identity payload', async () => {
+    const identity = await createTestIdentity();
+    const picture: IdentityProfilePicture = {
+      mime_type: 'image/webp',
+      width: 256,
+      height: 256,
+      data: 'AQID'
+    };
+    const object = await createSignedIdentityObject({
+      ...await createOptions(identity),
+      profile_picture: picture
+    }, identity.objectIdentity);
+
+    expect(await validateIdentityObject(object)).toBe(true);
+    expect(await validateIdentityObject({
+      ...object,
+      payload: { ...(object.payload as IdentityObjectPayload), profile_picture: { ...picture, data: 'BAUG' } }
+    })).toBe(false);
+  });
+
+  it('keeps a profile loadable when its signed optional picture data is invalid', async () => {
+    const identity = await createTestIdentity();
+    const binding = await createEncryptionKeyBinding({
+      publicKey: identity.publicKey,
+      privateKey: identity.privateKey,
+      encryptionPublicKey: identity.encryptionPublicKey
+    });
+    const object = await createSignedObject({
+      object_type: 'mycelium.identity',
+      created_at: '2026-10-17T00:00:00.000Z',
+      payload: {
+        display_name: 'Alice',
+        bio: 'A test identity',
+        encryption_public_key: identity.encryptionPublicKey,
+        encryption_key_binding: {
+          signing_public_key: binding.signing_public_key,
+          encryption_public_key: binding.encryption_public_key,
+          created_at: binding.created_at,
+          signature: binding.signature
+        },
+        profile_picture: { mime_type: 'image/svg+xml', data: '<svg/>', width: 256, height: 256 }
+      },
+      replication_policy: {}
+    }, identity.objectIdentity);
+
+    expect(await validateIdentityObject(object)).toBe(true);
   });
 
   it('rejects a binding whose signature was made by a different signing key', async () => {

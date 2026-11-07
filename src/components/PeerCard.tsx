@@ -30,7 +30,7 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
             type="button"
             aria-label={`View ${displayName}'s profile`}
           >
-            <IdentityAvatar seed={contact.fingerprint} size={36} alt="" online={contact.online === true} />
+            <IdentityAvatar seed={contact.fingerprint} size={36} alt="" online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
           </button>
           <div className="peer-label-block">
             <strong>

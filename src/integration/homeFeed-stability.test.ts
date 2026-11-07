@@ -4,7 +4,7 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 const SOAK_DURATION_MS = 60_000;
 const POST_INTERVAL_MS = 8_000;
 const POST_COUNT = 5;
-const IDENTITY_PATTERN = /(?:[a-f\d]{2}:){7}[a-f\d]{2}/i;
+const IDENTITY_PATTERN = /^(?:[a-f\d]{2}:){7}[a-f\d]{2}$/i;
 
 interface FeedEntry {
   id: string;
@@ -24,16 +24,15 @@ interface InjectionPosition {
 }
 
 async function waitForSignalling(page: Page) {
-  await expect(
-    page.getByRole('button', { name: /Connected to signalling server/ })
-  ).toBeVisible({ timeout: 60_000 });
-  if (!(await page.getByRole('heading', { name: 'Connection status', exact: true }).count())) {
-    await page.getByRole('button', { name: 'Diagnostics', exact: true }).click({ force: true });
-  }
+  const menuToggle = page.getByRole('button', { name: 'Open main menu', exact: true });
+  if (await menuToggle.count()) await menuToggle.click();
+  await expect(page.getByText(/Connected to signalling server and/)).toBeVisible({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click({ force: true });
   await expect(page.getByRole('heading', { name: 'Connection status', exact: true })).toBeVisible();
   await expect(page.getByText('Signal: connected', { exact: true })).toBeVisible();
-  const text = await page.locator('body').innerText();
-  const identity = text.match(IDENTITY_PATTERN)?.[0];
+  const identity = (await page.locator('p.note.monospace').allTextContents())
+    .map((text) => text.trim())
+    .find((text) => IDENTITY_PATTERN.test(text));
   expect(identity, 'new peer identity fingerprint should be visible in diagnostics').toBeTruthy();
   return identity!;
 }
@@ -160,7 +159,8 @@ function assertInjectionChronology(
 async function createPeer(context: BrowserContext, label: string) {
   const page = await context.newPage();
   await page.goto('/');
-  await page.getByRole('button', { name: 'Create New Identity', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Welcome! Pick your name!' }).waitFor();
+  await page.getByRole('button', { name: "I'll explore on my own", exact: true }).click();
   const fingerprint = await waitForSignalling(page);
   console.log(`${label}: created identity ${fingerprint}`);
   return { label, page, fingerprint };

@@ -172,6 +172,8 @@ export function ProfilePage({
                   (postAuthorContact?.online === true && !isProfileAuthor)
                   || (isProfileAuthor && !isOwnProfile && contact.online === true)
                 }
+                authorProfilePicture={authorContact?.profilePicture
+                  ?? authorContact?.identityObject?.payload.profile_picture}
                 onAuthorClick={() => onAuthorClick(post.authorFingerprint)}
                 onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                 onLike={() => onLike(post.object.object_id)}

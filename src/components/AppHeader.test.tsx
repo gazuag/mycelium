@@ -19,6 +19,7 @@ function renderHeader(contacts: Contact[]) {
       syncStatus="synced"
       onPeerProfileClick={() => {}}
       onHomeClick={() => {}}
+      onHelpClick={() => {}}
     />
   );
 }
@@ -39,5 +40,10 @@ describe('AppHeader connected peer names', () => {
   it('falls back to the generated handle when no display name is available', () => {
     const markup = renderHeader([]);
     expect(markup).toContain(`class="peer-name-primary">${fingerprintToHumanName(peerId)}</span>`);
+  });
+
+  it('places a persistent Help control before the header connection indicator', () => {
+    const markup = renderHeader([]);
+    expect(markup.indexOf('help-center-trigger')).toBeLessThan(markup.indexOf('header-menu-toggle'));
   });
 });

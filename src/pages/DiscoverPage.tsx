@@ -8,6 +8,7 @@ import { PersonRow } from '../components/PersonRow';
 import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
 import type { PopularPeerWithIdentityProfile } from '../services/peer-discovery';
 import { useDmUnread } from '../hooks/useDmUnread';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 interface DiscoverPageProps {
   discoveryPosts: LocalPostView[];
@@ -17,6 +18,7 @@ interface DiscoverPageProps {
   popularPeers?: PopularPeerWithIdentityProfile[];
   initialTab?: 'posts' | 'people';
   myPeerId?: string;
+  myProfilePicture?: IdentityProfilePicture | null;
   myPublicKey?: string;
   myDisplayName?: string;
   onAuthorClick: (peerId: string) => void;
@@ -51,6 +53,7 @@ export function DiscoverPage({
   popularPeers = [],
   initialTab = 'posts',
   myPeerId,
+  myProfilePicture,
   myPublicKey,
   myDisplayName = '',
   onAuthorClick,
@@ -222,6 +225,9 @@ export function DiscoverPage({
                   authorDisplayName={authorDisplayName}
                   authorId={authorFingerprint}
                   authorOnline={matchedContact?.online === true}
+                  authorProfilePicture={isOwnPost
+                    ? myProfilePicture ?? undefined
+                    : matchedContact?.profilePicture ?? matchedContact?.identityObject?.payload.profile_picture}
                   onAuthorClick={() => onAuthorClick(authorFingerprint)}
                   onOpenPost={onOpenPost ? () => onOpenPost(post.object.object_id) : undefined}
                   onLike={() => onLike(post.object.object_id)}

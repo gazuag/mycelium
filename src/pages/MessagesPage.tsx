@@ -8,6 +8,7 @@ import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { PeerRecipientPicker, relationshipContacts } from '../components/PeerRecipientPicker';
 import { MarkdownPreview } from '../components/MarkdownContent';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 export { relationshipContacts } from '../components/PeerRecipientPicker';
 
@@ -15,6 +16,7 @@ interface MessagesPageProps {
   contacts: Contact[];
   myPublicKey: string;
   myPeerId: string;
+  myProfilePicture?: IdentityProfilePicture | null;
   conversations: ConversationSummary[];
   previews: Record<string, string>;
   loading: boolean;
@@ -61,6 +63,7 @@ export function MessagesPage({
   contacts,
   myPublicKey,
   myPeerId,
+  myProfilePicture,
   conversations,
   previews,
   loading,
@@ -261,7 +264,15 @@ export function MessagesPage({
                           ? `Open post mentioning you from ${name}${reply.read ? '' : ', unread'}`
                           : `Open reply from ${name} to your post${reply.read ? '' : ', unread'}`}
                       />
-                      <IdentityAvatar seed={reply.authorFingerprint} size={42} alt={name} online={contact?.online === true} />
+                      <IdentityAvatar
+                        seed={reply.authorFingerprint}
+                        size={42}
+                        alt={name}
+                        online={contact?.online === true}
+                        profilePicture={reply.authorFingerprint === myPeerId || reply.authorPublicKey === myPublicKey
+                          ? myProfilePicture
+                          : contact?.profilePicture ?? contact?.identityObject?.payload.profile_picture}
+                      />
                       <div className="message-row-content">
                         <strong className="reply-row-author">{name}</strong>
                         {isMention ? (
@@ -324,6 +335,7 @@ export function MessagesPage({
                       size={42}
                       alt={name}
                       online={contact?.online === true}
+                      profilePicture={contact?.profilePicture ?? contact?.identityObject?.payload.profile_picture}
                     />
                     <div className="message-row-content">
                       <strong>

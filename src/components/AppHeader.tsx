@@ -15,6 +15,7 @@ interface AppHeaderProps {
   myFingerprint?: string;
   onPeerProfileClick: (peerId: string) => void;
   onHomeClick: () => void;
+  onHelpClick: () => void;
 }
 
 export function AppHeader({
@@ -28,7 +29,8 @@ export function AppHeader({
   syncStatus,
   myFingerprint,
   onPeerProfileClick,
-  onHomeClick
+  onHomeClick,
+  onHelpClick
 }: AppHeaderProps) {
   const isGood = signallingStatus === 'connected';
   const isWarning = signallingStatus === 'connecting' || signallingStatus === 'reconnecting' || connectionStatus === 'signalling' || connectionStatus === 'connecting';
@@ -48,14 +50,26 @@ export function AppHeader({
           <BrandLogo variant="default" className="brand-logo app-brand-logo" size={32} />
           <p className="app-title">Mycelium - Private peer-to-peer social</p>
         </button>
-        <button
-          className={`icon-btn header-menu-toggle ${tone}`}
-          onClick={onToggleCollapse}
-          aria-label={collapsed ? 'Open main menu' : 'Close main menu'}
-          aria-expanded={!collapsed}
-        >
-          <span className="status-light" aria-hidden="true" />
-        </button>
+        <div className="app-header-actions">
+          <button
+            className="icon-btn help-center-trigger"
+            type="button"
+            onClick={onHelpClick}
+            aria-label="Open Help centre"
+            title="Help centre"
+            data-tour-target="help"
+          >
+            ?
+          </button>
+          <button
+            className={`icon-btn header-menu-toggle ${tone}`}
+            onClick={onToggleCollapse}
+            aria-label={collapsed ? 'Open main menu' : 'Close main menu'}
+            aria-expanded={!collapsed}
+          >
+            <span className="status-light" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className={`app-header-body ${collapsed ? 'collapsed' : ''}`}>

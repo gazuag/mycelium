@@ -35,17 +35,17 @@ function restoreNavigatorProperty(name: 'share' | 'clipboard', descriptor: Prope
   }
 }
 
-async function clickShareButton() {
-  await clickShareButtonFor('Alice');
-}
-
-async function clickShareButtonFor(name: string) {
-  const button = container.querySelector<HTMLButtonElement>(`[aria-label="Share ${name}'s profile"]`);
+async function clickButton(selector: string) {
+  const button = container.querySelector<HTMLButtonElement>(selector);
   expect(button).not.toBeNull();
   await act(async () => {
     button!.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+async function renderProfile(contact = profile) {
+  await act(async () => root.render(<ProfileHeader contact={contact} showActions={false} />));
 }
 
 beforeEach(() => {
@@ -69,27 +69,28 @@ afterEach(async () => {
 });
 
 describe('ProfileHeader sharing', () => {
-  it('shares the profile name, description, and canonical profile URL', async () => {
+  it('uses native sharing with the profile identity and canonical URL', async () => {
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('share', share);
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
+    await renderProfile();
 
-    await clickShareButton();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
 
     expect(share).toHaveBeenCalledWith({
       title: 'Alice',
       text: 'Check out this profile on Mycelium',
       url: createPeerAddUrl(profile.fingerprint, window.location.origin)
     });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('shares an own profile using its generated Mycelium handle', async () => {
     const ownProfile = { ...profile, displayName: undefined };
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('share', share);
-    await act(async () => root.render(<ProfileHeader contact={ownProfile} showActions={false} />));
+    await renderProfile(ownProfile);
 
-    await clickShareButtonFor(fingerprintToHumanName(ownProfile.fingerprint));
+    await clickButton(`[aria-label="Share ${fingerprintToHumanName(ownProfile.fingerprint)}'s profile"]`);
 
     expect(share).toHaveBeenCalledWith({
       title: fingerprintToHumanName(ownProfile.fingerprint),
@@ -98,61 +99,135 @@ describe('ProfileHeader sharing', () => {
     });
   });
 
-  it('copies the canonical URL when native sharing is unavailable', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    setNavigatorProperty('clipboard', { writeText });
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
+  it('opens the custom share popover when native sharing is unavailable', async () => {
+    await renderProfile();
 
-    await clickShareButton();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
 
-    expect(writeText).toHaveBeenCalledWith(createPeerAddUrl(profile.fingerprint, window.location.origin));
-    expect(container.textContent).toContain('Profile link copied.');
+    expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).not.toBeNull();
+    expect(container.textContent).toContain('Alice');
+    expect(container.textContent).toContain('Check out this profile on Mycelium');
+    expect(container.querySelector('.share-popover-url')?.textContent)
+      .toBe(createPeerAddUrl(profile.fingerprint, window.location.origin));
   });
 
-  it('does not fall back to copying when native sharing is cancelled', async () => {
+  it('copies the profile link and confirms success', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setNavigatorProperty('clipboard', { writeText });
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+    await clickButton('.share-popover-copy');
+
+    expect(writeText).toHaveBeenCalledWith(createPeerAddUrl(profile.fingerprint, window.location.origin));
+    expect(container.textContent).toContain('Link copied.');
+  });
+
+  it('provides a selectable link when clipboard access is unavailable', async () => {
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+    await clickButton('.share-popover-copy');
+
+    expect(container.querySelector<HTMLInputElement>('.share-popover-manual-url')?.value)
+      .toBe(createPeerAddUrl(profile.fingerprint, window.location.origin));
+  });
+
+  it('provides a selectable link when clipboard access fails', async () => {
+    setNavigatorProperty('clipboard', { writeText: vi.fn().mockRejectedValue(new Error('Denied')) });
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+    await clickButton('.share-popover-copy');
+
+    expect(container.querySelector<HTMLInputElement>('.share-popover-manual-url')?.value)
+      .toBe(createPeerAddUrl(profile.fingerprint, window.location.origin));
+    expect(container.textContent).toContain('Copying is unavailable.');
+  });
+
+  it('offers email and message actions containing the profile URL', async () => {
+    const url = createPeerAddUrl(profile.fingerprint, window.location.origin)!;
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+
+    const email = container.querySelector<HTMLAnchorElement>('.share-popover-destinations a[href^="mailto:"]');
+    const message = container.querySelector<HTMLAnchorElement>('.share-popover-destinations a[href^="sms:"]');
+    expect(decodeURIComponent(email?.getAttribute('href') ?? '')).toContain(url);
+    expect(decodeURIComponent(message?.getAttribute('href') ?? '')).toContain(url);
+    expect(email?.getAttribute('href')).toContain('subject=');
+  });
+
+  it('opens the existing QR dialog from the popover and preserves the standalone QR action', async () => {
+    await renderProfile();
+
+    expect(container.querySelector('[aria-label="Show Alice\'s profile QR code"]')).not.toBeNull();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+    await clickButton('.share-popover-destinations button');
+    expect(container.querySelector('#profile-qr-title')?.textContent).toBe("Alice's profile QR code");
+    expect(container.querySelector('[aria-label="Show Alice\'s profile QR code"]')).not.toBeNull();
+  });
+
+  it('opens the QR dialog directly from the standalone QR button', async () => {
+    await renderProfile();
+
+    await clickButton('[aria-label="Show Alice\'s profile QR code"]');
+
+    expect(container.querySelector('#profile-qr-title')?.textContent).toBe("Alice's profile QR code");
+    expect(container.querySelector('[aria-label="Share Alice\'s profile"]')).not.toBeNull();
+  });
+
+  it('does not open the fallback or copy the link when native sharing is cancelled', async () => {
     const share = vi.fn().mockRejectedValue(Object.assign(new Error('Cancelled'), { name: 'AbortError' }));
     const writeText = vi.fn();
     setNavigatorProperty('share', share);
     setNavigatorProperty('clipboard', { writeText });
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
+    await renderProfile();
 
-    await clickShareButton();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
 
     expect(writeText).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Profile link copied.');
-    expect(container.querySelector('.profile-share-fallback')).toBeNull();
+    expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).toBeNull();
   });
 
-  it('shows a selectable URL when clipboard access fails', async () => {
-    setNavigatorProperty('clipboard', { writeText: vi.fn().mockRejectedValue(new Error('Denied')) });
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
+  it('opens the fallback and reports a native share failure', async () => {
+    setNavigatorProperty('share', vi.fn().mockRejectedValue(new Error('Sharing failed')));
+    await renderProfile();
 
-    await clickShareButton();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
 
-    const urlField = container.querySelector<HTMLInputElement>('.profile-share-url');
-    expect(urlField?.value).toBe(createPeerAddUrl(profile.fingerprint, window.location.origin));
-    expect(container.textContent).toContain('Select and copy the profile link below.');
+    expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).not.toBeNull();
+    expect(container.textContent).toContain('Native sharing could not be opened.');
   });
 
-  it('shows a selectable URL when clipboard access is unavailable', async () => {
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
-
-    await clickShareButton();
-
-    expect(container.querySelector<HTMLInputElement>('.profile-share-url')?.value)
-      .toBe(createPeerAddUrl(profile.fingerprint, window.location.origin));
-  });
-
-  it('uses clipboard fallback if native sharing fails for a reason other than cancellation', async () => {
-    const share = vi.fn().mockRejectedValue(new Error('Sharing failed'));
-    const writeText = vi.fn().mockResolvedValue(undefined);
+  it('invokes native sharing again from More in the fallback popover', async () => {
+    const share = vi.fn()
+      .mockRejectedValueOnce(new Error('Initial share failed'))
+      .mockResolvedValueOnce(undefined);
     setNavigatorProperty('share', share);
-    setNavigatorProperty('clipboard', { writeText });
-    await act(async () => root.render(<ProfileHeader contact={profile} showActions={false} />));
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+    await clickButton('.share-popover-destinations button:last-child');
 
-    await clickShareButton();
+    expect(share).toHaveBeenCalledTimes(2);
+  });
 
-    expect(writeText).toHaveBeenCalledWith(createPeerAddUrl(profile.fingerprint, window.location.origin));
-    expect(container.textContent).toContain('Profile link copied.');
+  it('dismisses by Escape and restores focus to the Share button', async () => {
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[aria-label="Share Alice\'s profile"]'));
+  });
+
+  it('dismisses when the user clicks outside the popover', async () => {
+    await renderProfile();
+    await clickButton('[aria-label="Share Alice\'s profile"]');
+
+    await act(async () => {
+      document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+
+    expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).toBeNull();
   });
 });

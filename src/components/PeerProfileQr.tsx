@@ -5,13 +5,20 @@ import { displayNameOrFallback } from '../utils/fingerprintNames';
 interface PeerProfileQrProps {
   peerId: string;
   displayName?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function PeerProfileQr({ peerId, displayName }: PeerProfileQrProps) {
-  const [open, setOpen] = useState(false);
+export function PeerProfileQr({ peerId, displayName, open: controlledOpen, onOpenChange }: PeerProfileQrProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
   const [qrCode, setQrCode] = useState('');
   const [error, setError] = useState('');
+  const open = controlledOpen ?? internalOpen;
   const profileName = displayNameOrFallback(displayName, peerId);
+  const setOpen = (nextOpen: boolean) => {
+    setInternalOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  };
 
   useEffect(() => {
     if (!open) return;

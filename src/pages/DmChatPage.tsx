@@ -12,6 +12,7 @@ import type { ObjectStore } from '../object-layer/types';
 import { MarkdownComposer } from '../components/MarkdownComposer';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { checkExternalImageSizes, encodeMarkdownMessage } from '../markdown/external-content';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 const MAX_MESSAGE_LENGTH = 4000;
 
@@ -27,6 +28,7 @@ export interface DmChatPageProps {
   isContactKnown?: (publicKey: string) => boolean;
   connectionText: string;
   myPeerId: string;
+  myProfilePicture?: IdentityProfilePicture | null;
   onViewProfile: (peerId: string) => void;
   onBackToMessages?: () => void;
   onDeleteMessage?: (objectId: string) => void;
@@ -58,6 +60,7 @@ export function DmChatPage({
   isContactKnown,
   connectionText,
   myPeerId,
+  myProfilePicture,
   onViewProfile,
   onBackToMessages,
   onDeleteMessage
@@ -153,6 +156,9 @@ export function DmChatPage({
                   size={21}
                   alt=""
                   online={message.direction === 'in' && contact.online === true}
+                  profilePicture={message.direction === 'out'
+                    ? myProfilePicture
+                    : contact.profilePicture ?? contact.identityObject?.payload.profile_picture}
                 />
               </button>
             )}
