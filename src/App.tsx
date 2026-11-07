@@ -241,6 +241,26 @@ interface MyProfileSettings {
   profilePicture?: IdentityProfilePicture | null;
 }
 
+interface EditableProfileSnapshot {
+  displayName: string;
+  bio: string;
+  profilePicture: IdentityProfilePicture | null;
+}
+
+function editableProfileSnapshot(profile: MyProfileSettings): EditableProfileSnapshot {
+  return {
+    displayName: profile.displayName.trim(),
+    bio: profile.bio.trim(),
+    profilePicture: profile.profilePicture ?? null
+  };
+}
+
+function profilesMatch(left: EditableProfileSnapshot, right: EditableProfileSnapshot): boolean {
+  return left.displayName === right.displayName
+    && left.bio === right.bio
+    && JSON.stringify(left.profilePicture) === JSON.stringify(right.profilePicture);
+}
+
 const DEFAULT_FEED_MIX: FeedMixSettings = {
   followedAuthors: 60,
   followedLikes: 40,
@@ -355,6 +375,16 @@ function App() {
     hiddenPeers: [] as string[],
     profilePicture: undefined
   });
+  const [savedProfileSnapshot, setSavedProfileSnapshot] = useState(() => editableProfileSnapshot({
+    displayName: '',
+    bio: '',
+    feedMix: DEFAULT_FEED_MIX,
+    blockedPeers: [],
+    hiddenPeers: []
+  }));
+  const [profileSaveStatus, setProfileSaveStatus] = useState('');
+  const profileEditRevisionRef = useRef(0);
+  const profileHasUnsavedChanges = !profilesMatch(editableProfileSnapshot(myProfile), savedProfileSnapshot);
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
     messages: 0,
@@ -3038,6 +3068,7 @@ function App() {
             };
             profileForObject = restoredProfile;
             setMyProfile(restoredProfile);
+            setSavedProfileSnapshot(editableProfileSnapshot(restoredProfile));
           }
         } catch {
           addLog('Saved profile settings could not be parsed; using defaults.');
@@ -3053,6 +3084,7 @@ function App() {
         };
         myProfileRef.current = restoredProfile;
         setMyProfile(restoredProfile);
+        setSavedProfileSnapshot(editableProfileSnapshot(restoredProfile));
       }
       if (!active) return;
       setIdentity(loadedIdentity);
@@ -4162,6 +4194,45 @@ function App() {
     });
   };
 
+  const handleSaveProfile = async () => {
+    if (!profileHasUnsavedChanges || !identity) return;
+    const revision = profileEditRevisionRef.current;
+    const persistedProfile = {
+      ...myProfile,
+      displayName: myProfile.displayName.trim(),
+      bio: myProfile.bio.trim(),
+      blockedPeers: myProfile.blockedPeers,
+      hiddenPeers: myProfile.hiddenPeers
+    };
+    const snapshot = editableProfileSnapshot(persistedProfile);
+    myProfileRef.current = persistedProfile;
+    setMyProfile(persistedProfile);
+    setSavedProfileSnapshot(snapshot);
+    localStorage.setItem('myProfile', JSON.stringify(persistedProfile));
+    setProfileSaveStatus('Saving profile…');
+    addLog('Profile saved locally');
+
+    try {
+      await publishLocalIdentityProfile(identity, persistedProfile);
+      if (profileEditRevisionRef.current === revision) setProfileSaveStatus('Profile saved.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addLog(`Failed to publish signed profile: ${message}`);
+      if (profileEditRevisionRef.current === revision) {
+        setProfileSaveStatus(`Saved on this device, but could not publish the profile: ${message}`);
+      }
+    }
+
+    contacts.forEach((contact) => {
+      if (!contact.connected) return;
+      const manager = peerManagersRef.current[contact.fingerprint];
+      if (manager) {
+        void sendPeerMetadata(manager, contact.fingerprint)
+          .catch((error: unknown) => addLog(`Failed to send profile to ${contact.fingerprint}: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    });
+  };
+
   useEffect(() => {
     const pageContainer = document.getElementById('page-content');
     if (!pageContainer) return;
@@ -4304,6 +4375,7 @@ function App() {
     completeWelcomeOnboarding(localStorage);
     myProfileRef.current = nextProfile;
     setMyProfile(nextProfile);
+    setSavedProfileSnapshot(editableProfileSnapshot(nextProfile));
     setWelcomeWizardOpen(false);
     handlePageChange('home');
     setWelcomeTourLeadsToDiscovery(nextStep === 'tour');
@@ -4655,6 +4727,7 @@ function App() {
           };
 
           setMyProfile(nextProfile);
+          setSavedProfileSnapshot(editableProfileSnapshot(nextProfile));
           localStorage.setItem('myProfile', JSON.stringify(nextProfile));
           await publishLocalIdentityProfile({
             ...nextIdentity,
@@ -5720,47 +5793,46 @@ function App() {
                 <ProfilePictureEditor
                   seed={identity.id}
                   picture={myProfile.profilePicture}
-                  onChange={(picture) => setMyProfile((previous) => ({ ...previous, profilePicture: picture }))}
+                  onChange={(picture) => {
+                    profileEditRevisionRef.current += 1;
+                    setProfileSaveStatus('');
+                    setMyProfile((previous) => ({ ...previous, profilePicture: picture }));
+                  }}
                 />
                 <label>
                   Display Name
                   <input
                     value={myProfile.displayName}
-                    onChange={(e) => setMyProfile((prev) => ({ ...prev, displayName: e.target.value }))}
+                    onChange={(e) => {
+                      profileEditRevisionRef.current += 1;
+                      setProfileSaveStatus('');
+                      setMyProfile((prev) => ({ ...prev, displayName: e.target.value }));
+                    }}
                     placeholder="Optional"
                   />
                 </label>
                 <label>
                   Bio
-                  <textarea value={myProfile.bio} onChange={(e) => setMyProfile((prev) => ({ ...prev, bio: e.target.value }))} placeholder="Write a short bio" />
+                  <textarea
+                    value={myProfile.bio}
+                    onChange={(e) => {
+                      profileEditRevisionRef.current += 1;
+                      setProfileSaveStatus('');
+                      setMyProfile((prev) => ({ ...prev, bio: e.target.value }));
+                    }}
+                    placeholder="Write a short bio"
+                  />
                 </label>
                 <div className="row">
-                  <button className="btn" onClick={() => {
-                    const nextDisplayName = myProfile.displayName.trim();
-
-                    const persistedProfile = {
-                      ...myProfile,
-                      displayName: nextDisplayName,
-                      bio: myProfile.bio.trim(),
-                      blockedPeers: myProfile.blockedPeers,
-                      hiddenPeers: myProfile.hiddenPeers
-                    };
-                    setMyProfile(persistedProfile);
-                    localStorage.setItem('myProfile', JSON.stringify(persistedProfile));
-                    addLog('Profile saved locally');
-                    if (identity) {
-                      void publishLocalIdentityProfile(identity, persistedProfile)
-                        .catch((error: unknown) => addLog(`Failed to publish signed profile: ${error instanceof Error ? error.message : String(error)}`));
-                    }
-                    contacts.forEach((contact) => {
-                      if (!contact.connected) return;
-                      const manager = peerManagersRef.current[contact.fingerprint];
-                      if (manager) {
-                        void sendPeerMetadata(manager, contact.fingerprint)
-                          .catch((error: unknown) => addLog(`Failed to send profile to ${contact.fingerprint}: ${error instanceof Error ? error.message : String(error)}`));
-                      }
-                    });
-                  }}>Save Profile</button>
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={() => void handleSaveProfile()}
+                    disabled={!profileHasUnsavedChanges || profileSaveStatus === 'Saving profile…'}
+                  >
+                    Save Profile
+                  </button>
+                  {profileSaveStatus ? <span className="note" role="status" aria-live="polite">{profileSaveStatus}</span> : null}
                 </div>
                 <div className="blocked-peers-settings">
                   <CollapsibleSection
