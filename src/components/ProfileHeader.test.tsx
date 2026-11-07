@@ -15,6 +15,15 @@ const profile: Contact = {
   followed: false,
   displayName: 'Alice'
 };
+const profileWithPicture: Contact = {
+  ...profile,
+  profilePicture: {
+    mime_type: 'image/webp',
+    width: 256,
+    height: 256,
+    data: 'aGVsbG8='
+  }
+};
 
 const originalShareDescriptor = Object.getOwnPropertyDescriptor(navigator, 'share');
 const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
@@ -69,6 +78,51 @@ afterEach(async () => {
 });
 
 describe('ProfileHeader sharing', () => {
+  it('opens the full custom profile picture in a centered dialog', async () => {
+    const onAvatarClick = vi.fn();
+    await act(async () => root.render(
+      <ProfileHeader contact={profileWithPicture} showActions={false} onAvatarClick={onAvatarClick} />
+    ));
+
+    await clickButton('[aria-label="View Alice\'s profile picture"]');
+
+    const dialog = container.querySelector('[role="dialog"][aria-label="Alice\'s profile picture"]');
+    const image = dialog?.querySelector<HTMLImageElement>('img');
+    expect(dialog).not.toBeNull();
+    expect(image?.src).toBe('data:image/webp;base64,aGVsbG8=');
+    expect(image?.width).toBe(256);
+    expect(image?.height).toBe(256);
+    expect(onAvatarClick).not.toHaveBeenCalled();
+
+    await clickButton('[aria-label="Close profile picture"]');
+    expect(container.querySelector('[role="dialog"][aria-label="Alice\'s profile picture"]')).toBeNull();
+  });
+
+  it('keeps generated avatar clicks navigating to the profile', async () => {
+    const onAvatarClick = vi.fn();
+    await act(async () => root.render(
+      <ProfileHeader contact={profile} showActions={false} onAvatarClick={onAvatarClick} />
+    ));
+
+    await clickButton('[aria-label="View Alice\'s profile"]');
+
+    expect(onAvatarClick).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="dialog"][aria-label="Alice\'s profile picture"]')).toBeNull();
+  });
+
+  it('closes the profile-picture viewer with Escape', async () => {
+    await act(async () => root.render(
+      <ProfileHeader contact={profileWithPicture} showActions={false} onAvatarClick={vi.fn()} />
+    ));
+    await clickButton('[aria-label="View Alice\'s profile picture"]');
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+
+    expect(container.querySelector('[role="dialog"][aria-label="Alice\'s profile picture"]')).toBeNull();
+  });
+
   it('uses native sharing with the profile identity and canonical URL', async () => {
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('share', share);

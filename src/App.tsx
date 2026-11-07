@@ -71,6 +71,7 @@ import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import { webPushManager } from './services/web-push';
 import { dispatchWebPushObject } from './services/web-push-dispatch';
 import { completePostDirectSharingAndDispatchFollowers } from './services/post-web-push';
+import { dispatchLocalReplyToParent } from './services/post-reply-web-push';
 import {
   classifyNewlyAcceptedObjectNotification,
   createPushWakeOutboxFlusher,
@@ -3799,6 +3800,19 @@ function App() {
       ...(verifiedReplyParent ? { replyParent: verifiedReplyParent } : {}),
       dispatch: dispatchWebPushObject
     });
+
+    if (verifiedReplyParent) {
+      void dispatchLocalReplyToParent({
+        reply: postObject,
+        parent: verifiedReplyParent,
+        storedLocally,
+        localPublicKey: identity.publicKey,
+        localFingerprint: identity.id,
+        contacts: contactsRef.current,
+        blockedPeers: blockedPeersRef.current,
+        dispatch: dispatchWebPushObject
+      });
+    }
 
     if (publishToDiscovery) {
       const socket = signallingSocketRef.current;

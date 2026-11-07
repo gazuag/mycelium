@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Contact } from '../types';
 import { displayNameOrFallback, displayProfileBio } from '../utils/fingerprintNames';
 import { createPeerAddUrl } from '../utils/peerAddUrl';
+import { profilePictureDataUrl } from '../utils/profile-picture';
 import { FollowButton } from './FollowButton';
 import { IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
@@ -33,11 +34,23 @@ export function ProfileHeader({
   onAvatarClick
 }: ProfileHeaderProps) {
   const [qrOpen, setQrOpen] = useState(false);
+  const [profilePictureOpen, setProfilePictureOpen] = useState(false);
   const displayName = displayNameOrFallback(contact.displayName, contact.fingerprint);
   const peerId = contact.fingerprint || contact.publicKey;
+  const profilePicture = contact.profilePicture ?? contact.identityObject?.payload.profile_picture;
+  const profilePictureUrl = profilePictureDataUrl(profilePicture);
   const profileUrl = typeof window !== 'undefined'
     ? createPeerAddUrl(peerId, window.location.origin)
     : null;
+
+  useEffect(() => {
+    if (!profilePictureOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setProfilePictureOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [profilePictureOpen]);
 
   return (
     <section className="profile-header card">
@@ -45,11 +58,16 @@ export function ProfileHeader({
         <div className="profile-title-main">
           <span className="profile-avatar-tools">
             {onAvatarClick ? (
-              <button className="profile-avatar-link" type="button" onClick={onAvatarClick} aria-label={`View ${displayName}'s profile`}>
-                <IdentityAvatar seed={contact.fingerprint} size={42} alt="" online={showOnlineIndicator && contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
+              <button
+                className={`profile-avatar-link${profilePictureUrl ? ' has-profile-picture' : ''}`}
+                type="button"
+                onClick={() => profilePictureUrl ? setProfilePictureOpen(true) : onAvatarClick()}
+                aria-label={profilePictureUrl ? `View ${displayName}'s profile picture` : `View ${displayName}'s profile`}
+              >
+                <IdentityAvatar seed={contact.fingerprint} size={42} alt="" online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
               </button>
             ) : (
-              <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
+              <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
             )}
             <PeerProfileQr peerId={peerId} displayName={displayName} open={qrOpen} onOpenChange={setQrOpen} />
           </span>
@@ -99,6 +117,27 @@ export function ProfileHeader({
           </button>
         )}
       </div>
+      {profilePictureOpen && profilePictureUrl ? (
+        <div className="profile-picture-backdrop" onClick={() => setProfilePictureOpen(false)}>
+          <section
+            className="profile-picture-dialog card"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${displayName}'s profile picture`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="profile-picture-close btn secondary"
+              type="button"
+              aria-label="Close profile picture"
+              onClick={() => setProfilePictureOpen(false)}
+            >
+              ×
+            </button>
+            <img className="profile-picture-full" src={profilePictureUrl} alt={`${displayName}'s profile picture`} width={256} height={256} />
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
