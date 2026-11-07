@@ -915,6 +915,10 @@ body, html, #root {
   color: inherit;
 }
 
+.profile-avatar-link.has-profile-picture {
+  cursor: zoom-in;
+}
+
 .profile-avatar-link:focus-visible,
 .home-composer-avatar:focus-visible,
 .chat-message-avatar:focus-visible {
@@ -1007,6 +1011,44 @@ body, html, #root {
   aspect-ratio: 1;
   flex: 0 0 auto;
   image-rendering: pixelated;
+}
+
+.profile-picture-backdrop {
+  position: fixed;
+  z-index: 1100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgb(0 0 0 / 55%);
+}
+
+.profile-picture-dialog {
+  position: relative;
+  display: grid;
+  width: min(100%, 18rem);
+  min-width: 0;
+  min-height: 18rem;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.profile-picture-close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 1;
+  min-width: var(--control-height-small);
+  min-height: var(--control-height-small);
+  padding: 0;
+}
+
+.profile-picture-full {
+  display: block;
+  width: min(256px, calc(100vw - 5rem));
+  height: min(256px, calc(100vw - 5rem));
+  border-radius: var(--radius-md);
+  object-fit: contain;
 }
 
 .profile-qr-url {
