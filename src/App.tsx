@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { generateIdentityKeyPair, deriveFingerprint, exportPrivateKey, exportPublicKey, sha256, signString } from './crypto/identity';
+import { deriveFingerprint, sha256, signString } from './crypto/identity';
 import { decryptJsonPayload, encryptJsonPayload, type VaultBlob } from './crypto/key-vault';
 import { connectToSignalling, requestOnlinePeerList, resolveOnlinePeerList, resolveSignalServerUrl, SignalMessage } from './p2p/signalling';
 import { configureIceServers, PeerConnectionManager } from './p2p/webrtc';
@@ -43,9 +43,13 @@ import { listConversations, previewConversation, type ConversationSummary } from
 import { addEncryptionKeyBinding, applyEncryptionKeyBinding, createEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { filterTombstonedObjects, getFindQueryCriteria, prepareFindQueryPage } from './object-layer/transport';
-import { ensureIdentityEncryptionKeyPair, identityBackupFields, loadIdentity, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
+import { ensureIdentityEncryptionKeyPair, identityBackupFields, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject, validateDiscoveryObjects } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
+import { WelcomeWizard } from './components/WelcomeWizard';
+import { HelpCenter } from './components/HelpCenter';
+import { GuidedTour } from './components/GuidedTour';
+import { PopularPostsOnboarding } from './components/PopularPostsOnboarding';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
 import { ConversationPage } from './pages/ConversationPage';
@@ -58,12 +62,15 @@ import { DmChatPage } from './pages/DmChatPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LandingPage } from './pages/LandingPage';
 import { BlockedPeerList } from './components/BlockedPeerList';
+import { ProfilePictureEditor } from './components/ProfilePictureEditor';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { ExternalImageLimitContext } from './components/MarkdownContent';
 import { canonicalize, createPacketId, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import { webPushManager } from './services/web-push';
+import { dispatchWebPushObject } from './services/web-push-dispatch';
+import { completePostDirectSharingAndDispatchFollowers } from './services/post-web-push';
 import {
   classifyNewlyAcceptedObjectNotification,
   createPushWakeOutboxFlusher,
@@ -83,6 +90,9 @@ import {
 } from './services/web-push-inbox';
 import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedIdentityObject, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findLatestIdentityObjectsByConnectionQuery, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, getLatestIdentityObject, getLatestIdentityObjects, hydratePostViews, IDENTITY_OBJECT_TYPE, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, storeDiscoveredIdentityProfiles, storeRequestedIdentityProfile, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateIdentityObject, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type FindResponsePacket, type IdentityObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
+import { isIdentityProfilePicture, profilePictureDataUrl, type IdentityProfilePicture } from './utils/profile-picture';
+import { completeWelcomeOnboarding, prepareWelcomeOnboarding } from './utils/welcome-onboarding';
+import { createLocalIdentityRecord, loadOrCreateLocalIdentity } from './identity-lifecycle';
 import { parsePeerId } from './utils/peerId';
 import { parseAddPeerInvitePath } from './utils/addPeerInvite';
 import { buildLocalDirectReplyCounts } from './utils/localReplyCounts';
@@ -222,6 +232,15 @@ interface FeedMixSettings {
   discoveryRandom: number;
 }
 
+interface MyProfileSettings {
+  displayName: string;
+  bio: string;
+  feedMix: FeedMixSettings;
+  blockedPeers: string[];
+  hiddenPeers: string[];
+  profilePicture?: IdentityProfilePicture | null;
+}
+
 const DEFAULT_FEED_MIX: FeedMixSettings = {
   followedAuthors: 60,
   followedLikes: 40,
@@ -276,6 +295,14 @@ function App() {
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [identity, setIdentity] = useState<IdentityRecord | null>(null);
+  const [identityBootstrapStatus, setIdentityBootstrapStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [identityBootstrapError, setIdentityBootstrapError] = useState('');
+  const [identityBootstrapAttempt, setIdentityBootstrapAttempt] = useState(0);
+  const [welcomeWizardOpen, setWelcomeWizardOpen] = useState(false);
+  const [helpCenterOpen, setHelpCenterOpen] = useState(false);
+  const [guidedTourOpen, setGuidedTourOpen] = useState(false);
+  const [discoveryOnboardingOpen, setDiscoveryOnboardingOpen] = useState(false);
+  const [welcomeTourLeadsToDiscovery, setWelcomeTourLeadsToDiscovery] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [deletionTombstones, setDeletionTombstones] = useState<DeletionTombstone[]>([]);
@@ -293,6 +320,23 @@ function App() {
   const [relationshipTab, setRelationshipTab] = useState<RelationshipTab>(initialNavigation.relationshipTab);
   const [chatContactId, setChatContactId] = useState<string | null>(initialNavigation.chatContactId);
   const [collapsedHeader, setCollapsedHeader] = useState(true);
+  const openHelpCenter = useCallback(() => setHelpCenterOpen(true), []);
+  const closeHelpCenter = useCallback(() => setHelpCenterOpen(false), []);
+  const startGuidedTour = useCallback(() => {
+    setHelpCenterOpen(false);
+    setWelcomeTourLeadsToDiscovery(false);
+    setGuidedTourOpen(true);
+  }, []);
+  const closeGuidedTour = useCallback(() => {
+    setGuidedTourOpen(false);
+    setWelcomeTourLeadsToDiscovery(false);
+  }, []);
+  const closeDiscoveryOnboarding = useCallback(() => setDiscoveryOnboardingOpen(false), []);
+  const finishGuidedTour = useCallback(() => {
+    setGuidedTourOpen(false);
+    if (welcomeTourLeadsToDiscovery) setDiscoveryOnboardingOpen(true);
+    setWelcomeTourLeadsToDiscovery(false);
+  }, [welcomeTourLeadsToDiscovery]);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const hiddenPostIdsRef = useRef(hiddenPostIds);
@@ -303,12 +347,13 @@ function App() {
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const addPeerInviteHandledRef = useRef(false);
   const blockedPeersRef = useRef<Set<string>>(new Set());
-  const [myProfile, setMyProfile] = useState({
+  const [myProfile, setMyProfile] = useState<MyProfileSettings>({
     displayName: '',
     bio: '',
     feedMix: DEFAULT_FEED_MIX,
     blockedPeers: [] as string[],
-    hiddenPeers: [] as string[]
+    hiddenPeers: [] as string[],
+    profilePicture: undefined
   });
   const [pageScrollPositions, setPageScrollPositions] = useState<Record<PageKey, number>>({
     home: 0,
@@ -321,6 +366,9 @@ function App() {
     settings: 0
   });
   const [discoveryPosts, setDiscoveryPosts] = useState<LocalPostView[]>([]);
+  const [discoveryOnboardingPosts, setDiscoveryOnboardingPosts] = useState<LocalPostView[]>([]);
+  const [discoveryOnboardingStatus, setDiscoveryOnboardingStatus] = useState<'loading' | 'ready' | 'unavailable'>('unavailable');
+  const discoveryOnboardingRequestRef = useRef(0);
   const [discoveryReplyPosts, setDiscoveryReplyPosts] = useState<LocalPostView[]>([]);
   const [possiblePeerIds, setPossiblePeerIds] = useState<string[]>([]);
   const [popularPeers, setPopularPeers] = useState<PopularPeerWithIdentityProfile[]>([]);
@@ -379,7 +427,14 @@ function App() {
   const turnIceInitializationRef = useRef<Promise<void> | null>(null);
   const turnIceConfiguredRef = useRef(false);
   const selectedContactIdRef = useRef<string | null>(null);
-  const myProfileRef = useRef({ displayName: '', bio: '', feedMix: DEFAULT_FEED_MIX });
+  const myProfileRef = useRef<MyProfileSettings>({
+    displayName: '',
+    bio: '',
+    feedMix: DEFAULT_FEED_MIX,
+    blockedPeers: [] as string[],
+    hiddenPeers: [] as string[],
+    profilePicture: undefined
+  });
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
   const outboxServiceRef = useRef<ReturnType<typeof createOutboxService> | null>(null);
@@ -1812,7 +1867,7 @@ function App() {
 
   const publishLocalIdentityProfile = async (
     localIdentity: IdentityRecord,
-    profile: Pick<typeof myProfile, 'displayName' | 'bio'>,
+    profile: Pick<typeof myProfile, 'displayName' | 'bio' | 'profilePicture'>,
     replicate = true
   ): Promise<IdentityObject> => {
     const store = objectStoreRef.current;
@@ -1820,10 +1875,14 @@ function App() {
     const displayName = profile.displayName.trim() || fingerprintToHumanName(localIdentity.id);
     const bio = profile.bio.trim() || `Peer id: ${localIdentity.id}`;
     const existing = await getLatestIdentityObject(store, localIdentity.publicKey);
+    const profilePicture = profile.profilePicture === undefined
+      ? existing?.payload.profile_picture
+      : profile.profilePicture ?? undefined;
     if (existing
       && existing.payload.display_name === displayName
       && existing.payload.bio === bio
-      && existing.payload.encryption_public_key === localIdentity.encryptionPublicKey) {
+      && existing.payload.encryption_public_key === localIdentity.encryptionPublicKey
+      && JSON.stringify(existing.payload.profile_picture ?? null) === JSON.stringify(profilePicture ?? null)) {
       return existing;
     }
 
@@ -1836,7 +1895,8 @@ function App() {
       display_name: displayName,
       bio,
       encryption_public_key: localIdentity.encryptionPublicKey,
-      encryption_key_binding: encryptionKeyBinding
+      encryption_key_binding: encryptionKeyBinding,
+      ...(profilePicture ? { profile_picture: profilePicture } : {})
     }, createObjectIdentity({
       id: localIdentity.id,
       publicKey: localIdentity.publicKey,
@@ -2922,20 +2982,25 @@ function App() {
   }, [connectedPeerIds]);
 
   useEffect(() => {
+    let active = true;
+    setIdentityBootstrapStatus('loading');
+
     async function bootstrap() {
-      let loadedIdentity: IdentityRecord | null = null;
-      let profileForObject: Pick<typeof myProfile, 'displayName' | 'bio'> = myProfileRef.current;
-      const stored = await loadIdentity();
-      if (stored) {
-        const id = stored.id ?? (await deriveFingerprint(stored.publicKey));
-        loadedIdentity = { ...stored, id };
-        await ensureTurnIceServers();
+      const initialization = await loadOrCreateLocalIdentity();
+      const loadedIdentity: IdentityRecord = initialization.identity;
+      let showWelcomeWizard = initialization.created;
+      try {
+        showWelcomeWizard = prepareWelcomeOnboarding(localStorage, initialization.created);
+      } catch (error) {
+        addLog(`Welcome onboarding state could not be saved: ${error instanceof Error ? error.message : String(error)}`);
       }
+      let profileForObject: MyProfileSettings = myProfileRef.current;
+      await ensureTurnIceServers();
       const rawProfile = localStorage.getItem('myProfile');
       if (rawProfile) {
         try {
           const parsed = JSON.parse(rawProfile);
-          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string' || parsed.feedMix || Array.isArray(parsed.blockedPeers) || Array.isArray(parsed.hiddenPeers)) {
+          if (typeof parsed.displayName === 'string' || typeof parsed.bio === 'string' || parsed.feedMix || Array.isArray(parsed.blockedPeers) || Array.isArray(parsed.hiddenPeers) || parsed.profilePicture !== undefined) {
             const parsedFeedMix = parsed.feedMix && typeof parsed.feedMix === 'object'
               ? {
                   followedAuthors: Number(parsed.feedMix.followedAuthors ?? DEFAULT_FEED_MIX.followedAuthors),
@@ -2954,7 +3019,12 @@ function App() {
               ? fingerprintToHumanName(loadedIdentity?.id ?? rawDisplayName)
               : rawDisplayName;
 
-            const restoredProfile = {
+            const parsedProfilePicture = parsed.profilePicture === null
+              ? null
+              : isIdentityProfilePicture(parsed.profilePicture)
+                ? parsed.profilePicture
+                : undefined;
+            const restoredProfile: MyProfileSettings = {
               displayName: sanitizedDisplayName,
               bio: typeof parsed.bio === 'string' ? parsed.bio : '',
               feedMix: {
@@ -2963,7 +3033,8 @@ function App() {
                 discoveryRandom: Math.max(0, parsedFeedMix.discoveryRandom)
               },
               blockedPeers,
-              hiddenPeers
+              hiddenPeers,
+              ...(parsedProfilePicture === undefined ? {} : { profilePicture: parsedProfilePicture })
             };
             profileForObject = restoredProfile;
             setMyProfile(restoredProfile);
@@ -2972,16 +3043,35 @@ function App() {
           addLog('Saved profile settings could not be parsed; using defaults.');
         }
       }
-      if (loadedIdentity) {
-        await publishLocalIdentityProfile(loadedIdentity, profileForObject, false);
-        setIdentity(loadedIdentity);
-        addLog(`Identity loaded: ${loadedIdentity.id}`);
+      const signedProfile = await publishLocalIdentityProfile(loadedIdentity, profileForObject, false);
+      const signedPicture = signedProfile.payload.profile_picture;
+      if (profileForObject.profilePicture === undefined && profilePictureDataUrl(signedPicture)) {
+        const restoredProfile: MyProfileSettings = {
+          ...myProfileRef.current,
+          ...profileForObject,
+          profilePicture: signedPicture
+        };
+        myProfileRef.current = restoredProfile;
+        setMyProfile(restoredProfile);
       }
+      if (!active) return;
+      setIdentity(loadedIdentity);
+      setIdentityBootstrapStatus('ready');
+      setIdentityBootstrapError('');
+      setWelcomeWizardOpen(showWelcomeWizard);
+      addLog(`${initialization.created ? 'Identity created' : 'Identity loaded'}: ${loadedIdentity.id}`);
     }
     void bootstrap().catch((error: unknown) => {
-      addLog(`Identity bootstrap failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (!active) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setIdentityBootstrapStatus('error');
+      setIdentityBootstrapError(message);
+      addLog(`Identity bootstrap failed: ${message}`);
     });
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [identityBootstrapAttempt]);
 
   useEffect(() => {
     async function loadLocalData() {
@@ -2992,13 +3082,18 @@ function App() {
         if (isObjectExpired(cachedProfile)
           || !(await validateIdentityObject(cachedProfile))
           || await deriveFingerprint(cachedProfile.author) !== contact.fingerprint) {
-          const { identityObject: _cachedProfile, ...contactWithoutCachedProfile } = contact;
+          const {
+            identityObject: _cachedProfile,
+            profilePicture: _cachedPicture,
+            ...contactWithoutCachedProfile
+          } = contact;
           return { ...contactWithoutCachedProfile, displayName: undefined };
         }
         return {
           ...contact,
           publicKey: cachedProfile.author,
-          displayName: cachedProfile.payload.display_name
+          displayName: cachedProfile.payload.display_name,
+          profilePicture: cachedProfile.payload.profile_picture
         };
       }));
       contactsRef.current = loadedContacts;
@@ -3553,6 +3648,7 @@ function App() {
     let replyTarget = replyTo
       ? [...postViews, ...discoveryPosts].find((post) => post.object.object_id === replyTo)
       : undefined;
+    let verifiedReplyParent: DistributedObject | undefined;
     if (replyTo) {
       if (!/^[0-9a-f]{64}$/.test(replyTo)) {
         addLog(`Reply cancelled: invalid parent object ID ${replyTo}`);
@@ -3570,6 +3666,7 @@ function App() {
         addLog(`Reply cancelled: parent post ${replyTo} could not be validated and cached`);
         return;
       }
+      verifiedReplyParent = parentObject;
       if (!replyTarget || replyTarget.object.object_id !== replyTo) {
         replyTarget = createLocalPostView(
           parentObject as PostObject,
@@ -3586,7 +3683,7 @@ function App() {
       payload: createPostObjectPayload(content, tags, mentions, replyTo, replyTarget?.authorFingerprint, imageSizes),
       replication_policy: {}
     }, objectIdentity) as PostObject;
-    await objectStore.put(postObject);
+    const storedLocally = await objectStore.put(postObject);
     const postChain = await ensurePostChainCached(postObject, objectStore, resolvePostParentFromPeers);
     logPostChainResult(postObject.object_id, postChain);
 
@@ -3621,44 +3718,55 @@ function App() {
       }
     }
 
-    const objectTransport = objectTransportRef.current;
-    const directlySharedMentionPeers = new Set<string>();
-    for (const peerId of objectTransport?.connectedPeers() ?? []) {
-      const contact = contacts.find((c) => c.fingerprint === peerId);
-      const isMentionTarget = mentions.some((mention) => mention.peerId === peerId);
-      if (((contact?.followed && contact.connected) || isMentionTarget) && objectTransport) {
-        if (isMentionTarget) directlySharedMentionPeers.add(peerId);
-        try {
-          const sentCount = await sendObjectBatches(
-            identity.id,
-            peerId,
-            postChain.objects,
-            objectTransport,
-            (packet) => signString(identity.privateKey, canonicalize(packet))
-          );
-          addLog(`Shared canonical post chain (${sentCount} objects) ending ${postObject.object_id} with connected ${isMentionTarget ? 'mentioned peer' : 'followed peer'} ${peerId}`);
-        } catch (error) {
-          addLog(`Failed to share post chain ending ${postObject.object_id} with ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+    await completePostDirectSharingAndDispatchFollowers(async () => {
+      const objectTransport = objectTransportRef.current;
+      const directlySharedMentionPeers = new Set<string>();
+      for (const peerId of objectTransport?.connectedPeers() ?? []) {
+        const contact = contacts.find((c) => c.fingerprint === peerId);
+        const isMentionTarget = mentions.some((mention) => mention.peerId === peerId);
+        if (((contact?.followed && contact.connected) || isMentionTarget) && objectTransport) {
+          if (isMentionTarget) directlySharedMentionPeers.add(peerId);
+          try {
+            const sentCount = await sendObjectBatches(
+              identity.id,
+              peerId,
+              postChain.objects,
+              objectTransport,
+              (packet) => signString(identity.privateKey, canonicalize(packet))
+            );
+            addLog(`Shared canonical post chain (${sentCount} objects) ending ${postObject.object_id} with connected ${isMentionTarget ? 'mentioned peer' : 'followed peer'} ${peerId}`);
+          } catch (error) {
+            addLog(`Failed to share post chain ending ${postObject.object_id} with ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
       }
-    }
-    const directMentionTargets = [...new Set(mentions
-      .map((mention) => mention.peerId)
-      .filter((peerId) => !directlySharedMentionPeers.has(peerId)))];
-    if (objectTransport && directMentionTargets.length > 0) {
-      const results = await sendObjectToPeers(
-        identity.id,
-        postObject,
-        directMentionTargets,
-        objectTransport,
-        (packet) => signString(identity.privateKey, canonicalize(packet))
-      );
-      for (const result of results) {
-        addLog(result.sent
-          ? `Pushed mentioned post ${postObject.object_id} directly to ${result.peerId}`
-          : `Mentioned post ${postObject.object_id} direct delivery ${result.reachable ? `failed: ${result.error ?? 'unknown transport error'}` : 'skipped: peer is not connected'} for ${result.peerId}`);
+      const directMentionTargets = [...new Set(mentions
+        .map((mention) => mention.peerId)
+        .filter((peerId) => !directlySharedMentionPeers.has(peerId)))];
+      if (objectTransport && directMentionTargets.length > 0) {
+        const results = await sendObjectToPeers(
+          identity.id,
+          postObject,
+          directMentionTargets,
+          objectTransport,
+          (packet) => signString(identity.privateKey, canonicalize(packet))
+        );
+        for (const result of results) {
+          addLog(result.sent
+            ? `Pushed mentioned post ${postObject.object_id} directly to ${result.peerId}`
+            : `Mentioned post ${postObject.object_id} direct delivery ${result.reachable ? `failed: ${result.error ?? 'unknown transport error'}` : 'skipped: peer is not connected'} for ${result.peerId}`);
+        }
       }
-    }
+    }, {
+      post: postObject,
+      storedLocally,
+      localPublicKey: identity.publicKey,
+      localFingerprint: identity.id,
+      contacts: contactsRef.current,
+      blockedPeers: blockedPeersRef.current,
+      ...(verifiedReplyParent ? { replyParent: verifiedReplyParent } : {}),
+      dispatch: dispatchWebPushObject
+    });
 
     if (publishToDiscovery) {
       const socket = signallingSocketRef.current;
@@ -3679,6 +3787,7 @@ function App() {
   const isBlockedPost = (post: LocalPostView) => blockedPeerSet.has(post.object.author) || blockedPeerSet.has(post.authorFingerprint);
   const isHiddenPost = (post: LocalPostView) => hiddenPostIds.has(post.object.object_id) || hiddenDiscoveryIds.has(post.object.object_id) || post.hidden === true;
   const visibleDiscoveryPosts = discoveryPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
+  const discoveryOnboardingVisiblePosts = discoveryOnboardingPosts.filter((post) => !isHiddenPost(post) && !isBlockedPost(post));
 
   const visibleContacts = useMemo(
     () => contacts.filter((contact) => {
@@ -4104,11 +4213,14 @@ function App() {
   }
 
   async function handleFetchDiscovery() {
+    const requestId = ++discoveryOnboardingRequestRef.current;
     const socket = signallingSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setDiscoveryOnboardingStatus('unavailable');
       addLog('Discovery fetch skipped: not connected to signalling server');
       return;
     }
+    setDiscoveryOnboardingStatus('loading');
     addLog('Refreshing discovery posts');
     try {
       const items = await fetchDiscovery(socket, 20);
@@ -4162,23 +4274,53 @@ function App() {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
         return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
       });
+      if (requestId === discoveryOnboardingRequestRef.current) {
+        setDiscoveryOnboardingPosts(verifiedPosts.slice(0, 20));
+        setDiscoveryOnboardingStatus('ready');
+      }
       addLog(`Discovery result: received=${items.length} posts=${verifiedPosts.length} replies=${verifiedReplies.length} recommendations=${validated.recommendations.length} unsupported=${validated.unsupportedCount} invalid=${validated.invalidCount}`);
     } catch (err: any) {
       const message = err?.message || String(err);
+      if (requestId === discoveryOnboardingRequestRef.current) setDiscoveryOnboardingStatus('unavailable');
       addLog(`Discovery fetch failed (${signalEndpoint}): ${message}`);
     }
   }
 
   async function handleCreateIdentity() {
     await ensureTurnIceServers();
-    const keys = await generateIdentityKeyPair();
-    const publicKey = await exportPublicKey(keys.publicKey);
-    const privateKey = await exportPrivateKey(keys.privateKey);
-    const identityId = await deriveFingerprint(publicKey);
-    const identityRecord = await ensureIdentityEncryptionKeyPair({ key: 'local', publicKey, privateKey, id: identityId });
+    const identityRecord = await createLocalIdentityRecord();
+    const identityId = identityRecord.id;
     await saveIdentity(identityRecord);
     await publishLocalIdentityProfile({ ...identityRecord, id: identityId }, myProfileRef.current);
-    setIdentity(identityRecord as IdentityRecord);
+    setIdentity(identityRecord);
+  }
+
+  async function handleCompleteWelcome(displayName: string, nextStep: 'tour' | 'home') {
+    const nextProfile = {
+      ...myProfileRef.current,
+      displayName: displayName.trim()
+    };
+    localStorage.setItem('myProfile', JSON.stringify(nextProfile));
+    completeWelcomeOnboarding(localStorage);
+    myProfileRef.current = nextProfile;
+    setMyProfile(nextProfile);
+    setWelcomeWizardOpen(false);
+    handlePageChange('home');
+    setWelcomeTourLeadsToDiscovery(nextStep === 'tour');
+    setGuidedTourOpen(nextStep === 'tour');
+
+    if (identity) {
+      void publishLocalIdentityProfile(identity, nextProfile)
+        .catch((error: unknown) => addLog(`Failed to publish welcome profile: ${error instanceof Error ? error.message : String(error)}`));
+      contactsRef.current.forEach((contact) => {
+        if (!contact.connected) return;
+        const manager = peerManagersRef.current[contact.fingerprint];
+        if (manager) {
+          void sendPeerMetadata(manager, contact.fingerprint)
+            .catch((error: unknown) => addLog(`Failed to send welcome profile to ${contact.fingerprint}: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
+    }
   }
 
   async function handleExportIdentity(passphrase: string) {
@@ -4430,7 +4572,8 @@ function App() {
         bio: myProfile.bio.trim(),
         feedMix: myProfile.feedMix,
         blockedPeers: myProfile.blockedPeers,
-        hiddenPeers: myProfile.hiddenPeers
+        hiddenPeers: myProfile.hiddenPeers,
+        ...(myProfile.profilePicture === undefined ? {} : { profilePicture: myProfile.profilePicture })
       },
       contacts: contacts.map((contact) => ({
         publicKey: contact.publicKey,
@@ -4503,7 +4646,12 @@ function App() {
               : [],
             hiddenPeers: Array.isArray(profileData.hiddenPeers)
               ? profileData.hiddenPeers.filter((value: unknown): value is string => typeof value === 'string')
-              : []
+              : [],
+            ...(profileData.profilePicture === null
+              ? { profilePicture: null }
+              : isIdentityProfilePicture(profileData.profilePicture)
+                ? { profilePicture: profileData.profilePicture }
+                : {})
           };
 
           setMyProfile(nextProfile);
@@ -4573,6 +4721,11 @@ function App() {
     setContacts([]);
     setPostViews([]);
     setDiscoveryPosts([]);
+    setDiscoveryOnboardingPosts([]);
+    setDiscoveryOnboardingStatus('unavailable');
+    discoveryOnboardingRequestRef.current += 1;
+    setDiscoveryOnboardingOpen(false);
+    setWelcomeTourLeadsToDiscovery(false);
     setSelectedContactId(null);
     setChatContactId(null);
     setActivePeerId(null);
@@ -5163,6 +5316,7 @@ function App() {
       followed: false,
       online: false,
       connected: false,
+      profilePicture: myProfile.profilePicture ?? undefined,
       profile: {
         protocol: 'mycelium',
         version: 1,
@@ -5176,7 +5330,7 @@ function App() {
         signature: ''
       } as any
     };
-  }, [identity, myProfile.displayName, myProfile.bio]);
+  }, [identity, myProfile.displayName, myProfile.bio, myProfile.profilePicture]);
   const activeChatContact = chatContactId
     ? contacts.find((contact) => contact.fingerprint === chatContactId || contact.publicKey === chatContactId)
       ?? {
@@ -5281,12 +5435,44 @@ function App() {
     };
   }, [identity?.publicKey, page, navigationRevision]);
 
+  if (identityBootstrapStatus === 'loading') {
+    return (
+      <main className="identity-bootstrap-state" role="status">
+        <p>Preparing your Mycelium identity…</p>
+      </main>
+    );
+  }
+
+  if (identityBootstrapStatus === 'error') {
+    return (
+      <main className="identity-bootstrap-state">
+        <div role="alert">
+          <p>Mycelium could not load or create your identity.</p>
+          <p>{identityBootstrapError}</p>
+        </div>
+        <button
+          className="btn"
+          type="button"
+          onClick={() => setIdentityBootstrapAttempt((attempt) => attempt + 1)}
+        >
+          Try again
+        </button>
+      </main>
+    );
+  }
+
   if (!identity) {
     return (
-      <LandingPage
-        onCreateIdentity={handleCreateIdentity}
-        onImportIdentity={handleImportIdentity}
-      />
+      <>
+        <LandingPage
+          onCreateIdentity={handleCreateIdentity}
+          onImportIdentity={handleImportIdentity}
+          onOpenHelp={openHelpCenter}
+        />
+        {helpCenterOpen ? (
+          <HelpCenter onClose={closeHelpCenter} onStartTour={startGuidedTour} showTour={false} />
+        ) : null}
+      </>
     );
   }
 
@@ -5338,6 +5524,7 @@ function App() {
           myFingerprint={identity?.id}
           onPeerProfileClick={handleOpenPeerProfile}
           onHomeClick={() => handlePageChange('home')}
+          onHelpClick={openHelpCenter}
         />
 
         <main id="page-content" className={`page-content${page === 'chat' ? ' chat-active' : ''}`}>
@@ -5350,6 +5537,7 @@ function App() {
               contacts={contacts}
               myPeerId={identity.id}
               myPublicKey={identity.publicKey}
+              myProfilePicture={myProfile.profilePicture}
               focusedPostId={conversationFocusPostId}
               deletionTombstones={deletionTombstones}
               ancestry={conversationAncestry?.postId === conversationPostId
@@ -5406,6 +5594,7 @@ function App() {
             onAuthorClick={handleOpenPeerProfile}
             myPeerId={identity.id}
             myDisplayName={myProfile.displayName}
+            myProfilePicture={myProfile.profilePicture}
             onOpenPost={handleOpenConversation}
             onLike={handleLikePost}
             onDislike={handleDislikePost}
@@ -5424,6 +5613,7 @@ function App() {
             contacts={visibleContacts}
             myPublicKey={identity.publicKey}
             myPeerId={identity.id}
+            myProfilePicture={myProfile.profilePicture}
             conversations={conversationSummaries}
             previews={conversationPreviews}
             loading={conversationListLoading}
@@ -5465,6 +5655,7 @@ function App() {
             myPeerId={identity.id}
             myPublicKey={identity.publicKey}
             myDisplayName={myProfile.displayName}
+            myProfilePicture={myProfile.profilePicture}
             onAuthorClick={handleOpenPeerProfile}
             onOpenPost={handleOpenConversation}
             onFollow={handleToggleFollow}
@@ -5526,6 +5717,11 @@ function App() {
                   <span>Generated handle</span>
                   <span className="monospace break-word">@{fingerprintToHumanName(identity.id)}</span>
                 </div>
+                <ProfilePictureEditor
+                  seed={identity.id}
+                  picture={myProfile.profilePicture}
+                  onChange={(picture) => setMyProfile((previous) => ({ ...previous, profilePicture: picture }))}
+                />
                 <label>
                   Display Name
                   <input
@@ -5575,6 +5771,7 @@ function App() {
                   >
                     <BlockedPeerList
                       peerIds={myProfile.blockedPeers}
+                      contacts={contacts}
                       onUnblock={handleUnblockPeer}
                       onViewProfile={handleOpenPeerProfile}
                     />
@@ -5606,6 +5803,7 @@ function App() {
             isContactKnown={isDmContactKnown}
             connectionText={activeChatContact.connected ? 'Connected' : activeChatContact.online ? 'Online' : 'Offline'}
             myPeerId={identity.id}
+            myProfilePicture={myProfile.profilePicture}
             onViewProfile={handleOpenPeerProfile}
             onBackToMessages={handleBackToMessages}
             onDeleteMessage={handleDeleteMessage}
@@ -5658,6 +5856,36 @@ function App() {
       </div>
     </div>
     </ExternalImageLimitContext.Provider>
+    {welcomeWizardOpen && identity ? (
+      <WelcomeWizard
+        handle={fingerprintToHumanName(identity.id)}
+        initialDisplayName={myProfile.displayName}
+        onComplete={handleCompleteWelcome}
+      />
+    ) : null}
+    {helpCenterOpen ? (
+      <HelpCenter onClose={closeHelpCenter} onStartTour={startGuidedTour} />
+    ) : null}
+    {guidedTourOpen ? (
+      <GuidedTour
+        onExit={closeGuidedTour}
+        onSkip={finishGuidedTour}
+        onFinish={finishGuidedTour}
+      />
+    ) : null}
+    {discoveryOnboardingOpen && identity ? (
+      <ExternalImageLimitContext.Provider value={externalImageLimitMb}>
+        <PopularPostsOnboarding
+          posts={discoveryOnboardingVisiblePosts}
+          contacts={contacts}
+          status={discoveryOnboardingStatus}
+          myPeerId={identity.id}
+          myPublicKey={identity.publicKey}
+          onToggleFollow={handleToggleFollow}
+          onFinish={closeDiscoveryOnboarding}
+        />
+      </ExternalImageLimitContext.Provider>
+    ) : null}
     </DmUnreadProvider>
   );
 }

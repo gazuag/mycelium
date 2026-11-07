@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { IdentityAvatar } from './IdentityAvatar';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 describe('IdentityAvatar', () => {
   it('shows an online dot only when explicitly online', () => {
@@ -20,5 +21,20 @@ describe('IdentityAvatar', () => {
     expect(markup).toContain('class="identity-avatar-wrap" style="width:21px;height:21px"');
     expect(markup).toContain('width="21" height="21"');
     expect(markup).toContain('class="identity-avatar-online"');
+  });
+
+  it('uses a valid profile picture and falls back to the generated avatar for invalid data', () => {
+    const picture: IdentityProfilePicture = {
+      mime_type: 'image/webp',
+      width: 256,
+      height: 256,
+      data: 'AQID'
+    };
+    const custom = renderToStaticMarkup(<IdentityAvatar seed="peer-id" profilePicture={picture} />);
+    const invalid = renderToStaticMarkup(<IdentityAvatar seed="peer-id" profilePicture={{ ...picture, width: 128 }} />);
+
+    expect(custom).toContain('src="data:image/webp;base64,AQID"');
+    expect(invalid).toContain('src="data:image/svg+xml;charset=utf-8,');
+    expect(invalid).not.toContain('data:image/webp');
   });
 });

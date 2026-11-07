@@ -57,7 +57,7 @@ export function PeerRecipientPicker({
         const label = mode === 'mention' ? `@${handle ?? name}` : name;
         const identity = (
           <>
-            <IdentityAvatar seed={peerId} size={mode === 'mention' ? 32 : 42} alt={name} online={contact.online === true} />
+            <IdentityAvatar seed={peerId} size={mode === 'mention' ? 32 : 42} alt={name} online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
             <span className="message-row-content">
               {mode === 'mention' ? (
                 <strong>{label}</strong>

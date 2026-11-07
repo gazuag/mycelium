@@ -8,9 +8,10 @@ interface FollowButtonProps {
   onToggleFollow: (peerId: string) => Promise<void> | void;
   className?: string;
   myPeerId?: string;
+  disabled?: boolean;
 }
 
-export function FollowButton({ peerId, contacts, onToggleFollow, className = 'chip', myPeerId }: FollowButtonProps) {
+export function FollowButton({ peerId, contacts, onToggleFollow, className = 'chip', myPeerId, disabled = false }: FollowButtonProps) {
   const match = useMemo(
     () => contacts.find((contact) => contact.publicKey === peerId || contact.fingerprint === peerId),
     [contacts, peerId]
@@ -45,6 +46,7 @@ export function FollowButton({ peerId, contacts, onToggleFollow, className = 'ch
       <button
         className={className}
         type="button"
+        disabled={disabled}
         onClick={() => { void handleClick(); }}
       >
         {isFollowing ? 'Unfollow' : 'Follow'}

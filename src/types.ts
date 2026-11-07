@@ -1,5 +1,6 @@
 import type { EncryptionKeyBinding } from './crypto/dm-crypto';
 import type { IdentityObject } from './object-layer/identity-object';
+import type { IdentityProfilePicture } from './utils/profile-picture';
 
 export type ConnectionState = 'idle' | 'signalling' | 'connecting' | 'connected' | 'disconnected';
 
@@ -10,6 +11,7 @@ export interface Contact {
   authenticatedDisplayName?: string;
   profile?: SignedProfile;
   identityObject?: IdentityObject;
+  profilePicture?: IdentityProfilePicture;
   addedAt: string;
   followed: boolean;
   follower?: boolean;

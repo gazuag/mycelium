@@ -136,6 +136,39 @@ export async function saveIdentity(payload: LocalIdentityRecord) {
   });
 }
 
+export async function saveIdentityIfAbsent(payload: LocalIdentityRecord): Promise<{
+  identity: LocalIdentityRecord;
+  created: boolean;
+}> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+    const store = tx.objectStore(IDENTITY_STORE);
+    let result: { identity: LocalIdentityRecord; created: boolean } | undefined;
+    const existing = store.get('local');
+    existing.onsuccess = () => {
+      if (existing.result) {
+        result = { identity: existing.result as LocalIdentityRecord, created: false };
+        return;
+      }
+
+      const candidate = { ...payload, key: 'local' };
+      const add = store.add(candidate);
+      add.onsuccess = () => {
+        result = { identity: candidate, created: true };
+      };
+      add.onerror = () => reject(add.error);
+    };
+    existing.onerror = () => reject(existing.error);
+    tx.oncomplete = () => {
+      if (result) resolve(result);
+      else reject(new Error('Identity initialization completed without a result.'));
+    };
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error('Identity initialization transaction aborted.'));
+  });
+}
+
 export function loadIdentity(): Promise<CompleteLocalIdentityRecord | null> {
   if (!identityLoadPromise) {
     identityLoadPromise = loadAndMigrateIdentity().finally(() => {

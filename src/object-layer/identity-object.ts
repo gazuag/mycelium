@@ -1,6 +1,7 @@
 import type { EncryptionKeyBinding } from '../crypto/dm-crypto';
 import { createSignedObject, validateDistributedObject } from './envelope';
 import type { DistributedObject, JsonValue, ObjectContent, ObjectIdentity } from './types';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 export const IDENTITY_OBJECT_TYPE = 'mycelium.identity';
 
@@ -9,6 +10,7 @@ export interface IdentityObjectPayload {
   readonly bio: string;
   readonly encryption_public_key: string;
   readonly encryption_key_binding: EncryptionKeyBinding;
+  readonly profile_picture?: IdentityProfilePicture;
   readonly metadata?: Readonly<Record<string, JsonValue>>;
 }
 
@@ -22,6 +24,7 @@ export interface CreateSignedIdentityObjectOptions {
   readonly bio: string;
   readonly encryption_public_key: string;
   readonly encryption_key_binding: EncryptionKeyBinding;
+  readonly profile_picture?: IdentityProfilePicture;
   readonly created_at?: string;
   readonly metadata?: Readonly<Record<string, JsonValue>>;
 }
@@ -43,6 +46,7 @@ export async function createSignedIdentityObject(
         created_at: options.encryption_key_binding.created_at,
         signature: options.encryption_key_binding.signature
       },
+      ...(options.profile_picture ? { profile_picture: options.profile_picture } : {}),
       ...(options.metadata ? { metadata: options.metadata } : {})
     },
     replication_policy: {}

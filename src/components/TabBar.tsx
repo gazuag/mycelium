@@ -28,6 +28,7 @@ export function TabBar({ active, onChange, replyUnreadCount = 0 }: TabBarProps) 
           onClick={() => onChange(tab.key)}
           type="button"
           aria-label={tab.key === 'messages' && unreadCount > 0 ? 'Messages, unread items' : tab.label}
+          data-tour-target={tab.key}
         >
           <img
             className="tab-item-icon"

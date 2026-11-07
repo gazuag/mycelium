@@ -93,7 +93,8 @@ def make_identity_profile(
     author_key=None,
     object_signing_key=None,
     binding_signing_key=None,
-    object_id=None
+    object_id=None,
+    profile_picture=None
 ):
     author_key = author_key or ec.generate_private_key(ec.SECP256R1())
     object_signing_key = object_signing_key or author_key
@@ -119,6 +120,8 @@ def make_identity_profile(
             'signature': _sign(binding_signing_key, binding_message)
         }
     }
+    if profile_picture is not None:
+        payload['profile_picture'] = profile_picture
     content = {
         'object_type': 'mycelium.identity',
         'author': author,
@@ -247,6 +250,29 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         self.assertEqual(json.loads(row[0]), newer)
         self.assertEqual(self.server.DB_CONN.execute('SELECT COUNT(*) FROM discovery_posts').fetchone()[0], 0)
         self.assertEqual(self.server.load_discovery_posts(10, None), [])
+
+    def test_identity_profile_with_maximum_sized_picture_is_accepted(self):
+        picture = {
+            'mime_type': 'image/webp',
+            'width': 256,
+            'height': 256,
+            'data': base64.b64encode(b'x' * (50 * 1024)).decode('ascii')
+        }
+        profile = make_identity_profile(
+            'Large profile picture',
+            '2026-10-03T00:00:00.000Z',
+            profile_picture=picture
+        )
+
+        asyncio.run(self.server.handle_discovery_publish({'payload': {'object': profile}}))
+
+        row = self.server.DB_CONN.execute(
+            'SELECT object_json FROM discovery_profiles WHERE author = ?',
+            (profile['author'],)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        stored = json.loads(row[0])
+        self.assertEqual(stored['payload']['profile_picture'], picture)
 
     def test_profile_table_accepts_new_author_below_configured_capacity(self):
         profile = make_identity_profile('First author', '2026-10-01T00:00:00.000Z')

@@ -6,6 +6,7 @@ import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
 import { MarkdownContent } from './MarkdownContent';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 const POST_PREVIEW_LENGTH = 300;
 
@@ -32,6 +33,7 @@ interface PostCardProps {
   showDislikeButton?: boolean;
   isOwnPost?: boolean;
   authorOnline?: boolean;
+  authorProfilePicture?: IdentityProfilePicture;
 }
 
 export function PostCard({
@@ -56,7 +58,8 @@ export function PostCard({
   replyComposer,
   showDislikeButton = true,
   isOwnPost = false,
-  authorOnline = false
+  authorOnline = false,
+  authorProfilePicture
 }: PostCardProps) {
   const [expanded, setExpanded] = useState(false);
   const isLiked = isLikedOverride ?? false;
@@ -76,7 +79,7 @@ export function PostCard({
       <div className="post-card-header">
         <div className="post-author-line">
           <button className="ghost-link post-avatar-button" onClick={() => onAuthorClick(authorId)} type="button" aria-label={`View ${authorName}'s profile`}>
-            <IdentityAvatar seed={authorId} size={36} alt="" online={authorOnline} />
+            <IdentityAvatar seed={authorId} size={36} alt="" online={authorOnline} profilePicture={authorProfilePicture} />
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
             <strong><PeerName peerId={authorId} displayName={authorDisplayName ?? authorName} /></strong>

@@ -12,6 +12,7 @@ export function contactWithIdentityProfile(
     fingerprint,
     displayName: profile.payload.display_name,
     identityObject: profile,
+    profilePicture: profile.payload.profile_picture,
     addedAt: previous?.addedAt ?? new Date().toISOString(),
     followed: previous?.followed ?? false,
     online: previous?.online ?? false,

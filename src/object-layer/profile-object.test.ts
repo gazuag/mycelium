@@ -10,6 +10,7 @@ import { IndexedDbObjectStore } from './local-store';
 import { findLatestIdentityObjectsByConnectionQuery, getLatestIdentityObject, getLatestIdentityObjects, storeDiscoveredIdentityProfiles, storeRequestedIdentityProfile } from './profile-object';
 import type { DistributedObject, ObjectStore, ObjectTransport } from './types';
 import { createSignedObject, validateObject } from './envelope';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -41,7 +42,8 @@ async function createProfile(
   identity: TestIdentity,
   displayName: string,
   createdAt: string,
-  metadata?: Record<string, string>
+  metadata?: Record<string, string>,
+  profilePicture?: IdentityProfilePicture
 ): Promise<IdentityObject> {
   return await createSignedIdentityObject({
     display_name: displayName,
@@ -49,6 +51,7 @@ async function createProfile(
     encryption_public_key: identity.encryptionPublicKey,
     encryption_key_binding: await createEncryptionKeyBinding(identity),
     created_at: createdAt,
+    ...(profilePicture ? { profile_picture: profilePicture } : {}),
     ...(metadata ? { metadata } : {})
   }, identity.objectIdentity) as IdentityObject;
 }
@@ -136,6 +139,7 @@ describe('replicated identity profile objects', () => {
     const first = await createProfile(identity, 'Alice', '2026-10-01T00:00:00.000Z', {
       website_url: 'https://alice.example'
     });
+
     const updated = await createProfile(identity, 'Alice B', '2026-10-02T00:00:00.000Z');
 
     expect(await validateIdentityObject(first)).toBe(true);
@@ -144,6 +148,38 @@ describe('replicated identity profile objects', () => {
     expect(first.payload.metadata).toEqual({ website_url: 'https://alice.example' });
     expect(await validateIdentityObject(updated)).toBe(true);
     expect(updated.object_id).not.toBe(first.object_id);
+  });
+
+  it('uses the newest signed version when a picture is replaced or removed', async () => {
+    const identity = await createTestIdentity();
+    const firstPicture: IdentityProfilePicture = {
+      mime_type: 'image/webp',
+      width: 256,
+      height: 256,
+      data: 'AQID'
+    };
+    const replacementPicture: IdentityProfilePicture = {
+      ...firstPicture,
+      mime_type: 'image/jpeg',
+      data: 'BAUG'
+    };
+    const first = await createProfile(identity, 'Picture owner', '2026-10-12T00:00:00.000Z', undefined, firstPicture);
+    const replacement = await createProfile(identity, 'Picture owner', '2026-10-13T00:00:00.000Z', undefined, replacementPicture);
+    const removed = await createProfile(identity, 'Picture owner', '2026-10-14T00:00:00.000Z');
+    const store = createMemoryStore();
+
+    await storeDiscoveredIdentityProfiles(store, [first], 'local-peer');
+    await storeDiscoveredIdentityProfiles(store, [replacement], 'local-peer');
+    await expect(getLatestIdentityObject(store, identity.publicKey)).resolves.toMatchObject({
+      object_id: replacement.object_id,
+      payload: { profile_picture: replacementPicture }
+    });
+
+    await storeDiscoveredIdentityProfiles(store, [removed], 'local-peer');
+    await expect(getLatestIdentityObject(store, identity.publicKey)).resolves.toMatchObject({
+      object_id: removed.object_id
+    });
+    expect((await getLatestIdentityObject(store, identity.publicKey))?.payload.profile_picture).toBeUndefined();
   });
 
   it('rejects invalid identity payloads even when wrapped in a valid object signature', async () => {
@@ -295,7 +331,13 @@ describe('replicated identity profile objects', () => {
     const authorStore = createMemoryStore();
     const cacheStore = createMemoryStore();
     const browserStore = createMemoryStore();
-    const profile = await createProfile(identity, 'Offline Author', '2026-10-06T00:00:00.000Z');
+    const profilePicture: IdentityProfilePicture = {
+      mime_type: 'image/webp',
+      width: 256,
+      height: 256,
+      data: 'AQID'
+    };
+    const profile = await createProfile(identity, 'Offline Author', '2026-10-06T00:00:00.000Z', undefined, profilePicture);
     await authorStore.put(profile);
 
     const authorTransport = createTransport(['cache-peer'], async (peerId, packet) => {
@@ -314,6 +356,7 @@ describe('replicated identity profile objects', () => {
 
     const cachedProfile = await getLatestIdentityObject(browserStore, identity.publicKey);
     expect(cachedProfile?.payload.display_name).toBe('Offline Author');
+    expect(cachedProfile?.payload.profile_picture).toEqual(profilePicture);
     expect(cachedProfile?.author).toBe(identity.publicKey);
   });
 

@@ -303,7 +303,8 @@ async function createPeer(
     Object.assign(globalThis, { VITE_SIGNAL_SERVER_URL: signalEndpoint });
   }, endpoint);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Create New Identity', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Welcome! Pick your name!' }).waitFor();
+  await page.getByRole('button', { name: "I'll explore on my own", exact: true }).click();
   await page.waitForFunction(() => Boolean(window.__MYCELIUM_E2E__));
   await expect.poll(async () => (await readPeerState(page)).signallingStatus, {
     timeout: 20_000,

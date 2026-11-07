@@ -6,6 +6,7 @@ import { MarkdownComposer } from '../components/MarkdownComposer';
 import { IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
+import type { IdentityProfilePicture } from '../utils/profile-picture';
 
 interface ConversationPageProps {
   post: LocalPostView;
@@ -14,6 +15,7 @@ interface ConversationPageProps {
   contacts: Contact[];
   myPeerId?: string;
   myPublicKey?: string;
+  myProfilePicture?: IdentityProfilePicture | null;
   focusedPostId?: string | null;
   deletionTombstones?: readonly DeletionTombstone[];
   ancestry?: {
@@ -41,6 +43,7 @@ export function ConversationPage({
   contacts,
   myPeerId,
   myPublicKey,
+  myProfilePicture,
   focusedPostId,
   deletionTombstones = [],
   ancestry,
@@ -175,7 +178,7 @@ export function ConversationPage({
     if (inline) {
       return (
         <div className="conversation-inline-composer">
-          <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" />
+          <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" profilePicture={myProfilePicture} />
           <div className="conversation-inline-fields">
             <div className="conversation-inline-input-row">
               {textarea}
@@ -242,6 +245,11 @@ export function ConversationPage({
           authorOnline={
             currentPost.object.author !== myPublicKey
             && matchingContact?.online === true
+          }
+          authorProfilePicture={
+            currentPost.authorFingerprint === myPeerId || currentPost.object.author === myPublicKey
+              ? myProfilePicture ?? undefined
+              : matchingContact?.profilePicture ?? matchingContact?.identityObject?.payload.profile_picture
           }
           onAuthorClick={() => onAuthorClick(matchingContact?.fingerprint ?? currentPost.authorFingerprint)}
           onOpenPost={isRoot ? undefined : () => onOpenPost(objectId)}
@@ -337,7 +345,7 @@ export function ConversationPage({
               onClick={activateSelectedReplyComposer}
               onFocus={activateSelectedReplyComposer}
             >
-              <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" />
+              <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" profilePicture={myProfilePicture} />
               <span>Post your reply...</span>
             </button>
           )}

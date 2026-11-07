@@ -38,7 +38,7 @@ def websocket_is_open(websocket: WebSocketServerProtocol) -> bool:
 MAX_DISCOVERY_POSTS = int(os.environ.get('MAX_DISCOVERY_POSTS', '10000'))
 MAX_DISCOVERY_PROFILES = int(os.environ.get('MAX_DISCOVERY_PROFILES', '10000'))
 MAX_POST_SIZE = int(os.environ.get('MAX_POST_SIZE', '4096'))
-MAX_IDENTITY_PROFILE_SIZE = int(os.environ.get('MAX_IDENTITY_PROFILE_SIZE', '16384'))
+MAX_IDENTITY_PROFILE_SIZE = int(os.environ.get('MAX_IDENTITY_PROFILE_SIZE', '102400'))
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
 SIGNAL_QUEUE_TTL_SECONDS = int(os.environ.get('SIGNAL_QUEUE_TTL_SECONDS', '60'))
 MAX_QUEUED_SIGNALS_PER_CLIENT = int(os.environ.get('MAX_QUEUED_SIGNALS_PER_CLIENT', '32'))
