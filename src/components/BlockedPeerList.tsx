@@ -1,4 +1,4 @@
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
 import { CompactUsername } from './CompactUsername';
 import type { Contact } from '../types';
@@ -26,7 +26,7 @@ export function BlockedPeerList({ peerIds, contacts = [], onUnblock, onViewProfi
             <div className="peer-card-main">
               <IdentityAvatar
                 seed={peerId}
-                size={32}
+                size={AVATAR_SIZES.person}
                 alt={fingerprintToHumanName(peerId)}
                 profilePicture={contact?.profilePicture ?? contact?.identityObject?.payload.profile_picture}
               />

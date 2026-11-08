@@ -6,7 +6,7 @@ import {
   type ProfileImageInfo,
   type ProfilePictureCrop
 } from '../utils/profile-picture';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 
 interface ProfilePictureEditorProps {
   seed: string;
@@ -87,7 +87,7 @@ export function ProfilePictureEditor({ seed, picture, onChange }: ProfilePicture
         {previewUrl && previewStyle ? (
           <img className="profile-picture-crop-image" src={previewUrl} style={previewStyle} alt="Selected image crop preview" />
         ) : (
-          <IdentityAvatar seed={seed} size={128} alt="Current profile picture" profilePicture={picture} />
+          <IdentityAvatar seed={seed} size={AVATAR_SIZES.profileEditor} alt="Current profile picture" profilePicture={picture} />
         )}
       </div>
       {selectedFile && imageInfo ? (

@@ -98,6 +98,25 @@ describe('MessagesPage', () => {
     expect(markup).toContain('New message');
   });
 
+  it('renders message-list avatars at the larger messaging size', () => {
+    const markup = renderToStaticMarkup(
+      <MessagesPage
+        contacts={[alice]}
+        myPublicKey="my-public-key"
+        myPeerId="my-peer-id"
+        conversations={[summary(alice.publicKey, '2026-10-14T12:00:00.000Z')]}
+        previews={{}}
+        loading={false}
+        error={null}
+        previewError={null}
+        onOpenChat={() => {}}
+        onViewProfile={() => {}}
+      />
+    );
+
+    expect(markup).toContain('style="width:48px;height:48px"');
+  });
+
   it('shows a local search empty state and does not render plaintext search results', () => {
     const markup = renderToStaticMarkup(
       <MessagesPage

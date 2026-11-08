@@ -818,6 +818,11 @@ body, html, #root {
   overflow: visible;
 }
 
+.profile-main-avatar {
+  width: 120px;
+  height: 120px;
+}
+
 .identity-avatar-online {
   position: absolute;
   right: 0;
@@ -903,7 +908,8 @@ body, html, #root {
 
 .profile-avatar-link,
 .home-composer-avatar,
-.chat-message-avatar {
+.chat-message-avatar,
+.chat-header-avatar {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -921,44 +927,39 @@ body, html, #root {
 
 .profile-avatar-link:focus-visible,
 .home-composer-avatar:focus-visible,
-.chat-message-avatar:focus-visible {
+.chat-message-avatar:focus-visible,
+.chat-header-avatar:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 3px;
 }
 
 .profile-avatar-link .identity-avatar,
 .home-composer-avatar .identity-avatar,
-.chat-message-avatar .identity-avatar {
+.chat-message-avatar .identity-avatar,
+.chat-header-avatar .identity-avatar {
   box-shadow: none;
 }
 
-.profile-avatar-tools {
-  position: relative;
+.profile-share-actions {
   display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .profile-qr-button {
-  position: absolute;
-  right: -0.35rem;
-  bottom: -0.35rem;
-  z-index: 1;
   display: inline-flex;
-  width: 1.65rem;
-  height: 1.65rem;
+  flex: 0 0 var(--control-height);
+  width: var(--control-height);
+  height: var(--control-height);
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--color-accent);
-  border-radius: 50%;
-  background: var(--color-surface);
-  color: var(--color-accent);
-  box-shadow: var(--shadow-control);
-  cursor: pointer;
+  line-height: 1;
 }
 
-.profile-qr-button:hover {
-  background: var(--color-accent-soft);
+.profile-qr-button svg {
+  display: block;
 }
 
 .profile-qr-backdrop {
@@ -2712,12 +2713,6 @@ button.post-reply-count:focus-visible {
   outline-offset: 2px;
 }
 
-.person-row-avatar-button .identity-avatar-wrap {
-  flex: 0 0 2.5rem;
-  width: 2.5rem;
-  height: 2.5rem;
-}
-
 .person-row-details {
   display: flex;
   flex-direction: column;
@@ -2870,7 +2865,7 @@ button.post-reply-count:focus-visible {
   display: flex;
   flex: 1 1 auto;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1rem;
   min-width: 0;
 }
 
@@ -3168,6 +3163,14 @@ button.post-reply-count:focus-visible {
   flex: 1 1 auto;
   width: auto;
   max-width: 100%;
+}
+
+.chat-header-avatar {
+  flex: 0 0 auto;
+}
+
+.chat-header-avatar .identity-avatar-wrap {
+  vertical-align: middle;
 }
 
 .compact-profile-header .compact-username {
@@ -3489,6 +3492,11 @@ button.post-reply-count:focus-visible {
     display: flex;
     flex-direction: column;
     padding: 0;
+  }
+
+  .profile-main-avatar {
+    width: 92px;
+    height: 92px;
   }
 
   .app-main-column {

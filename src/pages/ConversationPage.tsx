@@ -3,7 +3,7 @@ import type { Contact } from '../types';
 import { postReplyTo, type DeletionTombstone, type LocalPostView, type PostAncestryResult, type RecommendationSummary } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { MarkdownComposer } from '../components/MarkdownComposer';
-import { IdentityAvatar } from '../components/IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from '../components/IdentityAvatar';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
 import type { IdentityProfilePicture } from '../utils/profile-picture';
@@ -178,7 +178,7 @@ export function ConversationPage({
     if (inline) {
       return (
         <div className="conversation-inline-composer">
-          <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" profilePicture={myProfilePicture} />
+          <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={AVATAR_SIZES.post} alt="" profilePicture={myProfilePicture} />
           <div className="conversation-inline-fields">
             <div className="conversation-inline-input-row">
               {textarea}
@@ -345,7 +345,7 @@ export function ConversationPage({
               onClick={activateSelectedReplyComposer}
               onFocus={activateSelectedReplyComposer}
             >
-              <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={36} alt="" profilePicture={myProfilePicture} />
+              <IdentityAvatar seed={myPeerId ?? myPublicKey ?? ''} size={AVATAR_SIZES.post} alt="" profilePicture={myProfilePicture} />
               <span>Post your reply...</span>
             </button>
           )}

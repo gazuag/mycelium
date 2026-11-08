@@ -5,7 +5,7 @@ import { exportPrivateKey, exportPublicKey, generateIdentityKeyPair, signString 
 import { canonicalizeObjectContent, calculateObjectId, createSignedObject, createSignedRecommendationObject, isRecommendationObject, validateObject, validateDistributedObject, type ImmutableObjectContent } from './envelope';
 import { createObjectIdentity } from './identity';
 import { IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbRecommendationSequenceStore } from './local-store';
-import { createLocalPostView, createReplyObjectPayload, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
+import { createLocalPostView, createReplyObjectPayload, filterDeletedPostViews, hydratePostViews, localPostMetadata, mergeLocalPostViews, selectFollowedPosts, upsertLocalPostView } from './post-state';
 import { RecommendationIndex, recommendationWeight, selectRecommendationCandidates } from './recommendations';
 import { applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, DEFAULT_REPLICATION_BUDGET, filterObjectsByFindQuery, findObject, FindAggregation, getFindObjectIds, getFindQueryCriteria, getReplicationBudget, MAX_FIND_REQUEST_OBJECT_IDS, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectBatchPacket, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, validateFindResponseObjects } from './transport';
 import { buildPacket } from '../p2p/protocol';
@@ -662,6 +662,23 @@ describe('distributed object foundation', () => {
 
     const views = await hydratePostViews(objectStore, metadataStore, undefined, async () => 'resolved-fingerprint');
     expect(views[0].authorFingerprint).toBe('resolved-fingerprint');
+  });
+
+  it('filters a stale hydrated view when its post was deleted before the result is merged', async () => {
+    const object = await createFixtureObject({
+      object_type: 'mycelium.post',
+      author: '',
+      created_at: '2026-08-25T00:00:00.000Z',
+      payload: { content: 'deleted during hydration' },
+      replication_policy: {}
+    });
+    const objectStore = createMemoryStore();
+    await objectStore.put(object);
+    const metadataStore = { put: async () => undefined, get: async () => null, delete: async () => undefined, query: async () => [] };
+    const hydratedViews = await hydratePostViews(objectStore, metadataStore);
+    const deletedPostIds = new Set([object.object_id]);
+
+    expect(filterDeletedPostViews(mergeLocalPostViews([], hydratedViews), deletedPostIds)).toEqual([]);
   });
 
   it('restores interaction metadata across fresh hydration', async () => {

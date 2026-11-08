@@ -189,6 +189,23 @@ describe('sendDm', () => {
     expect(replicate).not.toHaveBeenCalled();
   });
 
+  it('returns store_failed without invoking replication when storage does not admit the object', async () => {
+    const sender = await createIdentity('sender');
+    const recipient = await createIdentity('recipient');
+    const replicate = vi.fn(async () => ['peer']);
+
+    const result = await sendDm({
+      identity: sender,
+      recipientContact: contactFor(recipient),
+      plaintext: 'storage did not admit object',
+      store: createStore({ put: async () => false }),
+      replicate
+    });
+
+    expect(result.status).toBe('store_failed');
+    expect(replicate).not.toHaveBeenCalled();
+  });
+
   it('keeps sent status and an empty attemptedTo list when replication throws', async () => {
     const sender = await createIdentity('sender');
     const recipient = await createIdentity('recipient');

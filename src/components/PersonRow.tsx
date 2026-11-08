@@ -1,6 +1,6 @@
 import type { Contact } from '../types';
 import { displayNameOrFallback, displayProfileBio, resolvePeerDisplayName } from '../utils/fingerprintNames';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 
 interface PersonRowProps {
@@ -37,7 +37,7 @@ export function PersonRow({ contact, onViewProfile, actionLabel, onAction, mutua
           onClick={() => onViewProfile(contact.fingerprint || contact.publicKey)}
           aria-label={`View ${displayName}'s profile`}
         >
-          <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={40} alt="" online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
+          <IdentityAvatar seed={contact.fingerprint || contact.publicKey} size={AVATAR_SIZES.person} alt="" online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
         </button>
         <span className="person-row-details">
           <strong>

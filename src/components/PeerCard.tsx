@@ -1,7 +1,7 @@
 import type { Contact } from '../types';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { FollowButton } from './FollowButton';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 import { BlockButton } from './BlockButton';
 import { useDmUnread } from '../hooks/useDmUnread';
@@ -30,7 +30,7 @@ export function PeerCard({ contact, myPeerId, onViewProfile, onMessage, onToggle
             type="button"
             aria-label={`View ${displayName}'s profile`}
           >
-            <IdentityAvatar seed={contact.fingerprint} size={36} alt="" online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
+            <IdentityAvatar seed={contact.fingerprint} size={AVATAR_SIZES.post} alt="" online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
           </button>
           <div className="peer-label-block">
             <strong>

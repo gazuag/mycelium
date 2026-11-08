@@ -80,4 +80,24 @@ describe('PostCard content preview', () => {
 
     expect(container.querySelector('.post-content-more')).toBeNull();
   });
+
+  it('renders the larger feed author avatar', async () => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(
+      <PostCard
+        post={post}
+        authorName="Author"
+        authorId="author-id"
+        onAuthorClick={vi.fn()}
+        onLike={vi.fn()}
+        onDislike={vi.fn()}
+        onReply={vi.fn()}
+      />
+    ));
+
+    expect(container.querySelector('.post-avatar-button .identity-avatar-wrap')?.getAttribute('style'))
+      .toBe('width: 44px; height: 44px;');
+  });
 });

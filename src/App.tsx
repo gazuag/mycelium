@@ -89,7 +89,7 @@ import {
   WEB_PUSH_STAGED_MESSAGE_TYPE,
   WEB_PUSH_STAGING_MAX_ENTRIES
 } from './services/web-push-inbox';
-import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedIdentityObject, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, findLatestIdentityObjectsByConnectionQuery, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, getLatestIdentityObject, getLatestIdentityObjects, hydratePostViews, IDENTITY_OBJECT_TYPE, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, storeDiscoveredIdentityProfiles, storeRequestedIdentityProfile, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateIdentityObject, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type FindResponsePacket, type IdentityObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
+import { acceptDeleteRequest, applyFindQueryLimit, buildFindPacket, buildFindResponseObjectsPacket, buildFindResponsePacket, buildForwardedFindPacket, buildLocalQueryCriteria, buildObjectBatchPacket, buildObjectStorePacket, buildTimeRangeFindPacket, createDeleteRequest, createLocalPostView, createObjectIdentity, createPostObjectPayload, createReplyObjectPayload, createSignedIdentityObject, createSignedObject, createSignedRecommendationObject, DELETE_REQUEST_OBJECT_TYPE, ensurePostChainCached, expandObjectsWithPostChains, filterDeletedPostViews, findLatestIdentityObjectsByConnectionQuery, findObjectsByFindQueryPage, findObject, findObjects, FindAggregation, forwardFindRequestToChild, getFindObjectIds, getLatestIdentityObject, getLatestIdentityObjects, hydratePostViews, IDENTITY_OBJECT_TYPE, IndexedDbLocalPostMetadataStore, IndexedDbObjectStore, IndexedDbOutboxStore, IndexedDbRecommendationSequenceStore, isDeleteRequest, isDeletionAwareObjectStore, loadPostAncestry, localPostMetadata, mergeLocalPostViews, postReplyTo, queryFeedPage, RecommendationIndex, receiveAndReplicate, receiveBatchAndReplicate, receiveObjectPacket, replicateObject, respondToFindPacket, selectFindPeers, selectFollowedPosts, selectRecommendationCandidates, sendFindPacketToConnectedPeer, sendObjectBatches, sendObjectToPeers, sendReplyToAuthor, shouldRetainFindRequestRoute, storeDiscoveredIdentityProfiles, storeRequestedIdentityProfile, syncFeedFromPeer, upsertLocalPostView, validateFindResponseObjects, validateIdentityObject, validateObject, type DeletionAwareObjectStore, type DeletionTombstone, type DistributedObject, type FeedCursor, type FeedPageMetadata, type FindResponsePacket, type IdentityObject, type LocalPostMetadataStore, type LocalPostView, type ObjectPacket, type ObjectStore, type PostAncestryResult, type PostChainResult, type PostMention, type PostObject, type PostParentResolver, type RecommendationSummary } from './object-layer';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 import { isIdentityProfilePicture, profilePictureDataUrl, type IdentityProfilePicture } from './utils/profile-picture';
 import { completeWelcomeOnboarding, prepareWelcomeOnboarding } from './utils/welcome-onboarding';
@@ -297,6 +297,7 @@ function App() {
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
   const postViewsRef = useRef<LocalPostView[]>([]);
+  const deletedPostIdsRef = useRef(new Set<string>());
   const homeFeedInjectionSchedulerRef = useRef<HomeFeedInjectionScheduler | null>(null);
   const homeFeedInjectionCandidatesRef = useRef<{ recommendations: LocalPostView[]; discovery: LocalPostView[] }>({
     recommendations: [],
@@ -610,10 +611,18 @@ function App() {
     }, resolvePostAuthorFingerprint).then((hydratedViews) => {
       const hydratedWithMetadata = hydratedViews.filter((view) => view.notInterested !== undefined || view.hidden !== undefined).length;
       addLog(`Hydrated ${hydratedViews.length} posts from storage (${hydratedWithMetadata} with metadata)`);
-      setPostViews((prev) => mergeLocalPostViews(prev, hydratedViews));
+      setPostViews((prev) => filterDeletedPostViews(mergeLocalPostViews(prev, hydratedViews), deletedPostIdsRef.current));
     });
     if (isDeletionAwareObjectStore(objectStore)) {
-      void objectStore.queryDeletionTombstones().then(setDeletionTombstones).catch((error) => {
+      void objectStore.queryDeletionTombstones().then((tombstones) => {
+        tombstones.forEach((tombstone) => deletedPostIdsRef.current.add(tombstone.target_object_id));
+        setDeletionTombstones(tombstones);
+        postViewsRef.current = filterDeletedPostViews(postViewsRef.current, deletedPostIdsRef.current);
+        setPostViews((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+        setDiscoveryPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+        setDiscoveryReplyPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+        setDiscoveryOnboardingPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+      }).catch((error) => {
         addLog(`Deletion tombstone hydration failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
@@ -749,7 +758,9 @@ function App() {
       getContact: (publicKey) => contactsRef.current.find((contact) => contact.publicKey === publicKey) ?? null,
       store,
       outbox: outboxService,
-      connectedPeers: () => objectTransport.connectedPeers()
+      connectedPeers: () => objectTransport.connectedPeers(),
+      getBlockedPeers: () => blockedPeersRef.current,
+      dispatchWebPush: dispatchWebPushObject
     });
     inboxServiceRef.current = service;
     dmServiceRef.current = dmService;
@@ -942,7 +953,9 @@ function App() {
     const localIdentity = identityRef.current;
     if (!scheduler || !localIdentity) return;
 
-    const knownIds = new Set(postViewsRef.current.map((post) => post.object.object_id));
+    const activeIncomingViews = filterDeletedPostViews(incomingViews, deletedPostIdsRef.current);
+    const activePostViews = filterDeletedPostViews(postViewsRef.current, deletedPostIdsRef.current);
+    const knownIds = new Set(activePostViews.map((post) => post.object.object_id));
     const followedKeys = new Set([
       ...contactsRef.current
         .filter((contact) => contact.followed)
@@ -951,7 +964,7 @@ function App() {
       localIdentity.publicKey
     ]);
     const eligibleIds = new Set(selectFollowedPosts(
-      [...postViewsRef.current, ...incomingViews],
+      [...activePostViews, ...activeIncomingViews],
       followedKeys
     )
       .filter((post) =>
@@ -970,7 +983,7 @@ function App() {
     };
 
     let changed = false;
-    for (const post of incomingViews) {
+    for (const post of activeIncomingViews) {
       const postId = post.object.object_id;
       if (knownIds.has(postId) || !eligibleIds.has(postId)) continue;
       try {
@@ -979,7 +992,7 @@ function App() {
         addLog(`Home feed injection scheduling failed for ${postId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    postViewsRef.current = incomingViews.reduce(upsertLocalPostView, postViewsRef.current);
+    postViewsRef.current = activeIncomingViews.reduce(upsertLocalPostView, activePostViews);
     if (changed) setHomeFeedInjectionRevision((revision) => revision + 1);
   }, [addLog]);
 
@@ -1119,10 +1132,13 @@ function App() {
       throw new Error('Accepted Delete Request has no target object ID');
     }
     const targetObjectId = payload.target_object_id;
+    deletedPostIdsRef.current.add(targetObjectId);
+    postViewsRef.current = filterDeletedPostViews(postViewsRef.current, deletedPostIdsRef.current);
+    setPostViews((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+    setDiscoveryPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+    setDiscoveryReplyPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
+    setDiscoveryOnboardingPosts((previous) => filterDeletedPostViews(previous, deletedPostIdsRef.current));
     setDeletionTombstones(await store.queryDeletionTombstones());
-    setPostViews((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
-    setDiscoveryPosts((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
-    setDiscoveryReplyPosts((previous) => previous.filter((view) => view.object.object_id !== targetObjectId));
     homeFeedInjectionCandidatesRef.current = {
       recommendations: homeFeedInjectionCandidatesRef.current.recommendations
         .filter((view) => view.object.object_id !== targetObjectId),
@@ -1866,7 +1882,7 @@ function App() {
       if (metadataStore && !metadata) await metadataStore.put(localPostMetadata(view));
       return view;
     }));
-    setPostViews((previous) => views.reduce(upsertLocalPostView, previous));
+    setPostViews((previous) => filterDeletedPostViews(views.reduce(upsertLocalPostView, previous), deletedPostIdsRef.current));
     return result;
   };
 
@@ -2486,7 +2502,7 @@ function App() {
           : null;
         if (view) {
           recordNewEligibleHomePosts([view]);
-          setPostViews((prev) => upsertLocalPostView(prev, view));
+          setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, view), deletedPostIdsRef.current));
           await cachePostChain(object);
           void replyUnread.discover([object]);
         }
@@ -2628,7 +2644,7 @@ function App() {
             }
 
             recordNewEligibleHomePosts(receivedViews);
-            setPostViews((prev) => receivedViews.reduce(upsertLocalPostView, prev));
+            setPostViews((prev) => filterDeletedPostViews(receivedViews.reduce(upsertLocalPostView, prev), deletedPostIdsRef.current));
             addLog(`Received ${newlyStoredObjects.length} canonical objects from ${peer}`);
           } catch (error) {
             processingError = error instanceof Error ? error : new Error('Feed batch processing failed');
@@ -3531,7 +3547,7 @@ function App() {
     const target = postViews.find((post) => post.object.object_id === postId);
     if (target) {
       await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
-      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+      setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, { ...target, hidden: true }), deletedPostIdsRef.current));
     }
   };
 
@@ -3552,8 +3568,8 @@ function App() {
     if (target) {
       const next = { ...target, hidden: false };
       await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
-      setPostViews((prev) => upsertLocalPostView(prev, next));
-      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+      setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, next), deletedPostIdsRef.current));
+      setDiscoveryPosts((prev) => filterDeletedPostViews(upsertLocalPostView(prev, next), deletedPostIdsRef.current));
     }
   };
 
@@ -3567,8 +3583,8 @@ function App() {
     const target = discoveryPosts.find((post) => post.object.object_id === postId);
     if (target) {
       await localPostMetadataStoreRef.current?.put(localPostMetadata({ ...target, hidden: true }));
-      setPostViews((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
-      setDiscoveryPosts((prev) => upsertLocalPostView(prev, { ...target, hidden: true }));
+      setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, { ...target, hidden: true }), deletedPostIdsRef.current));
+      setDiscoveryPosts((prev) => filterDeletedPostViews(upsertLocalPostView(prev, { ...target, hidden: true }), deletedPostIdsRef.current));
     }
   };
 
@@ -3588,8 +3604,8 @@ function App() {
       await objectStoreRef.current?.put(recommendation);
       recommendationIndexRef.current.add(recommendation);
       setRecommendationRevision((revision) => revision + 1);
-      setPostViews((prev) => upsertLocalPostView(prev, target));
-      setDiscoveryPosts((prev) => upsertLocalPostView(prev, target));
+      setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, target), deletedPostIdsRef.current));
+      setDiscoveryPosts((prev) => filterDeletedPostViews(upsertLocalPostView(prev, target), deletedPostIdsRef.current));
       await localPostMetadataStoreRef.current?.put(localPostMetadata(target));
       const socket = signallingSocketRef.current;
       if (socket && socket.readyState === WebSocket.OPEN) {
@@ -3610,8 +3626,8 @@ function App() {
     const target = postViews.find((post) => post.object.object_id === objectId) ?? discoveryPosts.find((post) => post.object.object_id === objectId);
     if (target) {
       const next = { ...target, notInterested: true };
-      setPostViews((prev) => upsertLocalPostView(prev, next));
-      setDiscoveryPosts((prev) => upsertLocalPostView(prev, next));
+      setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, next), deletedPostIdsRef.current));
+      setDiscoveryPosts((prev) => filterDeletedPostViews(upsertLocalPostView(prev, next), deletedPostIdsRef.current));
       await localPostMetadataStoreRef.current?.put(localPostMetadata(next));
       addLog(`Disliked post ${objectId}`);
     }
@@ -3648,6 +3664,7 @@ function App() {
       setProfileNotice('This post is no longer available to delete.');
       return;
     }
+    if (!window.confirm('Delete this post? This action will remove it from your feeds and propagate the deletion to peers. This cannot be undone.')) return;
     await submitDeleteRequest(target);
   };
 
@@ -3722,7 +3739,7 @@ function App() {
 
     const localPostView = createLocalPostView(postObject, identity.id, { source: 'local' });
     recordNewEligibleHomePosts([localPostView]);
-    setPostViews((prev) => upsertLocalPostView(prev, localPostView));
+    setPostViews((prev) => filterDeletedPostViews(upsertLocalPostView(prev, localPostView), deletedPostIdsRef.current));
     await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
 
     addLog(`Created and stored object post ${postObject.object_id}`);
@@ -3907,7 +3924,7 @@ function App() {
         ...(metadata?.hidden === undefined ? {} : { hidden: metadata.hidden })
       });
       if (metadataStore) await metadataStore.put(localPostMetadata(parentView));
-      setPostViews((previous) => upsertLocalPostView(previous, parentView));
+      setPostViews((previous) => filterDeletedPostViews(upsertLocalPostView(previous, parentView), deletedPostIdsRef.current));
       return parentView;
     };
 
@@ -4354,13 +4371,14 @@ function App() {
         recordNewEligibleHomePosts(verifiedPosts.filter((view) => !knownPostIds.has(view.object.object_id)));
       }
       void replyUnread.discover([...verifiedPosts, ...verifiedReplies].map((post) => post.object));
-      setDiscoveryReplyPosts((previous) => mergeLocalPostViews(previous, verifiedReplies));
+      setDiscoveryReplyPosts((previous) => filterDeletedPostViews(mergeLocalPostViews(previous, verifiedReplies), deletedPostIdsRef.current));
       setDiscoveryPosts((prev) => {
         const merged = mergeLocalPostViews(prev, verifiedPosts);
-        return merged.sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
+        return filterDeletedPostViews(merged, deletedPostIdsRef.current)
+          .sort((a, b) => new Date(b.object.created_at).getTime() - new Date(a.object.created_at).getTime());
       });
       if (requestId === discoveryOnboardingRequestRef.current) {
-        setDiscoveryOnboardingPosts(verifiedPosts.slice(0, 20));
+        setDiscoveryOnboardingPosts(filterDeletedPostViews(verifiedPosts, deletedPostIdsRef.current).slice(0, 20));
         setDiscoveryOnboardingStatus('ready');
       }
       addLog(`Discovery result: received=${items.length} posts=${verifiedPosts.length} replies=${verifiedReplies.length} recommendations=${validated.recommendations.length} unsupported=${validated.unsupportedCount} invalid=${validated.invalidCount}`);

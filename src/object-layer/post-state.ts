@@ -112,6 +112,13 @@ export function mergeLocalPostViews(views: LocalPostView[], incoming: LocalPostV
   return incoming.reduce(upsertLocalPostView, views);
 }
 
+export function filterDeletedPostViews(
+  views: readonly LocalPostView[],
+  deletedPostIds: ReadonlySet<string>
+): LocalPostView[] {
+  return views.filter((view) => !deletedPostIds.has(view.object.object_id));
+}
+
 export function createReplyObjectPayload(
   replyTo: string,
   replyToAuthor?: string,

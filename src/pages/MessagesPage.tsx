@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ConversationSummary } from '../object-layer/conversations';
-import { IdentityAvatar } from '../components/IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { useDmUnread } from '../hooks/useDmUnread';
 import type { ReplyNotification } from '../hooks/useReplyUnread';
@@ -266,7 +266,7 @@ export function MessagesPage({
                       />
                       <IdentityAvatar
                         seed={reply.authorFingerprint}
-                        size={42}
+                        size={AVATAR_SIZES.reply}
                         alt={name}
                         online={contact?.online === true}
                         profilePicture={reply.authorFingerprint === myPeerId || reply.authorPublicKey === myPublicKey
@@ -332,7 +332,7 @@ export function MessagesPage({
                     />
                     <IdentityAvatar
                       seed={contact?.fingerprint ?? conversation.counterparty}
-                      size={42}
+                      size={AVATAR_SIZES.messageList}
                       alt={name}
                       online={contact?.online === true}
                       profilePicture={contact?.profilePicture ?? contact?.identityObject?.payload.profile_picture}

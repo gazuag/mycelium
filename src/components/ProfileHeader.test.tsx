@@ -78,6 +78,19 @@ afterEach(async () => {
 });
 
 describe('ProfileHeader sharing', () => {
+  it('uses a prominent profile avatar and groups independent QR and Share actions', async () => {
+    await renderProfile();
+
+    const avatar = container.querySelector('.profile-title-main .identity-avatar-wrap');
+    const qrButton = container.querySelector('[aria-label="Show Alice\'s profile QR code"]');
+    const shareButton = container.querySelector('[aria-label="Share Alice\'s profile"]');
+
+    expect(avatar?.classList.contains('profile-main-avatar')).toBe(true);
+    expect(container.querySelector('.profile-avatar-tools')).toBeNull();
+    expect(qrButton?.closest('.profile-share-actions')).not.toBeNull();
+    expect(qrButton?.closest('.profile-share-actions')).toBe(shareButton?.closest('.profile-share-actions'));
+  });
+
   it('opens the full custom profile picture in a centered dialog', async () => {
     const onAvatarClick = vi.fn();
     await act(async () => root.render(

@@ -48,7 +48,9 @@ export async function sendDm({
   });
 
   try {
-    await store.put(object);
+    if (!(await store.put(object))) {
+      return { status: 'store_failed', attemptedTo: [], keyChanged };
+    }
   } catch {
     return { status: 'store_failed', attemptedTo: [], keyChanged };
   }

@@ -1,6 +1,9 @@
-import type { Contact } from '../types';
+import { deriveFingerprint } from '../crypto/identity';
+import { isWebPushCapability } from '../services/web-push';
+import type { WebPushDispatchResult } from '../services/web-push-dispatch';
+import type { Contact, WebPushCapability } from '../types';
 import { sendDm, type SendDmResult } from './dm-send';
-import type { DmObjectIdentity } from './dm-object';
+import { DM_OBJECT_TYPE, type DmObjectIdentity } from './dm-object';
 import type { DistributedObject, ObjectStore } from './types';
 
 export interface DmOutboxService {
@@ -21,6 +24,11 @@ export interface DmServiceOptions {
   store: ObjectStore;
   outbox: DmOutboxService;
   connectedPeers: () => string[];
+  getBlockedPeers?: () => ReadonlySet<string>;
+  dispatchWebPush?: (
+    object: DistributedObject,
+    capability: WebPushCapability
+  ) => Promise<WebPushDispatchResult>;
   now?: () => Date;
 }
 
@@ -32,6 +40,8 @@ export function createDmService({
   store,
   outbox,
   connectedPeers,
+  getBlockedPeers,
+  dispatchWebPush,
   now
 }: DmServiceOptions): {
   sendMessage(recipientPublicKey: string, plaintext: string): Promise<SendMessageResult>;
@@ -60,6 +70,16 @@ export function createDmService({
       now,
       replicate: async (object) => {
         await outbox.enqueue(object);
+        if (dispatchWebPush) {
+          void dispatchLocalDm(object, {
+            identity,
+            getContact,
+            getBlockedPeers,
+            dispatchWebPush
+          }).catch(() => {
+            console.warn('Web Push direct-message dispatch failed unexpectedly');
+          });
+        }
         await outbox.flush();
         const entry = await outbox.getEntry(object.object_id);
         return [...outbox.getAttemptedTo(object.object_id)];
@@ -97,4 +117,36 @@ export function createDmService({
   };
 
   return { sendMessage, flushOutbox };
+}
+
+async function dispatchLocalDm(
+  object: DistributedObject,
+  {
+    identity,
+    getContact,
+    getBlockedPeers,
+    dispatchWebPush
+  }: Pick<DmServiceOptions, 'getContact' | 'getBlockedPeers' | 'dispatchWebPush'> & {
+    readonly identity: DmObjectIdentity;
+  }
+): Promise<void> {
+  if (object.object_type !== DM_OBJECT_TYPE || !object.recipient) return;
+  if (object.recipient === identity.publicKey) return;
+
+  const [localFingerprint, recipientFingerprint] = await Promise.all([
+    deriveFingerprint(identity.publicKey),
+    deriveFingerprint(object.recipient)
+  ]);
+  if (localFingerprint !== identity.id || recipientFingerprint === localFingerprint) return;
+
+  const contact = getContact(object.recipient);
+  if (!contact
+    || contact.publicKey !== object.recipient
+    || contact.fingerprint !== recipientFingerprint
+    || !isWebPushCapability(contact.webPush)) return;
+
+  const blockedPeers = getBlockedPeers?.() ?? new Set<string>();
+  if (blockedPeers.has(contact.publicKey) || blockedPeers.has(recipientFingerprint)) return;
+
+  await dispatchWebPush?.(object, contact.webPush);
 }

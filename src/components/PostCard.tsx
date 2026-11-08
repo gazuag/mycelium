@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { LocalPostView } from '../object-layer';
 import { postContent, postImageSizes, postTags } from '../object-layer';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { PeerName } from './PeerName';
 import { LikeButton } from './LikeButton';
 import { HideButton } from './HideButton';
@@ -79,7 +79,7 @@ export function PostCard({
       <div className="post-card-header">
         <div className="post-author-line">
           <button className="ghost-link post-avatar-button" onClick={() => onAuthorClick(authorId)} type="button" aria-label={`View ${authorName}'s profile`}>
-            <IdentityAvatar seed={authorId} size={36} alt="" online={authorOnline} profilePicture={authorProfilePicture} />
+            <IdentityAvatar seed={authorId} size={AVATAR_SIZES.post} alt="" online={authorOnline} profilePicture={authorProfilePicture} />
           </button>
           <button className="ghost-link post-author-button" onClick={() => onAuthorClick(authorId)} type="button">
             <strong><PeerName peerId={authorId} displayName={authorDisplayName ?? authorName} /></strong>

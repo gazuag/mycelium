@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
-import { IdentityAvatar } from '../components/IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import type { Contact } from '../types';
 import type { DmEvents } from '../object-layer/dm-events';
@@ -125,6 +125,20 @@ export function DmChatPage({
           </button>
         ) : null}
         <span className="chat-header-title">
+          <button
+            className="chat-header-avatar"
+            type="button"
+            onClick={() => onViewProfile(contact.fingerprint || contact.publicKey)}
+            aria-label={`View ${displayName}'s profile`}
+          >
+            <IdentityAvatar
+              seed={contact.fingerprint || contact.publicKey}
+              size={AVATAR_SIZES.message}
+              alt=""
+              online={contact.online === true}
+              profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture}
+            />
+          </button>
           <span className="chat-header-prefix">Chat with</span>
           <CompactUsername
             peerId={contact.fingerprint || contact.publicKey}
@@ -153,7 +167,7 @@ export function DmChatPage({
               >
                 <IdentityAvatar
                   seed={message.direction === 'out' ? myPeerId : contact.fingerprint}
-                  size={21}
+                  size={AVATAR_SIZES.message}
                   alt=""
                   online={message.direction === 'in' && contact.online === true}
                   profilePicture={message.direction === 'out'

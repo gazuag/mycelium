@@ -2,9 +2,24 @@ import { useEffect, useState } from 'react';
 import { createIdenticonDataUrl } from '../utils/identicon';
 import { profilePictureDataUrl } from '../utils/profile-picture';
 
+export const AVATAR_SIZES = {
+  profile: 120,
+  post: 44,
+  reply: 44,
+  messageList: 48,
+  message: 42,
+  person: 48,
+  mention: 40,
+  composer: 48,
+  popularPost: 48,
+  sharePreview: 38,
+  profileEditor: 128
+} as const;
+
 interface IdentityAvatarProps {
   seed: string;
   size?: number;
+  className?: string;
   alt?: string;
   online?: boolean;
   profilePicture?: unknown;
@@ -13,6 +28,7 @@ interface IdentityAvatarProps {
 export function IdentityAvatar({
   seed,
   size = 40,
+  className,
   alt = 'Identity avatar',
   online = false,
   profilePicture
@@ -25,7 +41,10 @@ export function IdentityAvatar({
   }, [pictureSource]);
 
   return (
-    <span className="identity-avatar-wrap" style={{ width: size, height: size }}>
+    <span
+      className={`identity-avatar-wrap${className ? ` ${className}` : ''}`}
+      style={className ? undefined : { width: size, height: size }}
+    >
       <img
         className="identity-avatar"
         src={pictureSource && !pictureFailed ? pictureSource : createIdenticonDataUrl(seed, size)}

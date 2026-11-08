@@ -1,6 +1,6 @@
 import type { Contact } from '../types';
 import { CompactUsername } from './CompactUsername';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { displayNameOrFallback, fingerprintToHumanName } from '../utils/fingerprintNames';
 import { parsePeerId } from '../utils/peerId';
 
@@ -57,7 +57,7 @@ export function PeerRecipientPicker({
         const label = mode === 'mention' ? `@${handle ?? name}` : name;
         const identity = (
           <>
-            <IdentityAvatar seed={peerId} size={mode === 'mention' ? 32 : 42} alt={name} online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
+            <IdentityAvatar seed={peerId} size={mode === 'mention' ? AVATAR_SIZES.mention : AVATAR_SIZES.messageList} alt={name} online={contact.online === true} profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />
             <span className="message-row-content">
               {mode === 'mention' ? (
                 <strong>{label}</strong>

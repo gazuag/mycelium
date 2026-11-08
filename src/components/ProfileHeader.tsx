@@ -4,7 +4,7 @@ import { displayNameOrFallback, displayProfileBio } from '../utils/fingerprintNa
 import { createPeerAddUrl } from '../utils/peerAddUrl';
 import { profilePictureDataUrl } from '../utils/profile-picture';
 import { FollowButton } from './FollowButton';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { CompactUsername } from './CompactUsername';
 import { BlockButton } from './BlockButton';
 import { PeerProfileQr } from './PeerProfileQr';
@@ -56,21 +56,18 @@ export function ProfileHeader({
     <section className="profile-header card">
       <div className="profile-title">
         <div className="profile-title-main">
-          <span className="profile-avatar-tools">
-            {onAvatarClick ? (
-              <button
-                className={`profile-avatar-link${profilePictureUrl ? ' has-profile-picture' : ''}`}
-                type="button"
-                onClick={() => profilePictureUrl ? setProfilePictureOpen(true) : onAvatarClick()}
-                aria-label={profilePictureUrl ? `View ${displayName}'s profile picture` : `View ${displayName}'s profile`}
-              >
-                <IdentityAvatar seed={contact.fingerprint} size={42} alt="" online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
-              </button>
-            ) : (
-              <IdentityAvatar seed={contact.fingerprint} size={42} alt={displayName} online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
-            )}
-            <PeerProfileQr peerId={peerId} displayName={displayName} open={qrOpen} onOpenChange={setQrOpen} />
-          </span>
+          {onAvatarClick ? (
+            <button
+              className={`profile-avatar-link${profilePictureUrl ? ' has-profile-picture' : ''}`}
+              type="button"
+              onClick={() => profilePictureUrl ? setProfilePictureOpen(true) : onAvatarClick()}
+              aria-label={profilePictureUrl ? `View ${displayName}'s profile picture` : `View ${displayName}'s profile`}
+            >
+              <IdentityAvatar seed={contact.fingerprint} size={AVATAR_SIZES.profile} className="profile-main-avatar" alt="" online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
+            </button>
+          ) : (
+            <IdentityAvatar seed={contact.fingerprint} size={AVATAR_SIZES.profile} className="profile-main-avatar" alt={displayName} online={showOnlineIndicator && contact.online === true} profilePicture={profilePicture} />
+          )}
           <div className="profile-title-name">
             <strong>
               <CompactUsername
@@ -102,20 +99,23 @@ export function ProfileHeader({
             <BlockButton peerId={contact.fingerprint} contacts={[contact]} myPeerId={myPeerId} onBlock={() => onBlock()} />
           </>
         ) : null}
-        {profileUrl ? (
-          <SharePopover
-            title={displayName}
-            description={PROFILE_SHARE_TEXT}
-            url={profileUrl}
-            ariaLabel={`Share ${displayName}'s profile`}
-            avatar={<IdentityAvatar seed={peerId} size={38} alt="" profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />}
-            onOpenQr={() => setQrOpen(true)}
-          />
-        ) : (
-          <button className="btn secondary share-popover-trigger" type="button" disabled>
-            Share
-          </button>
-        )}
+        <div className="profile-share-actions">
+          <PeerProfileQr peerId={peerId} displayName={displayName} open={qrOpen} onOpenChange={setQrOpen} />
+          {profileUrl ? (
+            <SharePopover
+              title={displayName}
+              description={PROFILE_SHARE_TEXT}
+              url={profileUrl}
+              ariaLabel={`Share ${displayName}'s profile`}
+              avatar={<IdentityAvatar seed={peerId} size={AVATAR_SIZES.sharePreview} alt="" profilePicture={contact.profilePicture ?? contact.identityObject?.payload.profile_picture} />}
+              onOpenQr={() => setQrOpen(true)}
+            />
+          ) : (
+            <button className="btn secondary share-popover-trigger" type="button" disabled>
+              Share
+            </button>
+          )}
+        </div>
       </div>
       {profilePictureOpen && profilePictureUrl ? (
         <div className="profile-picture-backdrop" onClick={() => setProfilePictureOpen(false)}>

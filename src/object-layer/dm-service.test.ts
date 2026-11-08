@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  deriveFingerprint,
   exportPrivateKey,
   exportPublicKey,
   generateIdentityKeyPair
@@ -11,12 +12,13 @@ import {
   exportEncryptionPublicKey,
   generateEncryptionKeyPair
 } from '../crypto/dm-crypto';
-import type { Contact } from '../types';
+import type { Contact, WebPushCapability } from '../types';
 import { createDmService } from './dm-service';
 import { createOutboxService } from './outbox-service';
 import type { DmObjectIdentity } from './dm-object';
 import type { OutboxEntry, OutboxStore } from './local-store';
 import type { DistributedObject, ObjectStore } from './types';
+import type { WebPushDispatchResult } from '../services/web-push-dispatch';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -87,10 +89,37 @@ function makeOutboxStore(): OutboxStore {
   };
 }
 
-function makeObjectStore(records: DistributedObject[] = []): ObjectStore {
+async function makePushIdentity(id: string): Promise<TestIdentity> {
+  const identity = await makeIdentity(id);
+  return { ...identity, id: await deriveFingerprint(identity.publicKey) };
+}
+
+async function makePushContact(identity: TestIdentity, overrides: Partial<Contact> = {}): Promise<Contact> {
+  return {
+    publicKey: identity.publicKey,
+    fingerprint: await deriveFingerprint(identity.publicKey),
+    addedAt: NOW.toISOString(),
+    followed: false,
+    encryptionPublicKey: identity.encryptionPublicKey,
+    webPush: {
+      endpoint: 'https://push.example.test/subscription',
+      p256dh: 'public-key',
+      auth: 'auth-secret'
+    },
+    ...overrides
+  };
+}
+
+function makeObjectStore(
+  records: DistributedObject[] = [],
+  options: { events?: string[]; storeFailure?: boolean; storeNotAdmitted?: boolean } = {}
+): ObjectStore {
   return {
     async put(object) {
+      if (options.storeFailure) throw new Error('store failure');
+      if (options.storeNotAdmitted) return false;
       records.push(object);
+      options.events?.push('stored');
       return true;
     },
     async get(objectId) {
@@ -110,6 +139,17 @@ function makeHarness(options: {
   sendDirect?: (peerId: string, object: DistributedObject) => Promise<boolean>;
   replicate?: (object: DistributedObject, alreadyAttemptedTo: Set<string>) => Promise<string[]>;
   flush?: () => Promise<unknown>;
+  enqueueFailure?: boolean;
+  storeFailure?: boolean;
+  storeNotAdmitted?: boolean;
+  events?: string[];
+  blockedPeers?: ReadonlySet<string>;
+  getBlockedPeers?: () => ReadonlySet<string>;
+  dispatch?: (
+    object: DistributedObject,
+    capability: WebPushCapability
+  ) => Promise<WebPushDispatchResult>;
+  getContact?: (publicKey: string) => Contact | null;
 } = { identity: null }) {
   const records: DistributedObject[] = [];
   const outboxStore = makeOutboxStore();
@@ -139,17 +179,34 @@ function makeHarness(options: {
   });
   const service = createDmService({
     getIdentity: () => options.identity ?? null,
-    getContact: (publicKey) => options.contact?.publicKey === publicKey ? options.contact : null,
-    store: makeObjectStore(records),
-    outbox: options.flush
+    getContact: options.getContact
+      ?? ((publicKey) => options.contact?.publicKey === publicKey ? options.contact : null),
+    store: makeObjectStore(records, {
+      events: options.events,
+      storeFailure: options.storeFailure,
+      storeNotAdmitted: options.storeNotAdmitted
+    }),
+    outbox: options.flush || options.enqueueFailure || options.events
       ? {
-          enqueue: (object) => outbox.enqueue(object),
-          flush: options.flush,
+          enqueue: async (object) => {
+            if (options.enqueueFailure) throw new Error('enqueue failure');
+            await outbox.enqueue(object);
+            options.events?.push('enqueued');
+          },
+          flush: options.flush ?? (() => outbox.flush()),
           getEntry: (objectId) => outbox.getEntry(objectId),
           getAttemptedTo: (objectId) => outbox.getAttemptedTo(objectId)
         }
       : outbox,
     connectedPeers: () => connectedPeers,
+    getBlockedPeers: options.getBlockedPeers
+      ?? (() => options.blockedPeers ?? new Set<string>()),
+    dispatchWebPush: options.dispatch
+      ? async (object, capability) => {
+          options.events?.push('dispatched');
+          return await options.dispatch?.(object, capability) ?? { status: 'accepted' };
+        }
+      : undefined,
     now: () => NOW
   });
   return { service, outbox, outboxStore, records, sends, replicateCalls, connectedPeers };
@@ -160,6 +217,212 @@ afterEach(() => {
 });
 
 describe('createDmService', () => {
+  it('dispatches the canonical encrypted DM once after local storage and enqueue', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const contact = await makePushContact(recipient);
+    const events: string[] = [];
+    const dispatch = vi.fn(async () => ({ status: 'accepted' } as const));
+    const harness = makeHarness({
+      identity: sender,
+      contact,
+      events,
+      dispatch,
+      peers: []
+    });
+
+    const result = await harness.service.sendMessage(contact.publicKey, 'private message');
+
+    expect(result.status).toBe('sent');
+    if (result.status !== 'sent') throw new Error('Expected a sent DM');
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch).toHaveBeenCalledWith(result.object, contact.webPush);
+    expect(result.object.object_type).toBe('mycelium.dm');
+    expect(result.object.recipient).toBe(recipient.publicKey);
+    expect(JSON.stringify(result.object.payload)).not.toContain('private message');
+    expect(events.indexOf('stored')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('enqueued')).toBeGreaterThan(events.indexOf('stored'));
+    expect(events.indexOf('dispatched')).toBeGreaterThan(events.indexOf('enqueued'));
+
+    await harness.service.flushOutbox();
+    await harness.service.flushOutbox();
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch when recipient identity or capability is unavailable or inconsistent', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const other = await makePushIdentity('other');
+    const validContact = await makePushContact(recipient);
+
+    const cases: Array<{
+      contact: Contact | undefined;
+      getContact?: (publicKey: string) => Contact | null;
+    }> = [
+      { contact: undefined },
+      { contact: await makePushContact(recipient, { fingerprint: 'wrong-fingerprint' }) },
+      { contact: await makePushContact(recipient, { webPush: undefined }) },
+      {
+        contact: await makePushContact(recipient, {
+          webPush: { ...validContact.webPush!, endpoint: 'http://push.example.test' }
+        })
+      },
+      {
+        contact: validContact,
+        getContact: vi.fn()
+          .mockReturnValueOnce(validContact)
+          .mockReturnValueOnce(await makePushContact(other, {
+            fingerprint: await deriveFingerprint(recipient.publicKey)
+          }))
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dispatch = vi.fn(async () => ({ status: 'accepted' } as const));
+      const getContact = testCase.getContact ?? vi.fn((publicKey: string) =>
+        testCase.contact?.publicKey === publicKey ? testCase.contact : null
+      );
+      const harness = makeHarness({
+        identity: sender,
+        contact: testCase.contact,
+        getContact,
+        dispatch,
+        peers: []
+      });
+
+      await harness.service.sendMessage(recipient.publicKey, 'private message');
+      if (testCase.contact) {
+        await vi.waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+      }
+      expect(dispatch).not.toHaveBeenCalled();
+    }
+  });
+
+  it('skips dispatch for blocks by recipient public key or fingerprint and for self-recipient sends', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const cases = [
+      {
+        contact: await makePushContact(recipient),
+        blockedPeers: new Set([recipient.publicKey])
+      },
+      {
+        contact: await makePushContact(recipient),
+        blockedPeers: new Set([await deriveFingerprint(recipient.publicKey)])
+      },
+      {
+        contact: await makePushContact(sender),
+        blockedPeers: new Set<string>()
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dispatch = vi.fn(async () => ({ status: 'accepted' } as const));
+      const getBlockedPeers = vi.fn(() => testCase.blockedPeers);
+      const harness = makeHarness({
+        identity: sender,
+        contact: testCase.contact,
+        blockedPeers: testCase.blockedPeers,
+        getBlockedPeers,
+        dispatch,
+        peers: []
+      });
+
+      await harness.service.sendMessage(testCase.contact.publicKey, 'private message');
+      if (testCase.contact.publicKey !== sender.publicKey) {
+        await vi.waitFor(() => expect(getBlockedPeers).toHaveBeenCalledOnce());
+      }
+      expect(dispatch).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not dispatch when local storage does not admit the DM or outbox enqueue fails', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const contact = await makePushContact(recipient);
+    const dispatch = vi.fn(async () => ({ status: 'accepted' } as const));
+
+    const storageFailure = makeHarness({
+      identity: sender,
+      contact,
+      storeFailure: true,
+      dispatch
+    });
+    await expect(storageFailure.service.sendMessage(contact.publicKey, 'private message'))
+      .resolves.toMatchObject({ status: 'store_failed' });
+    expect(dispatch).not.toHaveBeenCalled();
+
+    const storageNotAdmitted = makeHarness({
+      identity: sender,
+      contact,
+      storeNotAdmitted: true,
+      dispatch
+    });
+    await expect(storageNotAdmitted.service.sendMessage(contact.publicKey, 'private message'))
+      .resolves.toMatchObject({ status: 'store_failed' });
+    expect(dispatch).not.toHaveBeenCalled();
+
+    const enqueueFailure = makeHarness({
+      identity: sender,
+      contact,
+      enqueueFailure: true,
+      dispatch,
+      peers: []
+    });
+    await enqueueFailure.service.sendMessage(contact.publicKey, 'private message');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps a successful DM send and P2P enqueue when dispatch rejects', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const contact = await makePushContact(recipient);
+    const dispatch = vi.fn(async () => { throw new Error('sensitive delivery detail'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const harness = makeHarness({
+      identity: sender,
+      contact,
+      dispatch,
+      peers: []
+    });
+
+    const result = await harness.service.sendMessage(contact.publicKey, 'private message');
+
+    expect(result.status).toBe('sent');
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+      'Web Push direct-message dispatch failed unexpectedly'
+    ));
+    expect(await harness.outbox.getEntry(harness.records[0].object_id)).not.toBeNull();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('sensitive delivery detail');
+  });
+
+  it('does not dispatch incoming or retried DMs from later outbox flushes', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const contact = await makePushContact(recipient);
+    const dispatch = vi.fn(async () => ({ status: 'accepted' } as const));
+    const harness = makeHarness({
+      identity: sender,
+      contact,
+      dispatch,
+      peers: []
+    });
+
+    await harness.service.sendMessage(contact.publicKey, 'private message');
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await harness.service.flushOutbox();
+    await harness.service.flushOutbox();
+    expect(dispatch).toHaveBeenCalledOnce();
+
+    await harness.outbox.enqueue({
+      ...harness.records[0],
+      object_id: 'a'.repeat(64),
+      author: recipient.publicKey
+    });
+    await harness.service.flushOutbox();
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it('stores, enqueues, flushes, directly sends, and replicates a connected recipient DM', async () => {
     const sender = await makeIdentity('sender');
     const recipient = await makeIdentity('recipient');

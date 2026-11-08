@@ -3,7 +3,7 @@ import type { Contact } from '../types';
 import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { MarkdownComposer } from '../components/MarkdownComposer';
-import { IdentityAvatar } from '../components/IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from '../components/IdentityAvatar';
 import { CompactUsername } from '../components/CompactUsername';
 import { PeerName } from '../components/PeerName';
 import { PeerRecipientPicker, filterPeersByHandlePrefix, relationshipContacts, peerMentionHandle } from '../components/PeerRecipientPicker';
@@ -232,7 +232,7 @@ export function HomePage({
             aria-label="View your profile"
             disabled={!myPeerId}
           >
-            <IdentityAvatar seed={myPeerId ?? ''} size={40} alt="" profilePicture={myProfilePicture} />
+            <IdentityAvatar seed={myPeerId ?? ''} size={AVATAR_SIZES.composer} alt="" profilePicture={myProfilePicture} />
           </button>
           <div className="markdown-compose-field">
             <MarkdownComposer

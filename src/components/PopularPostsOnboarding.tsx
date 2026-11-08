@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { Contact } from '../types';
 import { postContent, postImageSizes, type LocalPostView } from '../object-layer';
 import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
-import { IdentityAvatar } from './IdentityAvatar';
+import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { FollowButton } from './FollowButton';
 import { MarkdownContent } from './MarkdownContent';
 import { PeerName } from './PeerName';
@@ -150,7 +150,7 @@ export function PopularPostsOnboarding({
                     <div className="popular-post-onboarding-author">
                       <IdentityAvatar
                         seed={authorId}
-                        size={44}
+                        size={AVATAR_SIZES.popularPost}
                         alt=""
                         profilePicture={contact?.profilePicture ?? contact?.identityObject?.payload.profile_picture}
                       />

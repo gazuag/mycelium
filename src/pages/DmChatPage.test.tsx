@@ -104,6 +104,14 @@ afterEach(() => {
 });
 
 describe('DmChatPage', () => {
+  it('shows larger avatars in the conversation header and message rows', () => {
+    hookState.result.messages = [message('visible', 'ok')];
+    const markup = renderPage();
+
+    expect(markup).toContain('class="chat-header-avatar"');
+    expect(markup.match(/style="width:42px;height:42px"/g)).toHaveLength(2);
+  });
+
   it('renders the unverified placeholder instead of message text', () => {
     hookState.result.messages = [message('unverified', 'unverified', { text: null })];
     const markup = renderPage();
@@ -172,7 +180,7 @@ describe('DmChatPage', () => {
     expect(markup).not.toContain('message text');
   });
 
-  it('renders small profile links for both incoming and outgoing messages', () => {
+  it('renders larger profile links for both incoming and outgoing messages', () => {
     hookState.result.messages = [
       message('incoming', 'ok'),
       message('outgoing', 'ok', { direction: 'out', delivery: 'attempted' })
@@ -181,8 +189,8 @@ describe('DmChatPage', () => {
 
     expect(markup).toContain('aria-label="View Peer&#x27;s profile"');
     expect(markup).toContain('aria-label="View your profile"');
-    expect(markup).toContain('width="21" height="21"');
-    expect(markup.match(/class="identity-avatar-online"/g)).toHaveLength(1);
+    expect(markup).toContain('width="42" height="42"');
+    expect(markup.match(/class="identity-avatar-online"/g)).toHaveLength(2);
     expect(markup).toContain('message text');
   });
 

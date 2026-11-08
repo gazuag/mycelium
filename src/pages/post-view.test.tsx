@@ -218,7 +218,7 @@ describe('LocalPostView UI migration', () => {
     );
     expect(markup).toContain('class="home-composer-avatar"');
     expect(markup).toContain('aria-label="View your profile"');
-    expect(markup).toContain('width="40" height="40"');
+    expect(markup).toContain('width="48" height="48"');
     expect(markup).not.toContain('identity-avatar-online');
   });
 
