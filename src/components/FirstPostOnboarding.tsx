@@ -137,6 +137,7 @@ export function FirstPostOnboarding({ displayName, handle, onPublish, onFinish }
               maxLength={MAX_POST_CONTENT_LENGTH}
               ariaLabel="Your introductory post"
               placeholder="Write an introduction..."
+              actionPlacement="controls"
               action={(
                 <button
                   className="btn secondary first-post-regenerate"
