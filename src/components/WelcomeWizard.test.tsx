@@ -53,7 +53,7 @@ describe('WelcomeWizard', () => {
       .find((button) => button.textContent === 'Show me around');
     await act(async () => showMeAroundButton?.click());
 
-    expect(onComplete).toHaveBeenCalledWith('Ada', 'tour');
+    expect(onComplete).toHaveBeenCalledWith('Ada', 'discover');
   });
 
   it('keeps long unbroken handles and display names within the welcome dialog', async () => {

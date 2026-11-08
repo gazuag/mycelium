@@ -10,15 +10,17 @@ describe('IdentityAvatar', () => {
     const unknown = renderToStaticMarkup(<IdentityAvatar seed="peer-id" size={40} />);
 
     expect(online).toContain('class="identity-avatar-online"');
+    expect(online).toContain('class="identity-avatar-wrap is-online"');
     expect(online).toContain('aria-label="Online"');
     expect(offline).not.toContain('identity-avatar-online');
+    expect(offline).not.toContain('is-online');
     expect(unknown).not.toContain('identity-avatar-online');
   });
 
   it('scales the avatar wrapper and keeps the online dot attached at small sizes', () => {
     const markup = renderToStaticMarkup(<IdentityAvatar seed="peer-id" size={21} online />);
 
-    expect(markup).toContain('class="identity-avatar-wrap" style="width:21px;height:21px"');
+    expect(markup).toContain('class="identity-avatar-wrap is-online" style="width:21px;height:21px"');
     expect(markup).toContain('width="21" height="21"');
     expect(markup).toContain('class="identity-avatar-online"');
   });

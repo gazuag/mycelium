@@ -760,6 +760,8 @@ describe('relationship and discovery people UI', () => {
       <ProfileHeader contact={{ ...contact, online: false }} showActions={false} />
     );
     expect(online).toContain('class="identity-avatar-online"');
+    expect(online).toContain('class="identity-avatar-wrap profile-main-avatar is-online"');
+    expect(offline).not.toContain('is-online');
     expect(offline).not.toContain('identity-avatar-online');
   });
 
@@ -779,6 +781,8 @@ describe('relationship and discovery people UI', () => {
     const online = renderToStaticMarkup(<PersonRow contact={onlineContact} onViewProfile={noop} />);
     const offline = renderToStaticMarkup(<PersonRow contact={offlineContact} onViewProfile={noop} />);
     expect(online).toContain('class="identity-avatar-online"');
+    expect(online).toContain('class="identity-avatar-wrap is-online"');
+    expect(offline).not.toContain('is-online');
     expect(offline).not.toContain('identity-avatar-online');
     expect(online).not.toContain('aa:bb:');
     expect(online).toContain('Author');

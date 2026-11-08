@@ -238,6 +238,7 @@ export function HomePage({
             <MarkdownComposer
               textareaRef={setComposerElement}
               value={postText}
+              actionPlacement="controls"
               onChange={(value, caretPosition) => {
                 onPostTextChange(value);
                 updateActiveMention(value, caretPosition ?? composerElement?.selectionStart ?? value.length);

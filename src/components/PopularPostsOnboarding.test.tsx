@@ -170,7 +170,7 @@ describe('PopularPostsOnboarding', () => {
     const { dialog } = await renderOnboarding([], 'loading', vi.fn(async () => {}), onFinish);
     expect(dialog.textContent).toContain('Loading public posts from Discover');
     const continueButton = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent === 'Continue to Mycelium');
+      .find((button) => button.textContent === 'Continue to your introduction');
     expect(continueButton).toBeDefined();
     await act(async () => continueButton?.click());
     expect(onFinish).toHaveBeenCalledOnce();
@@ -181,7 +181,7 @@ describe('PopularPostsOnboarding', () => {
     const { dialog } = await renderOnboarding([], 'ready', vi.fn(async () => {}), onFinish);
     expect(dialog.textContent).toContain('There are no public posts to show right now');
     const continueButton = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent === 'Continue to Mycelium');
+      .find((button) => button.textContent === 'Continue to your introduction');
     await act(async () => continueButton?.click());
     expect(onFinish).toHaveBeenCalledOnce();
   });

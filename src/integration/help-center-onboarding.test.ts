@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('welcome can start and skip the tour, Help can replay it, and stays responsive', async ({ page }) => {
+test('welcome activities precede the tour, Help can replay it, and the tour stays responsive', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
@@ -26,6 +26,17 @@ test('welcome can start and skip the tour, Help can replay it, and stays respons
   expect(displayNameLayout.width).toBeLessThan(displayNameLayout.dialogWidth);
   await welcome.getByRole('button', { name: 'Show me around' }).click();
 
+  const discovery = page.getByRole('dialog', { name: 'Mycelium is best with others.' });
+  await expect(discovery).toBeVisible();
+  await discovery.getByRole('button', { name: 'Continue to your introduction' }).click();
+
+  const firstPost = page.getByRole('dialog', { name: 'Find your people.' });
+  await expect(firstPost).toBeVisible();
+  const firstPostBounds = await firstPost.boundingBox();
+  expect(firstPostBounds?.width).toBeLessThanOrEqual(390);
+  expect(firstPostBounds?.height).toBeLessThanOrEqual(844);
+  await firstPost.getByRole('button', { name: 'Skip for now' }).click();
+
   const tour = page.getByRole('dialog', { name: 'Home and your feed' });
   await expect(tour).toBeVisible();
   await expect(page.locator('.guided-tour-spotlight')).toBeVisible();
@@ -34,16 +45,15 @@ test('welcome can start and skip the tour, Help can replay it, and stays respons
   await expect(messagesTour).toContainText('unread notifications for messages and replies');
   await expect(messagesTour).toContainText('Notification preferences, including followed-post updates, are in Settings');
   await messagesTour.getByRole('button', { name: 'Skip tour' }).click();
-  const welcomeSuggestions = page.getByRole('dialog', { name: 'Mycelium is best with others.' });
-  await expect(welcomeSuggestions).toBeVisible();
-  await welcomeSuggestions.getByRole('button', { name: 'Continue to Mycelium' }).click();
-  await expect(welcomeSuggestions).toHaveCount(0);
+  await expect(discovery).toHaveCount(0);
+  await expect(firstPost).toHaveCount(0);
   await expect(page.locator('.guided-tour-dialog')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('myceliumWelcomeOnboardingStatus'))).toBe('completed');
 
   await page.reload();
   await expect(page.locator('.app-shell')).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Mycelium is best with others.' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Find your people.' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Open Help centre' }).click();
   const help = page.getByRole('dialog', { name: 'How can we help?' });
@@ -77,32 +87,33 @@ test('welcome can start and skip the tour, Help can replay it, and stays respons
   await expect(page.getByRole('dialog', { name: 'Mycelium is best with others.' })).toHaveCount(0);
 });
 
-test('completing the welcome tour opens optional popular-post onboarding', async ({ page }) => {
+test('completing all activities then the tour finishes onboarding', async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   await page.getByRole('dialog', { name: 'Welcome! Pick your name!' })
     .getByRole('button', { name: 'Show me around' }).click();
 
+  const discovery = page.getByRole('dialog', { name: 'Mycelium is best with others.' });
+  await expect(discovery).toBeVisible();
+  await discovery.getByRole('button', { name: 'Continue to your introduction' }).click();
+  const firstPost = page.getByRole('dialog', { name: 'Find your people.' });
+  await expect(firstPost).toBeVisible();
+  await firstPost.getByRole('button', { name: 'Skip for now' }).click();
+
   const tour = page.locator('.guided-tour-dialog');
+  await expect(tour).toContainText('Step 1 of 6');
   for (let index = 0; index < 5; index += 1) {
     await tour.getByRole('button', { name: 'Next' }).click();
   }
-  await tour.getByRole('button', { name: 'Finish' }).click();
-
-  const onboarding = page.getByRole('dialog', { name: 'Mycelium is best with others.' });
-  await expect(onboarding).toBeVisible();
-  const onboardingBounds = await onboarding.boundingBox();
-  expect(onboardingBounds?.width).toBeLessThanOrEqual(390);
-  expect(onboardingBounds?.height).toBeLessThanOrEqual(844);
-  await expect(onboarding.getByRole('button', { name: 'Continue to Mycelium' })).toBeVisible();
-  await onboarding.getByRole('button', { name: 'Continue to Mycelium' }).click();
-  await expect(onboarding).toHaveCount(0);
+  await tour.getByRole('button', { name: "Let's go!" }).click();
+  await expect(tour).toHaveCount(0);
   await expect(page.locator('.app-shell')).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole('dialog', { name: 'Welcome! Pick your name!' })).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: 'Mycelium is best with others.' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Find your people.' })).toHaveCount(0);
 });
 
 test('choosing to explore independently opens Home and completed welcome stays dismissed', async ({ page }) => {

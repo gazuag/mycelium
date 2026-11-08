@@ -194,6 +194,23 @@ describe('MarkdownComposer', () => {
       .toBeLessThan(Array.from(toolbar.children).indexOf(container.querySelector('.markdown-help-link')!));
   });
 
+  it('can place an action in the lower controls row', async () => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(
+      <MarkdownComposer
+        value=""
+        onChange={vi.fn()}
+        action={<button className="btn">Send</button>}
+        actionPlacement="controls"
+      />
+    ));
+
+    expect(container.querySelector('.markdown-composer-input-row .btn')).toBeNull();
+    expect(container.querySelector('.markdown-composer-controls .btn')?.textContent).toBe('Send');
+  });
+
   it('updates preview while typing and uses the published Markdown renderer', async () => {
     await mount('draft');
     const textarea = container!.querySelector('textarea')!;

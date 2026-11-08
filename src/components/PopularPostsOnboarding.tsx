@@ -181,7 +181,7 @@ export function PopularPostsOnboarding({
         ) : null}
         {followError ? <p className="welcome-wizard-error" role="alert">{followError}</p> : null}
         <div className="welcome-wizard-actions">
-          <button className="btn" type="button" onClick={onFinish}>Continue to Mycelium</button>
+          <button className="btn" type="button" onClick={onFinish}>Continue to your introduction</button>
         </div>
       </section>
     </div>,

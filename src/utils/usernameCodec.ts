@@ -150,3 +150,10 @@ export function usernameToKey(username: string): bigint {
   if (key < 0n || key > MAX_UINT64) throw new Error('Decoded username is outside the unsigned 64-bit range.');
   return key;
 }
+
+export function friendlyNameFromUsername(username: string): string {
+  const key = usernameToKey(username);
+  const adjective = adjectives[Number((key >> 42n) & INDEX_MASK_11_BITS)];
+  const noun = singularNouns[Number((key >> 32n) & INDEX_MASK_10_BITS)];
+  return `${pascalCaseEntry(adjective!)} ${pascalCaseEntry(noun!)}`;
+}

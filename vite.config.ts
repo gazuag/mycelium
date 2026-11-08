@@ -36,8 +36,12 @@ function cloudflareSecurityHeaders(): Plugin {
 
 export default defineConfig({
   plugins: [react(), usernameVocabularyPlugin(), cloudflareSecurityHeaders()],
+  optimizeDeps: {
+    include: ['qrcode']
+  },
   server: {
     host: 'localhost',
-    port: 8080
+    port: 8080,
+    strictPort: true
   }
 });

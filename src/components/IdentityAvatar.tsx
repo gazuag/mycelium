@@ -3,7 +3,7 @@ import { createIdenticonDataUrl } from '../utils/identicon';
 import { profilePictureDataUrl } from '../utils/profile-picture';
 
 export const AVATAR_SIZES = {
-  profile: 120,
+  profile: 126,
   post: 44,
   reply: 44,
   messageList: 48,
@@ -42,7 +42,7 @@ export function IdentityAvatar({
 
   return (
     <span
-      className={`identity-avatar-wrap${className ? ` ${className}` : ''}`}
+      className={`identity-avatar-wrap${className ? ` ${className}` : ''}${online ? ' is-online' : ''}`}
       style={className ? undefined : { width: size, height: size }}
     >
       <img

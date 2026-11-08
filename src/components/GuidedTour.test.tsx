@@ -85,7 +85,7 @@ describe('GuidedTour', () => {
     expect(dialog.textContent).toContain('Step 6 of 6');
     expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('aria-valuemax')).toBe('6');
     const finish = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent === 'Finish');
+      .find((button) => button.textContent === "Let's go!");
     await act(async () => finish?.click());
     expect(onFinish).toHaveBeenCalledOnce();
     expect(onExit).not.toHaveBeenCalled();

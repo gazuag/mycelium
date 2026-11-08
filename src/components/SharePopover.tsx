@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 interface SharePopoverProps {
   title: string;
@@ -7,6 +8,11 @@ interface SharePopoverProps {
   ariaLabel?: string;
   avatar?: ReactNode;
   onOpenQr?: () => void;
+  showTrigger?: boolean;
+  containerClassName?: string;
+  returnFocusRef?: RefObject<HTMLButtonElement>;
+  onTriggerReady?: (trigger: (() => void) | null) => void;
+  onShareComplete?: () => void;
 }
 
 function isShareCancellation(error: unknown): boolean {
@@ -16,7 +22,19 @@ function isShareCancellation(error: unknown): boolean {
     && error.name === 'AbortError';
 }
 
-export function SharePopover({ title, description, url, ariaLabel, avatar, onOpenQr }: SharePopoverProps) {
+export function SharePopover({
+  title,
+  description,
+  url,
+  ariaLabel,
+  avatar,
+  onOpenQr,
+  showTrigger = true,
+  containerClassName = '',
+  returnFocusRef,
+  onTriggerReady,
+  onShareComplete
+}: SharePopoverProps) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState('');
   const [showManualCopy, setShowManualCopy] = useState(false);
@@ -36,6 +54,7 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
     try {
       await navigator.share({ title, text: description, url });
       setOpen(false);
+      onShareComplete?.();
     } catch (error) {
       if (isShareCancellation(error)) return;
       setStatus('Native sharing could not be opened. Choose another option below.');
@@ -46,7 +65,7 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
     }
   };
 
-  const handleShareClick = () => {
+  const handleShareClick = useCallback(() => {
     setStatus('');
     setShowManualCopy(false);
     if (nativeShareAvailable) {
@@ -54,14 +73,18 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
     } else {
       setOpen(true);
     }
-  };
+  }, [nativeShareAvailable, shareNatively]);
+
+  useEffect(() => {
+    onTriggerReady?.(handleShareClick);
+    return () => onTriggerReady?.(null);
+  }, [handleShareClick, onTriggerReady]);
 
   const copyLink = async () => {
     setCopying(true);
     setStatus('');
     try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
-      await navigator.clipboard.writeText(url);
+      await copyTextToClipboard(url);
       setShowManualCopy(false);
       setStatus('Link copied.');
     } catch {
@@ -94,7 +117,7 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpen(false);
-        triggerRef.current?.focus();
+        (returnFocusRef?.current ?? triggerRef.current)?.focus();
       }
     };
 
@@ -104,7 +127,7 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
       document.removeEventListener('pointerdown', dismissOnOutsidePointer);
       document.removeEventListener('keydown', dismissOnEscape);
     };
-  }, [open]);
+  }, [open, returnFocusRef]);
 
   useEffect(() => {
     if (status !== 'Link copied.') return;
@@ -116,8 +139,8 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
   const messageHref = `sms:?body=${encodeURIComponent(`${description} ${url}`)}`;
 
   return (
-    <div className="share-popover-anchor" ref={containerRef}>
-      <button
+    <div className={`share-popover-anchor${containerClassName ? ` ${containerClassName}` : ''}`} ref={containerRef}>
+      {showTrigger ? <button
         ref={triggerRef}
         className="btn secondary share-popover-trigger"
         type="button"
@@ -135,7 +158,7 @@ export function SharePopover({ title, description, url, ariaLabel, avatar, onOpe
           <path d="m8.7 10.7 6.6-4.4M8.7 13.3l6.6 4.4" />
         </svg>
         <span>Share</span>
-      </button>
+      </button> : null}
       {open ? (
         <section
           className="share-popover card"

@@ -54,7 +54,14 @@ async function clickButton(selector: string) {
 }
 
 async function renderProfile(contact = profile) {
-  await act(async () => root.render(<ProfileHeader contact={contact} showActions={false} />));
+  await act(async () => root.render(
+    <ProfileHeader
+      contact={contact}
+      onFollowToggle={vi.fn()}
+      onBlock={vi.fn()}
+      onMessage={vi.fn()}
+    />
+  ));
 }
 
 beforeEach(() => {
@@ -78,17 +85,24 @@ afterEach(async () => {
 });
 
 describe('ProfileHeader sharing', () => {
-  it('uses a prominent profile avatar and groups independent QR and Share actions', async () => {
+  it('uses a prominent profile avatar and shows remote actions in order', async () => {
     await renderProfile();
 
-    const avatar = container.querySelector('.profile-title-main .identity-avatar-wrap');
-    const qrButton = container.querySelector('[aria-label="Show Alice\'s profile QR code"]');
-    const shareButton = container.querySelector('[aria-label="Share Alice\'s profile"]');
+    const avatar = container.querySelector('.profile-avatar-actions .identity-avatar-wrap');
+    const actionLabels = [...container.querySelectorAll<HTMLButtonElement>('.profile-action-buttons button')]
+      .map((button) => button.getAttribute('aria-label') ?? button.textContent?.trim());
 
     expect(avatar?.classList.contains('profile-main-avatar')).toBe(true);
     expect(container.querySelector('.profile-avatar-tools')).toBeNull();
-    expect(qrButton?.closest('.profile-share-actions')).not.toBeNull();
-    expect(qrButton?.closest('.profile-share-actions')).toBe(shareButton?.closest('.profile-share-actions'));
+    expect(actionLabels).toEqual([
+      "Message Alice",
+      "Show Alice's profile QR code",
+      'Follow',
+      'More profile actions'
+    ]);
+    expect(container.querySelector('.profile-title-name strong')?.textContent).toBe('Alice');
+    expect(container.querySelector('.profile-handle')?.textContent).toBe(`@${fingerprintToHumanName(profile.fingerprint)}`);
+    expect(container.textContent).not.toContain(profile.fingerprint);
   });
 
   it('opens the full custom profile picture in a centered dialog', async () => {
@@ -140,6 +154,7 @@ describe('ProfileHeader sharing', () => {
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('share', share);
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
 
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
@@ -156,6 +171,11 @@ describe('ProfileHeader sharing', () => {
     const share = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('share', share);
     await renderProfile(ownProfile);
+    await clickButton('[aria-label="More profile actions"]');
+
+    expect(container.querySelector('.profile-title-name strong')?.textContent)
+      .toBe(`@${fingerprintToHumanName(ownProfile.fingerprint)}`);
+    expect(container.querySelector('.profile-handle')).toBeNull();
 
     await clickButton(`[aria-label="Share ${fingerprintToHumanName(ownProfile.fingerprint)}'s profile"]`);
 
@@ -168,6 +188,7 @@ describe('ProfileHeader sharing', () => {
 
   it('opens the custom share popover when native sharing is unavailable', async () => {
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
 
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
@@ -182,6 +203,7 @@ describe('ProfileHeader sharing', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     setNavigatorProperty('clipboard', { writeText });
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
     await clickButton('.share-popover-copy');
 
@@ -191,6 +213,7 @@ describe('ProfileHeader sharing', () => {
 
   it('provides a selectable link when clipboard access is unavailable', async () => {
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
     await clickButton('.share-popover-copy');
 
@@ -201,6 +224,7 @@ describe('ProfileHeader sharing', () => {
   it('provides a selectable link when clipboard access fails', async () => {
     setNavigatorProperty('clipboard', { writeText: vi.fn().mockRejectedValue(new Error('Denied')) });
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
     await clickButton('.share-popover-copy');
 
@@ -212,6 +236,7 @@ describe('ProfileHeader sharing', () => {
   it('offers email and message actions containing the profile URL', async () => {
     const url = createPeerAddUrl(profile.fingerprint, window.location.origin)!;
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
     const email = container.querySelector<HTMLAnchorElement>('.share-popover-destinations a[href^="mailto:"]');
@@ -221,14 +246,13 @@ describe('ProfileHeader sharing', () => {
     expect(email?.getAttribute('href')).toContain('subject=');
   });
 
-  it('opens the existing QR dialog from the popover and preserves the standalone QR action', async () => {
+  it('keeps QR code as an independent action outside the More menu', async () => {
     await renderProfile();
 
     expect(container.querySelector('[aria-label="Show Alice\'s profile QR code"]')).not.toBeNull();
-    await clickButton('[aria-label="Share Alice\'s profile"]');
-    await clickButton('.share-popover-destinations button');
+    await clickButton('[aria-label="Show Alice\'s profile QR code"]');
     expect(container.querySelector('#profile-qr-title')?.textContent).toBe("Alice's profile QR code");
-    expect(container.querySelector('[aria-label="Show Alice\'s profile QR code"]')).not.toBeNull();
+    expect(container.querySelector('.profile-more-menu')).toBeNull();
   });
 
   it('opens the QR dialog directly from the standalone QR button', async () => {
@@ -237,7 +261,105 @@ describe('ProfileHeader sharing', () => {
     await clickButton('[aria-label="Show Alice\'s profile QR code"]');
 
     expect(container.querySelector('#profile-qr-title')?.textContent).toBe("Alice's profile QR code");
-    expect(container.querySelector('[aria-label="Share Alice\'s profile"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="More profile actions"]')).not.toBeNull();
+  });
+
+  it('copies the peer ID and canonical profile URL from the More menu', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setNavigatorProperty('clipboard', { writeText });
+    await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
+
+    expect(container.querySelector('.profile-menu-peer-id code')?.textContent).toBe(profile.fingerprint);
+    await clickButton('[aria-label="Copy peer ID"]');
+    expect(writeText).toHaveBeenLastCalledWith(profile.fingerprint);
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('Peer ID copied.');
+    expect(container.querySelector('.profile-more-menu')).toBeNull();
+
+    await clickButton('[aria-label="More profile actions"]');
+    await clickButton('[aria-label="Copy link to profile"]');
+    expect(writeText).toHaveBeenLastCalledWith(createPeerAddUrl(profile.fingerprint, window.location.origin));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('Profile link copied.');
+  });
+
+  it('offers Block in remote More menu and never offers it on the local profile', async () => {
+    const onBlock = vi.fn();
+    await act(async () => root.render(
+      <ProfileHeader contact={profile} onBlock={onBlock} onMessage={vi.fn()} onFollowToggle={vi.fn()} />
+    ));
+    await clickButton('[aria-label="More profile actions"]');
+    expect(container.querySelector('.profile-menu-item.destructive')?.textContent).toBe('Block');
+    await clickButton('.profile-menu-item.destructive');
+    expect(onBlock).toHaveBeenCalledOnce();
+
+    await act(async () => root.render(
+      <ProfileHeader contact={profile} isOwnProfile profileSettings={<div>Local settings</div>} />
+    ));
+    const localActionLabels = [...container.querySelectorAll<HTMLButtonElement>('.profile-action-buttons button')]
+      .map((button) => button.getAttribute('aria-label') ?? button.textContent?.trim());
+    expect(localActionLabels).toEqual([
+      "Show Alice's profile QR code",
+      'Profile',
+      'More profile actions'
+    ]);
+    await clickButton('[aria-label="More profile actions"]');
+    expect(container.querySelector('.profile-menu-item.destructive')).toBeNull();
+    expect(container.querySelector('[aria-label="Message Alice"]')).toBeNull();
+  });
+
+  it('closes the More menu on outside click and Escape', async () => {
+    await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
+    expect(container.querySelector('.profile-more-menu')).not.toBeNull();
+
+    await act(async () => {
+      document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+    expect(container.querySelector('.profile-more-menu')).toBeNull();
+
+    await clickButton('[aria-label="More profile actions"]');
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(container.querySelector('.profile-more-menu')).toBeNull();
+  });
+
+  it('opens profile settings in a dismissible dialog without duplicating its controls', async () => {
+    await act(async () => root.render(
+      <ProfileHeader contact={profile} isOwnProfile profileSettings={<label>Display Name<input /></label>} />
+    ));
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+
+    await clickButton('.profile-settings-trigger');
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain('Profile settings');
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain('Display Name');
+    expect(container.querySelectorAll('input')).toHaveLength(1);
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('keeps relationship counts prominent and delegates clicks to the existing lists', async () => {
+    const onOpenRelationships = vi.fn();
+    await act(async () => root.render(
+      <ProfileHeader
+        contact={profile}
+        showActions={false}
+        followingCount={12}
+        followerCount={34}
+        onOpenRelationships={onOpenRelationships}
+      />
+    ));
+
+    expect(container.querySelector('.profile-relationship-links')?.textContent).toContain('12 Following');
+    expect(container.querySelector('.profile-relationship-links')?.textContent).toContain('34 Followers');
+    await clickButton('.profile-relationship-links button:first-child');
+    expect(onOpenRelationships).toHaveBeenCalledWith('following');
+    await clickButton('.profile-relationship-links button:last-child');
+    expect(onOpenRelationships).toHaveBeenLastCalledWith('followers');
+    expect(container.textContent).not.toContain(profile.fingerprint);
   });
 
   it('does not open the fallback or copy the link when native sharing is cancelled', async () => {
@@ -246,6 +368,7 @@ describe('ProfileHeader sharing', () => {
     setNavigatorProperty('share', share);
     setNavigatorProperty('clipboard', { writeText });
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
 
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
@@ -256,6 +379,7 @@ describe('ProfileHeader sharing', () => {
   it('opens the fallback and reports a native share failure', async () => {
     setNavigatorProperty('share', vi.fn().mockRejectedValue(new Error('Sharing failed')));
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
 
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
@@ -269,26 +393,30 @@ describe('ProfileHeader sharing', () => {
       .mockResolvedValueOnce(undefined);
     setNavigatorProperty('share', share);
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
     await clickButton('.share-popover-destinations button:last-child');
 
     expect(share).toHaveBeenCalledTimes(2);
   });
 
-  it('dismisses by Escape and restores focus to the Share button', async () => {
+  it('closes the More menu for Share and restores focus when the share popover closes', async () => {
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
+    expect(container.querySelector('.profile-more-menu')).toBeNull();
 
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
 
     expect(container.querySelector('[role="dialog"][aria-label="Share Alice"]')).toBeNull();
-    expect(document.activeElement).toBe(container.querySelector('[aria-label="Share Alice\'s profile"]'));
+    expect(document.activeElement).toBe(container.querySelector('[aria-label="More profile actions"]'));
   });
 
   it('dismisses when the user clicks outside the popover', async () => {
     await renderProfile();
+    await clickButton('[aria-label="More profile actions"]');
     await clickButton('[aria-label="Share Alice\'s profile"]');
 
     await act(async () => {

@@ -2,10 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Contact } from '../types';
 import type { LocalPostView, RecommendationSummary } from '../object-layer';
 import type { RelationshipTab } from './RelationshipsPage';
-import { CollapsibleSection } from '../components/CollapsibleSection';
 import { ProfileHeader } from '../components/ProfileHeader';
 import { PostCard } from '../components/PostCard';
-import { CompactUsername } from '../components/CompactUsername';
 import { displayNameOrFallback } from '../utils/fingerprintNames';
 
 const PROFILE_LOAD_STEP = 50;
@@ -32,8 +30,6 @@ interface ProfilePageProps {
   notice?: string | null;
   isOwnProfile?: boolean;
   profileSettings?: React.ReactNode;
-  profileSettingsOpen?: boolean;
-  onToggleProfileSettings?: () => void;
   getRecommendationSummary: (postId: string) => RecommendationSummary;
 }
 
@@ -59,8 +55,6 @@ export function ProfilePage({
   notice,
   isOwnProfile = false,
   profileSettings,
-  profileSettingsOpen = false,
-  onToggleProfileSettings,
   getRecommendationSummary
 }: ProfilePageProps) {
   const [activeTab, setActiveTab] = useState<'posts' | 'liked'>('posts');
@@ -88,16 +82,6 @@ export function ProfilePage({
 
   return (
     <section className="page-view profile-page">
-      <div className="page-header compact-profile-header">
-        <h2>
-          <CompactUsername
-            peerId={contact.fingerprint || contact.publicKey}
-            displayName={displayNameOrFallback(contact.displayName, contact.fingerprint || contact.publicKey)}
-            onProfileClick={onAuthorClick}
-          />
-        </h2>
-      </div>
-
       {notice ? (
         <div className="card note-box">
           <p className="note">{notice}</p>
@@ -113,28 +97,12 @@ export function ProfilePage({
         onAvatarClick={() => onAuthorClick(contact.fingerprint || contact.publicKey)}
         showOnlineIndicator={!isOwnProfile}
         showActions={!isOwnProfile && Boolean(onFollowToggle && onBlock && onMessage)}
+        isOwnProfile={isOwnProfile}
+        profileSettings={profileSettings}
+        followingCount={followingCount}
+        followerCount={followerCount}
+        onOpenRelationships={onOpenRelationships}
       />
-
-      {onOpenRelationships ? (
-        <div className="profile-relationship-links" aria-label="Profile relationships">
-          <button type="button" onClick={() => onOpenRelationships('following')}>
-            <strong>{followingCount ?? ''}</strong> Following
-          </button>
-          <button type="button" onClick={() => onOpenRelationships('followers')}>
-            <strong>{followerCount ?? ''}</strong> Followers
-          </button>
-        </div>
-      ) : null}
-
-      {isOwnProfile && profileSettings ? (
-        <CollapsibleSection
-          title="Profile settings"
-          isOpen={profileSettingsOpen}
-          onToggle={onToggleProfileSettings ?? (() => undefined)}
-        >
-          {profileSettings}
-        </CollapsibleSection>
-      ) : null}
 
       <div className="segment-control">
         <button className={activeTab === 'posts' ? 'active' : ''} type="button" onClick={() => setActiveTab('posts')}>Posts</button>

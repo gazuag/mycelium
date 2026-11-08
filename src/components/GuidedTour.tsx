@@ -140,7 +140,7 @@ export function GuidedTour({ onExit, onSkip, onFinish }: GuidedTourProps) {
               Next
             </button>
           ) : (
-            <button className="btn" type="button" onClick={onFinish}>Finish</button>
+            <button className="btn" type="button" onClick={onFinish}>Let&apos;s go!</button>
           )}
         </div>
       </section>

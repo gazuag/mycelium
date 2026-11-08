@@ -50,6 +50,7 @@ import { WelcomeWizard } from './components/WelcomeWizard';
 import { HelpCenter } from './components/HelpCenter';
 import { GuidedTour } from './components/GuidedTour';
 import { PopularPostsOnboarding } from './components/PopularPostsOnboarding';
+import { FirstPostOnboarding } from './components/FirstPostOnboarding';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './pages/HomePage';
 import { ConversationPage } from './pages/ConversationPage';
@@ -324,7 +325,8 @@ function App() {
   const [helpCenterOpen, setHelpCenterOpen] = useState(false);
   const [guidedTourOpen, setGuidedTourOpen] = useState(false);
   const [discoveryOnboardingOpen, setDiscoveryOnboardingOpen] = useState(false);
-  const [welcomeTourLeadsToDiscovery, setWelcomeTourLeadsToDiscovery] = useState(false);
+  const [firstPostOnboardingOpen, setFirstPostOnboardingOpen] = useState(false);
+  const [guidedTourCompletesOnboarding, setGuidedTourCompletesOnboarding] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [deletionTombstones, setDeletionTombstones] = useState<DeletionTombstone[]>([]);
@@ -346,24 +348,41 @@ function App() {
   const closeHelpCenter = useCallback(() => setHelpCenterOpen(false), []);
   const startGuidedTour = useCallback(() => {
     setHelpCenterOpen(false);
-    setWelcomeTourLeadsToDiscovery(false);
+    setGuidedTourCompletesOnboarding(false);
     setGuidedTourOpen(true);
   }, []);
   const closeGuidedTour = useCallback(() => {
     setGuidedTourOpen(false);
-    setWelcomeTourLeadsToDiscovery(false);
+    setGuidedTourCompletesOnboarding(false);
   }, []);
-  const closeDiscoveryOnboarding = useCallback(() => setDiscoveryOnboardingOpen(false), []);
   const finishGuidedTour = useCallback(() => {
     setGuidedTourOpen(false);
-    if (welcomeTourLeadsToDiscovery) setDiscoveryOnboardingOpen(true);
-    setWelcomeTourLeadsToDiscovery(false);
-  }, [welcomeTourLeadsToDiscovery]);
+    if (guidedTourCompletesOnboarding) {
+      try {
+        completeWelcomeOnboarding(localStorage);
+      } catch (error) {
+        addLog(`Welcome onboarding completion could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    setGuidedTourCompletesOnboarding(false);
+  }, [guidedTourCompletesOnboarding]);
+  const exitGuidedTour = useCallback(() => {
+    if (guidedTourCompletesOnboarding) finishGuidedTour();
+    else closeGuidedTour();
+  }, [closeGuidedTour, finishGuidedTour, guidedTourCompletesOnboarding]);
+  const finishDiscoveryOnboarding = useCallback(() => {
+    setDiscoveryOnboardingOpen(false);
+    setFirstPostOnboardingOpen(true);
+  }, []);
+  const finishFirstPostOnboarding = useCallback(() => {
+    setFirstPostOnboardingOpen(false);
+    setGuidedTourCompletesOnboarding(true);
+    setGuidedTourOpen(true);
+  }, []);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenPosts') || '[]')));
   const [hiddenDiscoveryIds, setHiddenDiscoveryIds] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem('hiddenDiscovery') || '[]')));
   const hiddenPostIdsRef = useRef(hiddenPostIds);
   const hiddenDiscoveryIdsRef = useRef(hiddenDiscoveryIds);
-  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [blockedPeersOpen, setBlockedPeersOpen] = useState(false);
   const [hiddenPostsOpen, setHiddenPostsOpen] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
@@ -3681,11 +3700,20 @@ function App() {
     publishToDiscovery = false,
     replyTo?: string,
     replyContent?: string,
-    selectedMentions: readonly PostMention[] = []
+    selectedMentions: readonly PostMention[] = [],
+    contentOverride?: string,
+    requireDiscoveryPublish = false
   ) {
-    if (!identity) return;
+    if (!identity) {
+      if (requireDiscoveryPublish) throw new Error('Your identity is not ready yet. Please try publishing again.');
+      return;
+    }
+    const discoverySocket = signallingSocketRef.current;
+    if (requireDiscoveryPublish && (!discoverySocket || discoverySocket.readyState !== WebSocket.OPEN)) {
+      throw new Error('Connect to Mycelium before publishing publicly. Your draft is still here.');
+    }
     const isReply = Boolean(replyTo);
-    const content = (isReply ? replyContent : newPostContent)?.trim() ?? '';
+    const content = (isReply ? replyContent : contentOverride ?? newPostContent)?.trim() ?? '';
     if (!content) return;
     if (content.length > MAX_POST_CONTENT_LENGTH) {
       addLog(`Post cancelled: content exceeds the ${MAX_POST_CONTENT_LENGTH.toLocaleString()} character limit.`);
@@ -3743,7 +3771,7 @@ function App() {
     await localPostMetadataStoreRef.current?.put(localPostMetadata(localPostView));
 
     addLog(`Created and stored object post ${postObject.object_id}`);
-    if (!isReply) {
+    if (!isReply && contentOverride === undefined) {
       setNewPostContent('');
       setNewPostTags('');
     }
@@ -3839,9 +3867,15 @@ function App() {
           addLog('Published canonical object to discovery');
         } catch (err: any) {
           addLog(`Discovery publish failed: ${err.message}`);
+          if (requireDiscoveryPublish) {
+            throw new Error('Mycelium could not publish this post right now. Your draft is still here; please try again.');
+          }
         }
       } else {
         addLog('Discovery publish skipped: not connected to signalling server');
+        if (requireDiscoveryPublish) {
+          throw new Error('The connection was lost before your post could be published. Your draft is still here; please try again.');
+        }
       }
     }
   }
@@ -4398,20 +4432,23 @@ function App() {
     setIdentity(identityRecord);
   }
 
-  async function handleCompleteWelcome(displayName: string, nextStep: 'tour' | 'home') {
+  async function handleCompleteWelcome(displayName: string, nextStep: 'discover' | 'home') {
     const nextProfile = {
       ...myProfileRef.current,
       displayName: displayName.trim()
     };
     localStorage.setItem('myProfile', JSON.stringify(nextProfile));
-    completeWelcomeOnboarding(localStorage);
+    if (nextStep === 'home') {
+      completeWelcomeOnboarding(localStorage);
+    }
     myProfileRef.current = nextProfile;
     setMyProfile(nextProfile);
     setSavedProfileSnapshot(editableProfileSnapshot(nextProfile));
     setWelcomeWizardOpen(false);
     handlePageChange('home');
-    setWelcomeTourLeadsToDiscovery(nextStep === 'tour');
-    setGuidedTourOpen(nextStep === 'tour');
+    if (nextStep === 'discover') {
+      setDiscoveryOnboardingOpen(true);
+    }
 
     if (identity) {
       void publishLocalIdentityProfile(identity, nextProfile)
@@ -4830,7 +4867,8 @@ function App() {
     setDiscoveryOnboardingStatus('unavailable');
     discoveryOnboardingRequestRef.current += 1;
     setDiscoveryOnboardingOpen(false);
-    setWelcomeTourLeadsToDiscovery(false);
+    setFirstPostOnboardingOpen(false);
+    setGuidedTourCompletesOnboarding(false);
     setSelectedContactId(null);
     setChatContactId(null);
     setActivePeerId(null);
@@ -5814,10 +5852,8 @@ function App() {
             onOpenPost={handleOpenConversation}
             getRecommendationSummary={getRecommendationSummary}
             isOwnProfile
-            profileSettingsOpen={profileSettingsOpen}
-            onToggleProfileSettings={() => setProfileSettingsOpen((prev) => !prev)}
             profileSettings={
-              <div className="card profile-edit-card">
+              <div className="profile-edit-card">
                 <div className="profile-display-field">
                   <span>Generated handle</span>
                   <span className="monospace break-word">@{fingerprintToHumanName(identity.id)}</span>
@@ -5972,7 +6008,7 @@ function App() {
     ) : null}
     {guidedTourOpen ? (
       <GuidedTour
-        onExit={closeGuidedTour}
+        onExit={exitGuidedTour}
         onSkip={finishGuidedTour}
         onFinish={finishGuidedTour}
       />
@@ -5986,9 +6022,17 @@ function App() {
           myPeerId={identity.id}
           myPublicKey={identity.publicKey}
           onToggleFollow={handleToggleFollow}
-          onFinish={closeDiscoveryOnboarding}
+          onFinish={finishDiscoveryOnboarding}
         />
       </ExternalImageLimitContext.Provider>
+    ) : null}
+    {firstPostOnboardingOpen && identity ? (
+      <FirstPostOnboarding
+        displayName={myProfile.displayName}
+        handle={fingerprintToHumanName(identity.id)}
+        onPublish={(content) => handleCreatePost(true, undefined, undefined, [], content, true)}
+        onFinish={finishFirstPostOnboarding}
+      />
     ) : null}
     </DmUnreadProvider>
   );

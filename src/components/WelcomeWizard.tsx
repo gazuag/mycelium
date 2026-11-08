@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 interface WelcomeWizardProps {
   handle: string;
   initialDisplayName: string;
-  onComplete: (displayName: string, nextStep: 'tour' | 'home') => Promise<void>;
+  onComplete: (displayName: string, nextStep: 'discover' | 'home') => Promise<void>;
 }
 
 export function WelcomeWizard({ handle, initialDisplayName, onComplete }: WelcomeWizardProps) {
@@ -14,7 +14,7 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
 
-  const finish = async (nextStep: 'tour' | 'home' = 'home') => {
+  const finish = async (nextStep: 'discover' | 'home' = 'home') => {
     if (saving) return;
     setSaving(true);
     setError('');
@@ -86,7 +86,7 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
         </div>
         {error ? <p className="welcome-wizard-error" role="alert">{error}</p> : null}
         <div className="welcome-wizard-actions">
-          <button className="btn" type="button" onClick={() => void finish('tour')} disabled={saving}>
+          <button className="btn" type="button" onClick={() => void finish('discover')} disabled={saving}>
             Show me around
           </button>
           <button className="btn secondary" type="button" onClick={() => void finish()} disabled={saving}>

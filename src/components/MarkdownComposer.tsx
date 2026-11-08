@@ -12,6 +12,7 @@ interface MarkdownComposerProps {
   value: string;
   onChange: (value: string, caretPosition?: number) => void;
   action?: ReactNode;
+  actionPlacement?: 'input' | 'controls';
   rows?: number;
   maxLength?: number;
   textareaRef?: (element: HTMLTextAreaElement | null) => void;
@@ -28,6 +29,7 @@ export function MarkdownComposer({
   value,
   onChange,
   action,
+  actionPlacement = 'input',
   rows,
   maxLength,
   textareaRef,
@@ -170,7 +172,7 @@ export function MarkdownComposer({
           disabled={disabled}
           autoComplete={autoComplete}
         />
-        {action}
+        {actionPlacement === 'input' ? action : null}
       </div>
       <div className="markdown-composer-controls">
         <div className="markdown-toolbar" role="toolbar" aria-label="Markdown formatting">
@@ -194,6 +196,7 @@ export function MarkdownComposer({
           </button>
           <MarkdownHelp />
         </div>
+        {actionPlacement === 'controls' ? action : null}
         {linkKind ? (
           <form
             className="markdown-link-form"
