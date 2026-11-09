@@ -66,39 +66,6 @@ export function LandingPage({ onCreateIdentity, onImportIdentity, onOpenHelp }: 
         </div>
       </section>
 
-      <section className="landing-faq card">
-        <h2>FAQ</h2>
-
-        <h3>What is Mycelium?</h3>
-        <p>
-          Mycelium is a peer-to-peer social app for sharing posts and having encrypted direct-message conversations.
-          Its identity is a keypair rather than a centrally managed account.
-        </p>
-
-        <h3>Where is my data stored?</h3>
-        <p>
-          Your identity and app data are stored locally in this browser. An identity backup includes your keys,
-          profile preferences, and contacts, but not your posts, messages, or all local app data.
-        </p>
-
-        <h3>How do signalling and discovery services work?</h3>
-        <p>
-          Signalling helps peers establish connections. Discovery can publish and return public posts and profile
-          information. Neither service owns your identity, and service or network availability can affect what you see.
-        </p>
-
-        <h3>How does privacy work?</h3>
-        <p>
-          Direct messages are encrypted for their intended recipient. Public posts and profile information may be
-          shared with peers or discovery services. Keep your device and identity backup secure.
-        </p>
-
-        <h3>What are the caveats?</h3>
-        <p>
-          Mycelium is a prototype. Peer availability, discovery, background delivery, and synchronization are not
-          guaranteed. If your device is compromised, locally stored data may be at risk.
-        </p>
-      </section>
     </main>
   );
 }

@@ -4,22 +4,13 @@ import type { LocalPostView, PostMention } from '../object-layer';
 import { PostCard } from '../components/PostCard';
 import { MarkdownComposer } from '../components/MarkdownComposer';
 import { AVATAR_SIZES, IdentityAvatar } from '../components/IdentityAvatar';
-import { CompactUsername } from '../components/CompactUsername';
-import { PeerName } from '../components/PeerName';
 import { PeerRecipientPicker, filterPeersByHandlePrefix, relationshipContacts, peerMentionHandle } from '../components/PeerRecipientPicker';
-import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
+import { displayNameOrFallback } from '../utils/fingerprintNames';
 import { activeMentionAt, insertMention, mentionsPresentInText, type ActiveMention } from '../utils/postMentions';
-import type { PopularPeerWithIdentityProfile } from '../services/peer-discovery';
 import type { HomeFeedPost } from '../utils/homeFeed';
 import type { IdentityProfilePicture } from '../utils/profile-picture';
 import { MAX_POST_CONTENT_LENGTH } from '../object-layer/post-state';
 import { resizeTextareaToRows } from '../utils/textarea';
-import {
-  advancePopularPeerSuggestionsState,
-  dismissPopularPeerSuggestions,
-  getInitialPopularPeerSuggestionsState,
-  popularPeerSuggestionsStorageKey
-} from '../utils/popularPeerSuggestions';
 
 interface HomePageProps {
   posts: HomeFeedPost[];
@@ -28,7 +19,6 @@ interface HomePageProps {
   contacts: Contact[];
   mentionContacts?: Contact[];
   myPublicKey?: string;
-  contactsLoaded?: boolean;
   postText: string;
   onPostTextChange: (value: string) => void;
   publishToDiscovery?: boolean;
@@ -44,8 +34,6 @@ interface HomePageProps {
   onReply: (objectId: string, content?: string, publishToDiscovery?: boolean) => void;
   onHide: (objectId: string) => void;
   onDelete?: (objectId: string) => void;
-  popularPeers?: PopularPeerWithIdentityProfile[];
-  onFollowPeer?: (peerId: string) => void;
 }
 
 const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
@@ -57,7 +45,6 @@ export function HomePage({
   contacts,
   mentionContacts = contacts,
   myPublicKey = '',
-  contactsLoaded = true,
   postText,
   onPostTextChange,
   publishToDiscovery = true,
@@ -73,30 +60,12 @@ export function HomePage({
   onReply,
   onHide,
   onDelete,
-  popularPeers = [],
-  onFollowPeer
 }: HomePageProps) {
   const [visibleCount, setVisibleCount] = useState(8);
   const [replyingToPostId, setReplyingToPostId] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<PostMention[]>([]);
-  const followedCount = contacts.filter((contact) => contact.followed).length;
-  const allSuggestedPeersFollowed = popularPeers.length > 0 && popularPeers.every(({ peer_id: peerId }) =>
-    contacts.some((contact) =>
-      contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)
-    )
-  );
-  const [popularPeerSuggestionsState, setPopularPeerSuggestionsState] = useState(() =>
-    getInitialPopularPeerSuggestionsState(
-      typeof window === 'undefined'
-        ? null
-        : window.localStorage.getItem(popularPeerSuggestionsStorageKey)
-          ?? (window.localStorage.getItem('popularPeerSuggestionsDismissed') === 'true' ? 'true' : null),
-      contactsLoaded,
-      followedCount
-    )
-  );
   const [autoLoadAvailable, setAutoLoadAvailable] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
   const [composerElement, setComposerElement] = useState<HTMLTextAreaElement | null>(null);
@@ -171,17 +140,6 @@ export function HomePage({
       .slice(0, visibleCount),
     [posts, visibleCount]
   );
-  useEffect(() => {
-    setPopularPeerSuggestionsState((current) => advancePopularPeerSuggestionsState(
-      current,
-      contactsLoaded,
-      followedCount,
-      allSuggestedPeersFollowed
-    ));
-  }, [allSuggestedPeersFollowed, contactsLoaded, followedCount]);
-  useEffect(() => {
-    window.localStorage.setItem(popularPeerSuggestionsStorageKey, popularPeerSuggestionsState);
-  }, [popularPeerSuggestionsState]);
   useEffect(() => {
     const firstPost = visiblePosts[0];
     if (!firstPost) return;
@@ -277,59 +235,6 @@ export function HomePage({
           />
         ) : null}
       </div>
-
-      {popularPeerSuggestionsState === 'active' && !allSuggestedPeersFollowed && popularPeers.length > 0 ? (
-        <div className="popular-posters-banner">
-          <div className="popular-posters-heading">
-            <strong>Popular posters right now.</strong>
-            <button
-              aria-label="Dismiss popular peer suggestions"
-              className="popular-posters-close"
-              onClick={() => {
-                const nextState = dismissPopularPeerSuggestions(followedCount);
-                window.localStorage.setItem(popularPeerSuggestionsStorageKey, nextState);
-                setPopularPeerSuggestionsState(nextState);
-              }}
-              title="Dismiss suggestions"
-              type="button"
-            >
-              X
-            </button>
-          </div>
-          {popularPeers.length === 0 ? <p className="note">No popular posters found yet.</p> : (
-            <div className="popular-posters-list">
-              {popularPeers.map((popularPeer) => {
-                const peerId = popularPeer.peer_id;
-                const contact = contacts.find((candidate) =>
-                  candidate.fingerprint === peerId || candidate.publicKey === peerId
-                );
-                const identityName = popularPeer.identity_profile?.payload.display_name
-                  ?? contact?.identityObject?.payload.display_name;
-                const displayName = displayNameOrFallback(
-                  resolvePeerDisplayName(identityName, contact?.authenticatedDisplayName) ?? contact?.displayName,
-                  peerId
-                );
-                return (
-                  <div className="popular-poster-item" key={peerId}>
-                    <span>
-                      <CompactUsername
-                        peerId={peerId}
-                        displayName={displayName}
-                        onProfileClick={onAuthorClick}
-                      /> <span className="note">Reply activity</span>
-                    </span>
-                    {onFollowPeer ? (
-                      <button className="chip secondary" type="button" onClick={() => onFollowPeer(peerId)}>
-                        {contacts.some((contact) => contact.followed && (contact.fingerprint === peerId || contact.publicKey === peerId)) ? 'Unfollow' : 'Follow'}
-                      </button>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      ) : null}
 
       {visiblePosts.length === 0 ? (
         <div className="empty-state card">

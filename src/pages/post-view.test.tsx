@@ -903,45 +903,11 @@ describe('relationship and discovery people UI', () => {
     expect(peopleTab.indexOf('Recent Person')).toBeLessThan(peopleTab.indexOf('Older Person'));
   });
 
-  it('does not start a suggestion cycle when the user already follows someone', () => {
-    const followedPeer: Contact = {
-      publicKey: 'aa:bb:cc:dd:ee:ff:00:22',
-      fingerprint: 'aa:bb:cc:dd:ee:ff:00:22',
-      addedAt: '2026-08-25T00:00:00.000Z',
-      followed: true
-    };
-    const markup = renderToStaticMarkup(
-      <HomePage
-        posts={[]}
-        contacts={[followedPeer]}
-        popularPeers={[{ peer_id: followedPeer.fingerprint, activity_score: 3 }]}
-        onFollowPeer={noop}
-        postText=""
-        onPostTextChange={noop}
-        onSubmitPost={noop}
-        canCreatePost
-        onAuthorClick={noop}
-        onLike={noop}
-        onDislike={noop}
-        onReply={noop}
-        onHide={noop}
-      />
-    );
-
-    expect(markup).not.toContain('Popular posters right now.');
-    expect(markup).not.toContain('Unfollow');
-    expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
-    expect(markup).not.toContain('New posts from people you follow.');
-    expect(markup).not.toContain('Refresh posts');
-  });
-
-  it('does not show popular peer suggestions when there are no suggestions', () => {
+  it('does not render the legacy popular-posters banner on Home', () => {
     const markup = renderToStaticMarkup(
       <HomePage
         posts={[]}
         contacts={[]}
-        popularPeers={[]}
-        onFollowPeer={noop}
         postText=""
         onPostTextChange={noop}
         onSubmitPost={noop}
@@ -956,75 +922,5 @@ describe('relationship and discovery people UI', () => {
 
     expect(markup).not.toContain('Popular posters right now.');
     expect(markup).not.toContain('aria-label="Dismiss popular peer suggestions"');
-  });
-
-  it('shows Stage 3 popular posters on Home when the user follows nobody', () => {
-    const markup = renderToStaticMarkup(
-      <HomePage
-        posts={[]}
-        contacts={[]}
-        popularPeers={[{ peer_id: 'aa:bb:cc:dd:ee:ff:00:22', activity_score: 3 }]}
-        onFollowPeer={noop}
-        postText=""
-        onPostTextChange={noop}
-        onSubmitPost={noop}
-        canCreatePost
-        onAuthorClick={noop}
-        onLike={noop}
-        onDislike={noop}
-        onReply={noop}
-        onHide={noop}
-      />
-    );
-
-    expect(markup).toContain('Popular posters right now.');
-    expect(markup).toContain('Reply activity');
-    expect(markup).toContain('Follow');
-  });
-
-  it('uses the verified popular-peer identity profile display name', () => {
-    const profile = {
-      object_id: 'profile-id',
-      object_type: 'mycelium.identity',
-      author: 'signing-key',
-      created_at: '2026-10-01T00:00:00.000Z',
-      payload: {
-        display_name: 'Suggested Profile Name',
-        bio: '',
-        encryption_public_key: 'encryption-key',
-        encryption_key_binding: {
-          signing_public_key: 'signing-key',
-          encryption_public_key: 'encryption-key',
-          created_at: '2026-10-01T00:00:00.000Z',
-          signature: 'signature'
-        }
-      },
-      signature: 'signature',
-      replication_policy: {}
-    } as const;
-    const markup = renderToStaticMarkup(
-      <HomePage
-        posts={[]}
-        contacts={[]}
-        popularPeers={[{
-          peer_id: 'aa:bb:cc:dd:ee:ff:00:22',
-          activity_score: 3,
-          identity_profile: profile
-        }]}
-        onFollowPeer={noop}
-        postText=""
-        onPostTextChange={noop}
-        onSubmitPost={noop}
-        canCreatePost
-        onAuthorClick={noop}
-        onLike={noop}
-        onDislike={noop}
-        onReply={noop}
-        onHide={noop}
-      />
-    );
-
-    expect(markup).toContain('Suggested Profile Name');
-    expect(markup).not.toContain('class="peer-name-primary">Peer</span>');
   });
 });

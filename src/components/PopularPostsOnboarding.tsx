@@ -3,9 +3,10 @@ import { createPortal } from 'react-dom';
 import type { Contact } from '../types';
 import { postContent, postImageSizes, type LocalPostView } from '../object-layer';
 import { displayNameOrFallback, resolvePeerDisplayName } from '../utils/fingerprintNames';
+import { friendlyNameFromUsername } from '../utils/usernameCodec';
 import { AVATAR_SIZES, IdentityAvatar } from './IdentityAvatar';
 import { FollowButton } from './FollowButton';
-import { MarkdownContent } from './MarkdownContent';
+import { MarkdownPostPreview } from './MarkdownPostPreview';
 import { PeerName } from './PeerName';
 
 type DiscoveryStageStatus = 'loading' | 'ready' | 'unavailable';
@@ -16,6 +17,8 @@ interface PopularPostsOnboardingProps {
   status: DiscoveryStageStatus;
   myPeerId: string;
   myPublicKey: string;
+  displayName: string;
+  handle: string;
   onToggleFollow: (peerId: string) => Promise<void>;
   onFinish: () => void;
 }
@@ -35,6 +38,8 @@ export function PopularPostsOnboarding({
   status,
   myPeerId,
   myPublicKey,
+  displayName,
+  handle,
   onToggleFollow,
   onFinish
 }: PopularPostsOnboardingProps) {
@@ -61,6 +66,9 @@ export function PopularPostsOnboarding({
       return true;
     }).slice(0, 10);
   }, [contacts, myPeerId, myPublicKey, posts]);
+  const greeting = displayName.trim()
+    ? `Hello ${displayName.trim()}!`
+    : `I'll just call you ${friendlyNameFromUsername(handle)} for now.`;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -113,9 +121,9 @@ export function PopularPostsOnboarding({
         >
           <span aria-hidden="true">&times;</span>
         </button>
-        <h1 id="popular-posts-onboarding-title">Mycelium is best with others.</h1>
-        <p id="popular-posts-onboarding-description" className="welcome-wizard-intro">
-          Here are some popular public posts right now. Follow the people behind the posts that interest you, and your Mycelium experience will become more interesting.
+        <h1 id="popular-posts-onboarding-title">{greeting}</h1>
+        <p id="popular-posts-onboarding-description" className="welcome-wizard-intro popular-posts-onboarding-intro">
+          Mycelium is best with others. Here are some popular posts right now. Follow the people behind the posts that interest you, and your Mycelium experience will become more interesting.
         </p>
         {status === 'loading' ? (
           <p className="popular-posts-onboarding-message" role="status">Loading public posts from Discover…</p>
@@ -168,8 +176,8 @@ export function PopularPostsOnboarding({
                     />
                   </header>
                   {content ? (
-                    <MarkdownContent
-                      className="markdown-content popular-post-onboarding-content"
+                    <MarkdownPostPreview
+                      className="popular-post-onboarding-content"
                       source={content}
                       imageSizes={postImageSizes(post)}
                     />

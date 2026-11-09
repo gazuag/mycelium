@@ -269,6 +269,17 @@ const DEFAULT_FEED_MIX: FeedMixSettings = {
   discoveryRandom: 0
 };
 
+function createDefaultProfileSettings(): MyProfileSettings {
+  return {
+    displayName: '',
+    bio: '',
+    feedMix: { ...DEFAULT_FEED_MIX },
+    blockedPeers: [],
+    hiddenPeers: [],
+    profilePicture: undefined
+  };
+}
+
 function isValidPeerFingerprint(value: string) {
   return /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(value.trim());
 }
@@ -388,21 +399,8 @@ function App() {
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
   const addPeerInviteHandledRef = useRef(false);
   const blockedPeersRef = useRef<Set<string>>(new Set());
-  const [myProfile, setMyProfile] = useState<MyProfileSettings>({
-    displayName: '',
-    bio: '',
-    feedMix: DEFAULT_FEED_MIX,
-    blockedPeers: [] as string[],
-    hiddenPeers: [] as string[],
-    profilePicture: undefined
-  });
-  const [savedProfileSnapshot, setSavedProfileSnapshot] = useState(() => editableProfileSnapshot({
-    displayName: '',
-    bio: '',
-    feedMix: DEFAULT_FEED_MIX,
-    blockedPeers: [],
-    hiddenPeers: []
-  }));
+  const [myProfile, setMyProfile] = useState<MyProfileSettings>(createDefaultProfileSettings);
+  const [savedProfileSnapshot, setSavedProfileSnapshot] = useState(() => editableProfileSnapshot(createDefaultProfileSettings()));
   const [profileSaveStatus, setProfileSaveStatus] = useState('');
   const profileEditRevisionRef = useRef(0);
   const profileHasUnsavedChanges = !profilesMatch(editableProfileSnapshot(myProfile), savedProfileSnapshot);
@@ -478,14 +476,7 @@ function App() {
   const turnIceInitializationRef = useRef<Promise<void> | null>(null);
   const turnIceConfiguredRef = useRef(false);
   const selectedContactIdRef = useRef<string | null>(null);
-  const myProfileRef = useRef<MyProfileSettings>({
-    displayName: '',
-    bio: '',
-    feedMix: DEFAULT_FEED_MIX,
-    blockedPeers: [] as string[],
-    hiddenPeers: [] as string[],
-    profilePicture: undefined
-  });
+  const myProfileRef = useRef<MyProfileSettings>(createDefaultProfileSettings());
   const identityRef = useRef<IdentityRecord | null>(null);
   const objectStoreRef = useRef<ObjectStore | null>(null);
   const outboxServiceRef = useRef<ReturnType<typeof createOutboxService> | null>(null);
@@ -4851,10 +4842,16 @@ function App() {
     // Remove every persisted app record tied to this identity/browser session.
     await deleteIdentity();
     await clearAllLocalData();
+    const emptyProfile = createDefaultProfileSettings();
+    myProfileRef.current = emptyProfile;
+    setMyProfile(emptyProfile);
+    setSavedProfileSnapshot(editableProfileSnapshot(emptyProfile));
+    setProfileSaveStatus('');
     localStorage.removeItem('myProfile');
     localStorage.removeItem('hiddenPosts');
     localStorage.removeItem('hiddenDiscovery');
     setIdentity(null);
+    setWelcomeWizardOpen(false);
     dmServiceRef.current = null;
     if (dmOutboxIntervalRef.current !== null) {
       window.clearInterval(dmOutboxIntervalRef.current);
@@ -4863,6 +4860,10 @@ function App() {
     setContacts([]);
     setPostViews([]);
     setDiscoveryPosts([]);
+    setPopularPeers([]);
+    setPossiblePeerIds([]);
+    peerPoolRequestedRef.current = false;
+    popularPeersRequestedRef.current = false;
     setDiscoveryOnboardingPosts([]);
     setDiscoveryOnboardingStatus('unavailable');
     discoveryOnboardingRequestRef.current += 1;
@@ -4873,6 +4874,8 @@ function App() {
     setChatContactId(null);
     setActivePeerId(null);
     setConnectionStatus('idle');
+    setIdentityBootstrapError('');
+    setIdentityBootstrapAttempt((attempt) => attempt + 1);
     setSignallingStatus('idle');
     commitNavigation({
       page: 'home',
@@ -5724,9 +5727,6 @@ function App() {
             contacts={contacts}
             mentionContacts={visibleContacts}
             myPublicKey={identity.publicKey}
-            contactsLoaded={contactsLoaded}
-            popularPeers={popularPeers}
-            onFollowPeer={(peerId) => { void handleToggleFollow(peerId); }}
             postText={newPostContent}
             onPostTextChange={setNewPostContent}
             onSubmitPost={(publishToDiscovery, mentions) => {
@@ -6021,6 +6021,8 @@ function App() {
           status={discoveryOnboardingStatus}
           myPeerId={identity.id}
           myPublicKey={identity.publicKey}
+          displayName={myProfile.displayName}
+          handle={fingerprintToHumanName(identity.id)}
           onToggleFollow={handleToggleFollow}
           onFinish={finishDiscoveryOnboarding}
         />

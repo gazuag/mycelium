@@ -1,4 +1,4 @@
-import { isObjectExpired } from '../object-layer/envelope';
+import { isObjectExpired, validateDistributedObject } from '../object-layer/envelope';
 import { DM_OBJECT_TYPE, type DmObjectIdentity } from '../object-layer/dm-object';
 import { openDm } from '../object-layer/dm-inbox';
 import type { DistributedObject, ObjectStore } from '../object-layer/types';
@@ -114,18 +114,23 @@ export async function classifyNewlyAcceptedObjectNotification(
   const payload = isRecord(object.payload) ? object.payload : null;
   if (!payload) return null;
 
-  const targetId = payload.reply_to;
-  if (typeof targetId === 'string' && OBJECT_ID_PATTERN.test(targetId)) {
+  if ('reply_to' in payload) {
+    const targetId = payload.reply_to;
+    if (typeof targetId !== 'string' || !OBJECT_ID_PATTERN.test(targetId)) return null;
+
     const parent = await store.get(targetId);
-    if (parent?.object_type === 'mycelium.post'
-      && (parent.author === identity.id || parent.author === identity.publicKey)
-      && !isObjectExpired(parent)
-      && !(await isTombstoned(parent.object_id))) {
-      return { category: 'replies', dedupeId: object.object_id };
-    }
+    if (!parent
+      || parent.object_id !== targetId
+      || parent.object_type !== 'mycelium.post'
+      || (parent.author !== identity.id && parent.author !== identity.publicKey)
+      || isObjectExpired(parent)
+      || await isTombstoned(parent.object_id)
+      || !(await validateDistributedObject(parent))) return null;
+
+    return { category: 'replies', dedupeId: object.object_id };
   }
 
-  if (object.object_type === 'mycelium.post' && followedAuthorKeys.has(object.author)) {
+  if (followedAuthorKeys.has(object.author)) {
     return { category: 'followedPosts', dedupeId: object.object_id };
   }
   return null;

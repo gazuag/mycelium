@@ -100,13 +100,13 @@ export function FirstPostOnboarding({ displayName, handle, onPublish, onFinish }
         >
           <span aria-hidden="true">&times;</span>
         </button>
-        <h1 id="first-post-onboarding-title">Find your people.</h1>
+        <h1 id="first-post-onboarding-title">Say hello</h1>
         <p id="first-post-onboarding-description" className="welcome-wizard-intro">
-          The best way to meet like-minded people is to start a conversation. Tell others a little about yourself, share your interests, and give them something interesting to respond to.
+          Introduce yourself to the community and find new friends.
         </p>
         <p className="first-post-public-note">Your post will be public and visible to other Mycelium users.</p>
         <CollapsibleSection
-          title="Interests"
+          title="Interests (optional)"
           collapsed={!interestsExpanded}
           onToggle={() => setInterestsExpanded((expanded) => !expanded)}
           className="first-post-interests"
@@ -137,19 +137,6 @@ export function FirstPostOnboarding({ displayName, handle, onPublish, onFinish }
               maxLength={MAX_POST_CONTENT_LENGTH}
               ariaLabel="Your introductory post"
               placeholder="Write an introduction..."
-              actionPlacement="controls"
-              action={(
-                <button
-                  className="btn secondary first-post-regenerate"
-                  type="button"
-                  onClick={() => regenerate()}
-                >
-                  <svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16">
-                    <path d="M16.5 8A6.8 6.8 0 0 0 4.7 5.2L3 7m0 0V3.8M3 7h3.2M3.5 12a6.8 6.8 0 0 0 11.8 2.8L17 13m0 0v3.2M17 13h-3.2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
-                  </svg>
-                  Regenerate
-                </button>
-              )}
             />
           </fieldset>
         </div>
@@ -172,6 +159,18 @@ export function FirstPostOnboarding({ displayName, handle, onPublish, onFinish }
               </button>
               <button className="btn secondary" type="button" onClick={onFinish} disabled={publishing}>
                 Skip for now
+              </button>
+              <button
+                className="first-post-regenerate"
+                type="button"
+                aria-label="Regenerate post"
+                title="Regenerate post"
+                onClick={() => regenerate()}
+                disabled={publishing}
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18">
+                  <path d="M16.5 8A6.8 6.8 0 0 0 4.7 5.2L3 7m0 0V3.8M3 7h3.2M3.5 12a6.8 6.8 0 0 0 11.8 2.8L17 13m0 0v3.2M17 13h-3.2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+                </svg>
               </button>
             </>
           ) : (

@@ -47,7 +47,10 @@ describe('FirstPostOnboarding', () => {
   it('starts with an editable generated post and a collapsed interests selector', async () => {
     const { dialog, textarea } = await renderOnboarding();
 
-    expect(dialog.querySelector('h1')?.textContent).toBe('Find your people.');
+    expect(dialog.querySelector('h1')?.textContent).toBe('Say hello');
+    expect(dialog.querySelector('.welcome-wizard-intro')?.textContent)
+      .toBe('Introduce yourself to the community and find new friends.');
+    expect(dialog.querySelector('.collapsible-toggle')?.textContent).toContain('Interests (optional)');
     expect(dialog.querySelector('.collapsible-toggle')?.getAttribute('aria-expanded')).toBe('false');
     expect(textarea.value.split('\n\n')[0]).toContain('Ada');
     expect(textarea.value.split('\n\n')).toHaveLength(2);
@@ -67,7 +70,11 @@ describe('FirstPostOnboarding', () => {
       changeTextarea(textarea, 'My own edited introduction.');
     });
     const regenerate = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent?.includes('Regenerate'));
+      .find((button) => button.getAttribute('aria-label') === 'Regenerate post');
+    expect(regenerate?.textContent).toBe('');
+    expect(regenerate?.getAttribute('title')).toBe('Regenerate post');
+    expect(regenerate?.closest('.first-post-actions')).not.toBeNull();
+    expect(regenerate?.className).toContain('first-post-regenerate');
     await act(async () => regenerate?.click());
     expect(textarea.value).not.toBe('My own edited introduction.');
     expect(textarea.value).toContain('Books');

@@ -210,10 +210,16 @@ describe('classification of newly accepted objects', () => {
   });
 
   it('classifies a reply only when its verified target is a live local post', async () => {
-    const target = object(TARGET_ID, 'mycelium.post', LOCAL_KEY);
-    const reply = object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: TARGET_ID });
-    const store = { get: vi.fn(async (id: string) => id === TARGET_ID ? target : null) };
-    const replyOptions = { ...options, store };
+    const local = await createIdentity('local');
+    const target = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: '2026-10-22T10:00:00.000Z',
+      payload: { content: 'local parent' },
+      replication_policy: {}
+    }, createObjectIdentity(local));
+    const reply = object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: target.object_id });
+    const store = { get: vi.fn(async (id: string) => id === target.object_id ? target : null) };
+    const replyOptions = { ...options, identity: local, store };
 
     await expect(classifyNewlyAcceptedObjectNotification(reply, replyOptions))
       .resolves.toEqual({ category: 'replies', dedupeId: REPLY_ID });
@@ -221,11 +227,78 @@ describe('classification of newly accepted objects', () => {
       { ...reply, payload: { reply_to: 'not-an-object-id' } },
       replyOptions
     )).resolves.toBeNull();
-    const deletedOptions = { ...replyOptions, isTombstoned: vi.fn(async (id: string) => id === TARGET_ID) };
+    const deletedOptions = {
+      ...replyOptions,
+      isTombstoned: vi.fn(async (id: string) => id === target.object_id)
+    };
     await expect(classifyNewlyAcceptedObjectNotification(reply, deletedOptions)).resolves.toBeNull();
     await expect(classifyNewlyAcceptedObjectNotification(
-      object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: TARGET_ID }),
-      { ...options, store: { get: vi.fn(async () => object(TARGET_ID, 'mycelium.post', 'other-key')) } }
+      object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: target.object_id }),
+      { ...replyOptions, store: { get: vi.fn(async () => object(target.object_id, 'mycelium.post', 'other-key')) } }
+    )).resolves.toBeNull();
+  });
+
+  it('does not classify a reply with a missing parent as a followed-author post', async () => {
+    const reply = object(REPLY_ID, 'mycelium.post', 'followed-signing-key', { reply_to: TARGET_ID });
+
+    await expect(classifyNewlyAcceptedObjectNotification(reply, options)).resolves.toBeNull();
+  });
+
+  it('does not classify a reply with an invalid, mismatched, expired, or unverifiable parent as followed', async () => {
+    const local = await createIdentity('local');
+    const other = await createIdentity('other');
+    const parent = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: '2026-10-22T10:00:00.000Z',
+      payload: { content: 'local parent' },
+      replication_policy: {}
+    }, createObjectIdentity(local));
+    const reply = object(REPLY_ID, 'mycelium.post', 'followed-signing-key', { reply_to: parent.object_id });
+    const replyOptions = { ...options, identity: local };
+
+    const cases: Array<{
+      readonly name: string;
+      readonly getParent: () => Promise<DistributedObject | null>;
+    }> = [
+      { name: 'invalid signature', getParent: async () => ({ ...parent, signature: 'invalid' }) },
+      { name: 'mismatched object ID', getParent: async () => ({ ...parent, object_id: TARGET_ID }) },
+      {
+        name: 'expired parent',
+        getParent: async () => createSignedObject({
+          object_type: 'mycelium.post',
+          created_at: '2026-10-22T10:00:00.000Z',
+          expires_at: '2020-01-01T00:00:00.000Z',
+          payload: { content: 'expired parent' },
+          replication_policy: {}
+        }, createObjectIdentity(local))
+      }
+    ];
+
+    for (const testCase of cases) {
+      const classification = await classifyNewlyAcceptedObjectNotification(reply, {
+        ...replyOptions,
+        store: { get: vi.fn(testCase.getParent) }
+      });
+      expect(classification, testCase.name).toBeNull();
+    }
+
+    const otherParent = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: '2026-10-22T10:00:00.000Z',
+      payload: { content: 'other author parent' },
+      replication_policy: {}
+    }, createObjectIdentity(other));
+    const replyToOtherAuthor = object(REPLY_ID, 'mycelium.post', 'followed-signing-key', {
+      reply_to: otherParent.object_id
+    });
+    await expect(classifyNewlyAcceptedObjectNotification(replyToOtherAuthor, {
+      ...replyOptions,
+      store: { get: vi.fn(async () => otherParent) }
+    })).resolves.toBeNull();
+
+    await expect(classifyNewlyAcceptedObjectNotification(
+      { ...reply, payload: { reply_to: null } },
+      replyOptions
     )).resolves.toBeNull();
   });
 
@@ -258,12 +331,18 @@ describe('classification of newly accepted objects', () => {
   });
 
   it('notifies once for the canonical reply post after ignoring duplicate or fabricated notices', async () => {
-    const target = object(TARGET_ID, 'mycelium.post', LOCAL_KEY);
-    const canonicalReply = object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: TARGET_ID });
-    const store = { get: vi.fn(async (id: string) => id === TARGET_ID ? target : null) };
-    const replyOptions = { ...options, store };
+    const local = await createIdentity('local');
+    const target = await createSignedObject({
+      object_type: 'mycelium.post',
+      created_at: '2026-10-22T10:00:00.000Z',
+      payload: { content: 'local parent' },
+      replication_policy: {}
+    }, createObjectIdentity(local));
+    const canonicalReply = object(REPLY_ID, 'mycelium.post', 'reply-author', { reply_to: target.object_id });
+    const store = { get: vi.fn(async (id: string) => id === target.object_id ? target : null) };
+    const replyOptions = { ...options, identity: local, store };
     const replyNotice = object('c'.repeat(64), 'mycelium.reply', 'reply-author', {
-      reply_to: TARGET_ID,
+      reply_to: target.object_id,
       reply_to_author: LOCAL_ID,
       reply_post_id: REPLY_ID
     });

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 
 interface WelcomeWizardProps {
@@ -7,12 +8,15 @@ interface WelcomeWizardProps {
   onComplete: (displayName: string, nextStep: 'discover' | 'home') => Promise<void>;
 }
 
+type WelcomeBackdropStyle = CSSProperties & { '--welcome-viewport-height': string };
+
 export function WelcomeWizard({ handle, initialDisplayName, onComplete }: WelcomeWizardProps) {
   const [displayName, setDisplayName] = useState(initialDisplayName);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const titleId = useId();
-  const closeRef = useRef<HTMLButtonElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const [visualViewport, setVisualViewport] = useState<{ height: number; offsetTop: number } | null>(null);
 
   const finish = async (nextStep: 'discover' | 'home' = 'home') => {
     if (saving) return;
@@ -30,7 +34,7 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
   finishRef.current = finish;
 
   useEffect(() => {
-    closeRef.current?.focus();
+    nameInputRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -41,9 +45,34 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const updateViewport = () => setVisualViewport({
+      height: viewport.height,
+      offsetTop: viewport.offsetTop
+    });
+    updateViewport();
+    viewport.addEventListener('resize', updateViewport);
+    viewport.addEventListener('scroll', updateViewport);
+    return () => {
+      viewport.removeEventListener('resize', updateViewport);
+      viewport.removeEventListener('scroll', updateViewport);
+    };
+  }, []);
+
+  const backdropStyle: WelcomeBackdropStyle | undefined = visualViewport
+    ? {
+        height: `${visualViewport.height}px`,
+        top: `${visualViewport.offsetTop}px`,
+        '--welcome-viewport-height': `${visualViewport.height}px`
+      }
+    : undefined;
+
   return createPortal(
     <div
       className="welcome-wizard-backdrop"
+      style={backdropStyle}
       role="presentation"
       onClick={(event) => {
         if (event.target === event.currentTarget) void finish('home');
@@ -57,7 +86,6 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
         onClick={(event) => event.stopPropagation()}
       >
         <button
-          ref={closeRef}
           className="welcome-wizard-close"
           type="button"
           aria-label="Close welcome"
@@ -66,13 +94,14 @@ export function WelcomeWizard({ handle, initialDisplayName, onComplete }: Welcom
         >
           <span aria-hidden="true">&times;</span>
         </button>
-        <h1 id={titleId}>Welcome! Pick your name!</h1>
-        <p className="welcome-wizard-intro">
-          Choose the name you&apos;d like people to see on Mycelium. You can change it later.
-        </p>
+        <h1 id={titleId}>Welcome to Mycelium!</h1>
+        <p className="welcome-wizard-intro">Please pick your name.</p>
+        <p className="welcome-wizard-change-name">(You can change it later)</p>
         <label className="welcome-wizard-name">
           Display name
           <input
+            ref={nameInputRef}
+            autoFocus
             autoComplete="nickname"
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}

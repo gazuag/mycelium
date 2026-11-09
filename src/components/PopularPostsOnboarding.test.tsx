@@ -6,6 +6,7 @@ import type { LocalPostView } from '../object-layer';
 import type { Contact } from '../types';
 import type { IdentityProfilePicture } from '../utils/profile-picture';
 import { fingerprintToHumanName } from '../utils/fingerprintNames';
+import { friendlyNameFromUsername } from '../utils/usernameCodec';
 import { PopularPostsOnboarding } from './PopularPostsOnboarding';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
@@ -58,7 +59,8 @@ describe('PopularPostsOnboarding', () => {
     status: 'loading' | 'ready' | 'unavailable' = 'ready',
     onToggleFollow = vi.fn(async () => {}),
     onFinish = vi.fn(),
-    contacts: Contact[] = []
+    contacts: Contact[] = [],
+    displayName = ''
   ) {
     container = document.createElement('div');
     document.body.append(container);
@@ -70,6 +72,8 @@ describe('PopularPostsOnboarding', () => {
         status={status}
         myPeerId="me"
         myPublicKey="my-public-key"
+        displayName={displayName}
+        handle={fingerprintToHumanName('aa:bb:cc:dd:ee:ff:00:11')}
         onToggleFollow={onToggleFollow}
         onFinish={onFinish}
       />
@@ -112,6 +116,8 @@ describe('PopularPostsOnboarding', () => {
           status="ready"
           myPeerId="me"
           myPublicKey="my-public-key"
+          displayName=""
+          handle={fingerprintToHumanName('aa:bb:cc:dd:ee:ff:00:11')}
           onToggleFollow={async (peerId) => {
             await onToggleFollow(peerId);
             setContacts((previous) => previous.map((contact) =>
@@ -158,11 +164,42 @@ describe('PopularPostsOnboarding', () => {
       follow?.click();
       await Promise.resolve();
     });
+
     expect(onToggleFollow).toHaveBeenCalledOnce();
     expect(onToggleFollow).toHaveBeenCalledWith(peerId);
     expect(dialog.querySelector<HTMLButtonElement>('.popular-post-onboarding-item button')?.disabled).toBe(true);
     await act(async () => resolveFollow?.());
     expect(dialog.querySelector('.popular-post-onboarding-item button')?.textContent).toBe('Unfollow');
+  });
+
+  it('personalizes the greeting for named users and falls back to the existing handle components', async () => {
+    const named = await renderOnboarding([], 'ready', vi.fn(async () => {}), vi.fn(), [], 'Ada');
+    expect(named.dialog.querySelector('h1')?.textContent).toBe('Hello Ada!');
+    expect(named.dialog.querySelector('.popular-posts-onboarding-intro')?.textContent)
+      .toBe('Mycelium is best with others. Here are some popular posts right now. Follow the people behind the posts that interest you, and your Mycelium experience will become more interesting.');
+    act(() => root?.unmount());
+    container?.remove();
+    root = undefined;
+    container = undefined;
+
+    const unnamed = await renderOnboarding();
+    expect(unnamed.dialog.querySelector('h1')?.textContent)
+      .toBe(`I'll just call you ${friendlyNameFromUsername(fingerprintToHumanName('aa:bb:cc:dd:ee:ff:00:11'))} for now.`);
+  });
+
+  it('renders full suggestion Markdown before clipping and expands it on request', async () => {
+    const markdown = `${'A long public post. '.repeat(20)} **bold ending** [source](https://example.com)`;
+    const { dialog } = await renderOnboarding([makePost('long-post', 'author', markdown)]);
+    const preview = dialog.querySelector('.popular-post-onboarding-content');
+    expect(preview?.querySelector('strong')?.textContent).toBe('bold ending');
+    expect(preview?.querySelector('a')?.textContent).toBe('source');
+    expect(preview?.classList.contains('is-collapsed')).toBe(true);
+
+    await act(async () => {
+      preview?.querySelector<HTMLButtonElement>('.post-content-more')?.click();
+    });
+    expect(dialog.querySelector('.popular-post-onboarding-content .post-content-more')).toBeNull();
+    expect(dialog.querySelector('.popular-post-onboarding-content')?.classList.contains('is-collapsed')).toBe(false);
   });
 
   it('shows loading and unavailable states without blocking continuation', async () => {

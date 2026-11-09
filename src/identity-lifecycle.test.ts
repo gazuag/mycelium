@@ -3,7 +3,7 @@ import { webcrypto } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { deriveFingerprint } from './crypto/identity';
 import { createLocalIdentityRecord, loadOrCreateLocalIdentity } from './identity-lifecycle';
-import { loadIdentity, saveIdentity } from './storage/idb';
+import { clearAllLocalData, deleteIdentity, loadIdentity, saveIdentity } from './storage/idb';
 import { fingerprintToHumanName } from './utils/fingerprintNames';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
@@ -63,6 +63,20 @@ describe('local identity initialization', () => {
     expect(results[0].identity.publicKey).toBe(results[1].identity.publicKey);
     await expect(loadIdentity()).resolves.toMatchObject({
       publicKey: results[0].identity.publicKey
+    });
+  });
+
+  it('creates a fresh identity through the normal startup lifecycle after clearing the previous one', async () => {
+    const previous = await loadOrCreateLocalIdentity();
+    await deleteIdentity();
+    await clearAllLocalData();
+
+    const replacement = await loadOrCreateLocalIdentity();
+
+    expect(replacement.created).toBe(true);
+    expect(replacement.identity.publicKey).not.toBe(previous.identity.publicKey);
+    await expect(loadIdentity()).resolves.toMatchObject({
+      publicKey: replacement.identity.publicKey
     });
   });
 });
