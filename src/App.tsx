@@ -40,10 +40,10 @@ import { contactWithIdentityProfile, dedupeContactsByFingerprint } from './conta
 import { DmUnreadProvider } from './hooks/useDmUnread';
 import { useReplyUnreadController } from './hooks/useReplyUnread';
 import { listConversations, previewConversation, type ConversationSummary } from './object-layer/conversations';
-import { addEncryptionKeyBinding, applyEncryptionKeyBinding, createEncryptionKeyBinding, getContactEncryptionKey } from './crypto/dm-crypto';
+import { addEncryptionKeyBinding, createEncryptionKeyBinding, getContactEncryptionKey, verifyEncryptionKeyBinding } from './crypto/dm-crypto';
 import { appendBoundedLog, redactNetworkAddresses } from './diagnostics';
 import { filterTombstonedObjects, getFindQueryCriteria, prepareFindQueryPage } from './object-layer/transport';
-import { ensureIdentityEncryptionKeyPair, identityBackupFields, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
+import { acceptPeerMetadata, ensureIdentityEncryptionKeyPair, loadCurrentIdentityBackupFields, loadIdentity, nextLocalMetadataSequence, parseIdentityMetadataSequence, saveIdentity, deleteIdentity, loadContacts, saveContact, deleteContact, clearContactWebPushCapabilityIfMatches, saveDiscoveryInteraction, loadDiscoveryInteractions, clearAllLocalData, loadProfile, loadInboxCursor, saveInboxCursor, loadInboxBackfillState, saveInboxBackfillState, loadFeedCursor, saveFeedCursor } from './storage/idb';
 import { fetchDiscovery, handleDiscoveryResult, publishObject, validateDiscoveryObjects } from './services/discovery';
 import { AppHeader } from './components/AppHeader';
 import { WelcomeWizard } from './components/WelcomeWizard';
@@ -67,8 +67,13 @@ import { ProfilePictureEditor } from './components/ProfilePictureEditor';
 import { HiddenPostList } from './components/HiddenPostList';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { ExternalImageLimitContext } from './components/MarkdownContent';
-import { canonicalize, createPacketId, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
+import { canonicalize, createPacketId, isPeerFingerprint, type MyceliumPacket, type PacketSigner } from './p2p/protocol';
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
+import {
+  createSequencedPeerMetadata,
+  mergeAcceptedPeerMetadataContact,
+  recordAcceptedPeerMetadataSequence
+} from './p2p/peer-metadata';
 import { webPushManager } from './services/web-push';
 import { dispatchWebPushObject } from './services/web-push-dispatch';
 import { completePostDirectSharingAndDispatchFollowers } from './services/post-web-push';
@@ -125,6 +130,7 @@ import {
 import { fetchPeerPool, fetchPopularPeers, handlePeerDiscoveryResult, type PopularPeer, type PopularPeerWithIdentityProfile } from './services/peer-discovery';
 import { FALLBACK_ICE_SERVERS, fetchMeteredIceServers } from './services/metered-turn';
 import type { ConnectionState, Contact, PeerMetadata } from './types';
+import type { InvalidateWebPushCapability } from './services/web-push-capability-invalidation';
 
 interface IdentityRecord {
   key: string;
@@ -281,7 +287,7 @@ function createDefaultProfileSettings(): MyProfileSettings {
 }
 
 function isValidPeerFingerprint(value: string) {
-  return /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(value.trim());
+  return isPeerFingerprint(value.trim());
 }
 
 function observeValidatedObjectSupply(
@@ -308,6 +314,7 @@ function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const suppressReconnectRef = useRef(false);
   const contactsRef = useRef<Contact[]>([]);
+  const acceptedPeerMetadataSequencesRef = useRef(new Map<string, number>());
   const postViewsRef = useRef<LocalPostView[]>([]);
   const deletedPostIdsRef = useRef(new Set<string>());
   const homeFeedInjectionSchedulerRef = useRef<HomeFeedInjectionScheduler | null>(null);
@@ -339,6 +346,31 @@ function App() {
   const [firstPostOnboardingOpen, setFirstPostOnboardingOpen] = useState(false);
   const [guidedTourCompletesOnboarding, setGuidedTourCompletesOnboarding] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const invalidateWebPushCapabilityLocally = useCallback<InvalidateWebPushCapability>(
+    async (publicKey, fingerprint, capability) => {
+      const clearedContact = await clearContactWebPushCapabilityIfMatches(
+        publicKey,
+        fingerprint,
+        capability
+      );
+      if (!clearedContact) return;
+
+      setContacts((previous) => {
+        const next = previous.map((contact) => (
+          contact.publicKey === publicKey
+            && contact.fingerprint === fingerprint
+            && contact.webPush?.endpoint === capability.endpoint
+            && contact.webPush.p256dh === capability.p256dh
+            && contact.webPush.auth === capability.auth
+            ? { ...contact, webPush: undefined }
+            : contact
+        ));
+        contactsRef.current = next;
+        return next;
+      });
+    },
+    []
+  );
   const [postViews, setPostViews] = useState<LocalPostView[]>([]);
   const [deletionTombstones, setDeletionTombstones] = useState<DeletionTombstone[]>([]);
   const initialNavigation = readAppNavigationState(window.history.state);
@@ -770,6 +802,7 @@ function App() {
       outbox: outboxService,
       connectedPeers: () => objectTransport.connectedPeers(),
       getBlockedPeers: () => blockedPeersRef.current,
+      invalidateWebPushCapability: invalidateWebPushCapabilityLocally,
       dispatchWebPush: dispatchWebPushObject
     });
     inboxServiceRef.current = service;
@@ -789,7 +822,7 @@ function App() {
       if (dmOutboxIntervalRef.current === outboxInterval) dmOutboxIntervalRef.current = null;
       if (dmServiceRef.current === dmService) dmServiceRef.current = null;
     };
-  }, [identity]);
+  }, [identity, invalidateWebPushCapabilityLocally]);
 
   useEffect(() => {
     suppressPhase6FindResponsesRef.current = suppressPhase6FindResponses;
@@ -1915,11 +1948,16 @@ function App() {
       tags: [],
       ...(webPush ? { webPush } : {})
     };
-    return id?.encryptionPublicKey ? addEncryptionKeyBinding(metadata, id) : metadata;
+    const sequencedMetadata = await createSequencedPeerMetadata(metadata, nextLocalMetadataSequence);
+    return id?.encryptionPublicKey ? addEncryptionKeyBinding(sequencedMetadata, id) : sequencedMetadata;
   };
 
   const sendPeerMetadata = async (manager: PeerConnectionManager, peerId: string, followingOverride?: boolean) => {
-    manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
+    try {
+      manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
+    } catch {
+      addLog('Profile metadata was not sent because it could not be prepared safely.');
+    }
   };
 
   const publishLocalIdentityProfile = async (
@@ -2143,6 +2181,7 @@ function App() {
       removeAuthenticatedPeerAuthor(authenticatedPeerAuthorsRef.current, peerId, manager);
       authenticatedPeerManagersRef.current.delete(manager);
     }
+    if (activePeerAttemptsRef.current.has(peerId)) settlePeerRecoveryAttempt(peerId, false);
     return closeAndRemovePeerManager(peerManagersRef.current, peerId, expected);
   };
 
@@ -2178,62 +2217,54 @@ function App() {
       });
     }
 
-    const existingContact = contactsRef.current.find((contact) => contact.fingerprint === peerId);
-    const bindingUpdate = await applyEncryptionKeyBinding(
-      metadata.encryptionKeyBinding,
+    const binding = metadata.encryptionKeyBinding;
+    const verifiedEncryptionPublicKey = binding
+      && binding.signing_public_key === metadataPublicKey
+      && await verifyEncryptionKeyBinding(binding)
+      ? binding.encryption_public_key
+      : undefined;
+    const result = await acceptPeerMetadata(
       metadataPublicKey,
-      existingContact ? {
-        encryptionPublicKey: existingContact.encryptionPublicKey,
-        encryptionKeyChanged: existingContact.encryptionKeyChanged
-      } : {}
+      peerId,
+      metadata.sequence,
+      {
+        authenticatedDisplayName: metadata.displayName,
+        follower: metadata.following,
+        webPush: metadata.webPush,
+        ...(verifiedEncryptionPublicKey ? { verifiedEncryptionPublicKey } : {})
+      }
     );
-    if (bindingUpdate.keyChanged) {
+    if (result.status !== 'accepted') {
+      if (result.status === 'storage-failure') {
+        addLog('Authenticated profile metadata could not be persisted.');
+      } else if (result.status === 'identity-mismatch' || result.status === 'invalid-input') {
+        addLog('Authenticated profile metadata did not match the stored peer identity or expected format.');
+      }
+      return;
+    }
+    if (result.encryptionKeyChanged) {
       console.warn(`Peer encryption key changed for ${peerId}; keeping previously trusted key`);
     }
-    setContacts((prev) => {
-      const existing = prev.find((contact) => contact.fingerprint === peerId);
-      const updatedContact: Contact = existing
-        ? {
-            ...existing,
-            ...bindingUpdate.contactFields,
-            publicKey: metadataPublicKey ?? existing.publicKey,
-            authenticatedDisplayName: typeof metadata.displayName === 'string'
-              ? metadata.displayName
-              : existing.authenticatedDisplayName,
-            webPush: metadata.webPush,
-            follower: metadata.following,
-            online: true,
-            connected: true
-          }
-        : {
-          publicKey: metadataPublicKey ?? peerId,
-            fingerprint: peerId,
-          authenticatedDisplayName: typeof metadata.displayName === 'string' ? metadata.displayName : undefined,
-          ...bindingUpdate.contactFields,
-            webPush: metadata.webPush,
-            addedAt: new Date().toISOString(),
-            followed: false,
-            follower: metadata.following,
-            online: true,
-            connected: true,
-          };
-
-      void saveContact(updatedContact)
-        .then(() => {
-          if (existing && existing.publicKey !== updatedContact.publicKey) {
-            return deleteContact(existing.publicKey);
-          }
-        })
-        .catch((error: unknown) => {
-          addLog(`Failed to persist contact profile for ${peerId}: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      return existing ? prev.map((contact) => (contact.fingerprint === peerId ? updatedContact : contact)) : [...prev, updatedContact];
-    });
+    if (recordAcceptedPeerMetadataSequence(
+      acceptedPeerMetadataSequencesRef.current,
+      metadataPublicKey,
+      result.highestSequence
+    )) {
+      setContacts((previous) => {
+        const next = mergeAcceptedPeerMetadataContact(
+          previous,
+          result,
+          acceptedPeerMetadataSequencesRef.current
+        );
+        contactsRef.current = next;
+        return next;
+      });
+    }
     if (metadataPublicKey) {
       void requestIdentityProfileIfMissing(peerId, manager, metadataPublicKey)
         .catch((error: unknown) => addLog(`Failed to check signed identity profile for ${peerId}: ${error instanceof Error ? error.message : String(error)}`));
     }
-    addLog(`Received authenticated connection metadata from ${peerId} following=${metadata.following}`);
+    addLog(`Received authenticated profile metadata revision ${result.highestSequence} from ${peerId}`);
   };
 
   const peerObservationIdentity = async (peerId: string): Promise<PeerIdentityEvidence> => {
@@ -2329,10 +2360,11 @@ function App() {
     if (peerElectionFallbackTimersRef.current.has(peerId)) return;
     peerElectionFallbackTimersRef.current.set(peerId, window.setTimeout(() => {
       peerElectionFallbackTimersRef.current.delete(peerId);
-      const manager = peerManagersRef.current[peerId];
       const socket = signallingSocketRef.current;
       const localPeerId = identityRef.current?.id;
-      if (!manager || !localPeerId || socket?.readyState !== WebSocket.OPEN || manager.isDataChannelOpen()) return;
+      if (!localPeerId || socket?.readyState !== WebSocket.OPEN) return;
+      const manager = peerManagersRef.current[peerId];
+      if (manager?.isDataChannelOpen()) return;
       clearPeerWaitingInterval(peerId);
       addLog(`Peer ${peerId} election wait timed out after 15 seconds; initiating fallback connection`);
       requestPeerOffer(peerId, manager, socket, true);
@@ -2348,8 +2380,10 @@ function App() {
     if (!peerCapacityRef.current?.reserve(peerId, direction)) return false;
     if (objectTransportRef.current?.connectedPeers().includes(peerId)) return true;
     activePeerAttemptsRef.current.add(peerId);
-    peerAttemptObservationIdsRef.current.set(peerId, newConnectionAttemptObservationId());
-    peerAttemptTimeoutsRef.current.set(peerId, window.setTimeout(() => {
+    const attemptObservationId = newConnectionAttemptObservationId();
+    peerAttemptObservationIdsRef.current.set(peerId, attemptObservationId);
+    const timeout = window.setTimeout(() => {
+      if (peerAttemptTimeoutsRef.current.get(peerId) !== timeout) return;
       peerAttemptTimeoutsRef.current.delete(peerId);
       activePeerAttemptsRef.current.delete(peerId);
       peerCapacityRef.current?.release(peerId);
@@ -2361,8 +2395,19 @@ function App() {
         closeAndRemoveAuthenticatedPeerManager(peerId, manager);
       }
       peerRecoveryRef.current?.notifyConnectivityChanged();
-    }, timeoutMs));
+    }, timeoutMs);
+    peerAttemptTimeoutsRef.current.set(peerId, timeout);
     return true;
+  };
+
+  const cancelPendingPeerNegotiations = () => {
+    for (const peerId of [...activePeerAttemptsRef.current]) {
+      settlePeerRecoveryAttempt(peerId, false);
+      const manager = peerManagersRef.current[peerId];
+      if (manager && !manager.isDataChannelOpen()) {
+        closeAndRemoveAuthenticatedPeerManager(peerId, manager);
+      }
+    }
   };
 
   const startPeerWaitingInterval = (peerId: string) => {
@@ -2803,31 +2848,48 @@ function App() {
 
   const requestPeerOffer = (
     peerId: string,
-    manager: PeerConnectionManager,
+    manager: PeerConnectionManager | undefined,
     socket: WebSocket,
     forceInitiation = false,
     attemptTimeoutMs = 30_000
   ) => {
-    if (!identity?.id || peerId === identity.id) return;
+    if (!identity?.id || peerId === identity.id || socket.readyState !== WebSocket.OPEN) return;
+    const existingManager = peerManagersRef.current[peerId] ?? manager;
     if (identity.id > peerId && !forceInitiation) {
+      if (existingManager?.isUnused()) {
+        closeAndRemoveAuthenticatedPeerManager(peerId, existingManager);
+      }
       addLog(`Waiting for ${peerId} to initiate the peer connection`);
       startPeerWaitingInterval(peerId);
       startPeerElectionFallback(peerId);
       return;
     }
-    if (manager.isDataChannelOpen() || activePeerAttemptsRef.current.has(peerId)) return;
+    if (existingManager?.isDataChannelOpen()
+      || existingManager?.isNegotiating()
+      || activePeerAttemptsRef.current.has(peerId)) return;
+    if (existingManager?.needsReplacement()) {
+      closeAndRemoveAuthenticatedPeerManager(peerId, existingManager);
+    }
     if (!startPeerAttemptTimeout(peerId, attemptTimeoutMs, 'outbound')) {
+      if (existingManager?.isUnused()) {
+        closeAndRemoveAuthenticatedPeerManager(peerId, existingManager);
+      }
       addLog(`Peer ${peerId} connection attempt deferred: connection capacity is full`);
       settlePeerRecoveryAttempt(peerId, false);
       return;
     }
-    void manager.createOffer(peerId, socket).catch((error: unknown) => {
-      if (peerManagersRef.current[peerId] !== manager) return;
+    const admittedManager = ensurePeerManager(peerId);
+    if (!admittedManager) {
+      settlePeerRecoveryAttempt(peerId, false);
+      return;
+    }
+    void admittedManager.createOffer(peerId, socket).catch((error: unknown) => {
+      if (peerManagersRef.current[peerId] !== admittedManager) return;
       recordPeerAttemptFailure(peerId);
       settlePeerRecoveryAttempt(peerId, false);
       addLog(`Peer ${peerId} connection failed: ${error instanceof Error ? error.message : String(error)}`);
-      if (peerManagersRef.current[peerId] === manager && !manager.isDataChannelOpen()) {
-        closeAndRemoveAuthenticatedPeerManager(peerId, manager);
+      if (peerManagersRef.current[peerId] === admittedManager && !admittedManager.isDataChannelOpen()) {
+        closeAndRemoveAuthenticatedPeerManager(peerId, admittedManager);
       }
       peerRecoveryRef.current?.notifyConnectivityChanged();
     });
@@ -2848,13 +2910,13 @@ function App() {
         addLog(`${sourceLabel} dialing stopped: preferred connection target reached`);
         break;
       }
-      const manager = ensurePeerManager(peerId);
-      if (!socket || socket.readyState !== WebSocket.OPEN || !manager) {
-        addLog(`${sourceLabel} dial skipped for ${peerId}: signalling=${socket?.readyState === WebSocket.OPEN ? 'open' : 'closed'} manager=${manager ? 'ready' : 'missing'}`);
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        addLog(`${sourceLabel} dial skipped for ${peerId}: signalling=closed`);
         continue;
       }
 
-      const channelState = manager.getDataChannelState();
+      const manager = peerManagersRef.current[peerId];
+      const channelState = manager?.getDataChannelState() ?? 'missing';
       if (channelState === 'open') {
         clearPeerWaitingInterval(peerId);
         clearPeerElectionFallback(peerId);
@@ -2866,8 +2928,8 @@ function App() {
         startPeerWaitingInterval(peerId);
         startPeerElectionFallback(peerId);
       }
-      if (channelState === 'connecting' || manager.isNegotiating()) {
-        addLog(`${sourceLabel} dial deferred for ${peerId}: channel=${channelState} negotiating=${manager.isNegotiating()}`);
+      if (channelState === 'connecting' || manager?.isNegotiating()) {
+        addLog(`${sourceLabel} dial deferred for ${peerId}: channel=${channelState} negotiating=${manager?.isNegotiating() ?? false}`);
         continue;
       }
       if (activePeerAttemptsRef.current.size >= 2 || initiatedAttempts >= 2) {
@@ -3004,10 +3066,9 @@ function App() {
         if (!socket || socket.readyState !== WebSocket.OPEN || blockedPeersRef.current.has(peerId)) {
           return Promise.resolve(false);
         }
-        const manager = ensurePeerManager(peerId);
-        if (!manager) return Promise.resolve(false);
-        if (manager.isDataChannelOpen()) return Promise.resolve(true);
-        if (manager.isNegotiating() || activePeerAttemptsRef.current.has(peerId)) {
+        const manager = peerManagersRef.current[peerId];
+        if (manager?.isDataChannelOpen()) return Promise.resolve(true);
+        if (manager?.isNegotiating() || activePeerAttemptsRef.current.has(peerId)) {
           return Promise.resolve(false);
         }
 
@@ -3286,6 +3347,7 @@ function App() {
       (status) => {
         setSignallingStatus(status);
         addLog(`Signalling server status: ${status}`);
+        if (status === 'closed') cancelPendingPeerNegotiations();
         if (status === 'connected' && reconnectTimerRef.current !== null) {
           window.clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
@@ -3324,12 +3386,15 @@ function App() {
         if (!contact.fingerprint || contact.fingerprint === identity.id) return;
         if (!contact.online) return;
         if (activePeerAttemptsRef.current.has(contact.fingerprint) || initiatedAttempts >= 2) return;
-        const manager = ensurePeerManager(contact.fingerprint);
-        if (!manager) return;
+        const manager = peerManagersRef.current[contact.fingerprint];
+        const shouldReconnect = !manager
+          || manager.needsReplacement()
+          || !manager.isDataChannelOpen();
 
-        const shouldReconnect = manager.needsReplacement() || !manager.isDataChannelOpen();
-
-        if (shouldReconnect && !manager.isNegotiating() && contact.lastConnectionStatus !== 'signalling' && contact.lastConnectionStatus !== 'connecting') {
+        if (shouldReconnect
+          && !manager?.isNegotiating()
+          && contact.lastConnectionStatus !== 'signalling'
+          && contact.lastConnectionStatus !== 'connecting') {
           addLog(`Reconnect attempt to ${contact.fingerprint}`);
           requestPeerOffer(contact.fingerprint, manager, socket);
           initiatedAttempts += 1;
@@ -3496,9 +3561,9 @@ function App() {
     }
 
     const socket = signallingSocketRef.current;
-    const manager = ensurePeerManager(fingerprint);
-    if (socket && socket.readyState === WebSocket.OPEN && manager) {
-      if (manager.isDataChannelOpen()) {
+    const manager = peerManagersRef.current[fingerprint];
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      if (manager?.isDataChannelOpen()) {
         await sendPeerMetadata(manager, fingerprint, true);
       } else {
         requestPeerOffer(fingerprint, manager, socket);
@@ -3530,13 +3595,15 @@ function App() {
       return next;
     });
     const socket = signallingSocketRef.current;
-    const manager = peerManagersRef.current[fingerprint] ?? ensurePeerManager(fingerprint);
+    const manager = peerManagersRef.current[fingerprint];
     if (socket?.readyState === WebSocket.OPEN && manager) {
       if (manager.isDataChannelOpen()) {
         await sendPeerMetadata(manager, fingerprint, updated.followed);
       } else {
         requestPeerOffer(fingerprint, manager, socket);
       }
+    } else if (socket?.readyState === WebSocket.OPEN) {
+      requestPeerOffer(fingerprint, undefined, socket);
     }
     addLog(`${updated.followed ? 'Following' : 'Unfollowed'} ${updated.fingerprint || updated.publicKey}`);
   }
@@ -3833,6 +3900,7 @@ function App() {
       localFingerprint: identity.id,
       contacts: contactsRef.current,
       blockedPeers: blockedPeersRef.current,
+      invalidateWebPushCapability: invalidateWebPushCapabilityLocally,
       ...(verifiedReplyParent ? { replyParent: verifiedReplyParent } : {}),
       dispatch: dispatchWebPushObject
     });
@@ -3846,6 +3914,7 @@ function App() {
         localFingerprint: identity.id,
         contacts: contactsRef.current,
         blockedPeers: blockedPeersRef.current,
+        invalidateWebPushCapability: invalidateWebPushCapabilityLocally,
         dispatch: dispatchWebPushObject
       });
     }
@@ -4312,11 +4381,9 @@ function App() {
     }
 
     for (const contact of followedPeers) {
-      const manager = peerManagersRef.current[contact.fingerprint] ?? ensurePeerManager(contact.fingerprint);
-      if (!manager) continue;
-
-      if (!manager.isDataChannelOpen() && contact.online) {
-        const channelState = manager.getDataChannelState();
+      const manager = peerManagersRef.current[contact.fingerprint];
+      if ((!manager || !manager.isDataChannelOpen()) && contact.online) {
+        const channelState = manager?.getDataChannelState() ?? 'missing';
         if (channelState === 'closed' || channelState === 'missing') {
           requestPeerOffer(contact.fingerprint, manager, socket);
           addLog(`Reconnecting to ${contact.fingerprint} to fetch home updates`);
@@ -4458,10 +4525,11 @@ function App() {
   async function handleExportIdentity(passphrase: string) {
     if (!identity) return;
 
+    const backupPayload = await createIdentityBackupPayload(identity);
     let encryptedPayload: VaultBlob | undefined;
     if (passphrase.length > 0) {
       try {
-        encryptedPayload = await encryptJsonPayload(createIdentityBackupPayload(identity), passphrase);
+        encryptedPayload = await encryptJsonPayload(backupPayload, passphrase);
       } catch (error) {
         addLog(`Identity backup encryption failed: ${error instanceof Error ? error.message : String(error)}`);
         throw new Error('Could not encrypt the identity backup.');
@@ -4471,7 +4539,7 @@ function App() {
     const exportPayload = {
       ...(encryptedPayload
         ? { format: 'mycelium-encrypted-identity-backup', encryptedPayload }
-        : createIdentityBackupPayload(identity))
+        : backupPayload)
     };
 
     const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
@@ -4581,9 +4649,7 @@ function App() {
       connectPeer: async (peerId) => {
         const socket = signallingSocketRef.current;
         if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Signalling is not connected');
-        const manager = ensurePeerManager(peerId);
-        if (!manager) throw new Error(`Could not create peer manager for ${peerId}`);
-        requestPeerOffer(peerId, manager, socket, true);
+        requestPeerOffer(peerId, peerManagersRef.current[peerId], socket, true);
       },
       disconnectPeer: (peerId) => closeAndRemoveAuthenticatedPeerManager(peerId),
       sendAuthenticatedProfile: async (peerId) => {
@@ -4694,11 +4760,11 @@ function App() {
     };
   }, [identity?.id]);
 
-  function createIdentityBackupPayload(identityRecord: IdentityRecord) {
+  async function createIdentityBackupPayload(identityRecord: IdentityRecord) {
     return {
       version: 1,
       exportedAt: new Date().toISOString(),
-      identity: identityBackupFields(identityRecord),
+      identity: await loadCurrentIdentityBackupFields(identityRecord.publicKey, identityRecord.id),
       profile: {
         displayName: myProfile.displayName.trim() || fingerprintToHumanName(identityRecord.id),
         bio: myProfile.bio.trim(),
@@ -4743,6 +4809,12 @@ function App() {
       const importedIdentity = imported?.identity ?? imported;
 
       if (importedIdentity?.publicKey && importedIdentity?.privateKey && importedIdentity?.id) {
+        const importedMetadataSequence = parseIdentityMetadataSequence(importedIdentity.metadataSequence);
+        const previouslyStoredIdentity = await loadIdentity();
+        const hasMatchingSequenceState = previouslyStoredIdentity !== null
+          && previouslyStoredIdentity.publicKey === importedIdentity.publicKey
+          && Number.isSafeInteger(previouslyStoredIdentity.metadataSequence)
+          && (previouslyStoredIdentity.metadataSequence ?? -1) >= 0;
         await ensureTurnIceServers();
         const nextIdentity = await ensureIdentityEncryptionKeyPair({
             key: importedIdentity.key ?? 'local',
@@ -4750,7 +4822,10 @@ function App() {
             privateKey: importedIdentity.privateKey,
             id: importedIdentity.id,
             encryptionPublicKey: typeof importedIdentity.encryptionPublicKey === 'string' ? importedIdentity.encryptionPublicKey : undefined,
-            encryptionPrivateKey: typeof importedIdentity.encryptionPrivateKey === 'string' ? importedIdentity.encryptionPrivateKey : undefined
+            encryptionPrivateKey: typeof importedIdentity.encryptionPrivateKey === 'string' ? importedIdentity.encryptionPrivateKey : undefined,
+            ...(importedMetadataSequence === undefined
+              ? {}
+              : { metadataSequence: importedMetadataSequence })
           });
 
           await saveIdentity(nextIdentity);
@@ -4817,6 +4892,9 @@ function App() {
           setContacts(restoredContacts);
           await Promise.all(restoredContacts.map(async (contact) => saveContact(contact)));
 
+        if (importedMetadataSequence === undefined && !hasMatchingSequenceState) {
+          addLog('Imported a legacy identity backup without a metadata sequence; profile metadata sending is disabled until sequence state is restored.');
+        }
         addLog('Identity imported successfully');
       } else {
         throw new Error('Invalid identity backup file format.');
@@ -4858,6 +4936,7 @@ function App() {
       dmOutboxIntervalRef.current = null;
     }
     setContacts([]);
+    acceptedPeerMetadataSequencesRef.current.clear();
     setPostViews([]);
     setDiscoveryPosts([]);
     setPopularPeers([]);
@@ -4894,13 +4973,11 @@ function App() {
     const socket = signallingSocketRef.current;
     const normalizedRemoteId = remoteId.trim();
     if (!socket || !normalizedRemoteId) return;
-    const manager = ensurePeerManager(normalizedRemoteId);
-    if (!manager) return;
     setRemoteId(normalizedRemoteId);
     setSelectedContactId(normalizedRemoteId);
     setChatContactId(normalizedRemoteId);
     addLog(`Starting call to ${normalizedRemoteId}`);
-    requestPeerOffer(normalizedRemoteId, manager, socket);
+    requestPeerOffer(normalizedRemoteId, peerManagersRef.current[normalizedRemoteId], socket);
   }
 
   async function handleSelectContact(peerId: string) {
@@ -4923,10 +5000,9 @@ function App() {
     });
     addLog(`Selected contact ${chatId}`);
     const socket = signallingSocketRef.current;
-    const manager = ensurePeerManager(chatId);
     const targetContact = knownContact;
-    if (socket && socket.readyState === WebSocket.OPEN && manager && !targetContact?.connected) {
-      requestPeerOffer(chatId, manager, socket);
+    if (socket && socket.readyState === WebSocket.OPEN && !targetContact?.connected) {
+      requestPeerOffer(chatId, peerManagersRef.current[chatId], socket);
       addLog(`Opening encrypted conversation and connecting to ${chatId}`);
     }
   }
@@ -4988,7 +5064,7 @@ function App() {
     setProfileNotice(null);
 
     const socket = signallingSocketRef.current;
-    const manager = peerManagersRef.current[peerId] ?? ensurePeerManager(peerId);
+    const manager = peerManagersRef.current[peerId];
     const canRequestProfile = Boolean(
       socket &&
       socket.readyState === WebSocket.OPEN &&
@@ -4996,7 +5072,7 @@ function App() {
       (resolvedContact.online || resolvedContact.connected || manager.getDataChannelState() === 'connecting' || manager.getDataChannelState() === 'open')
     );
 
-    if (canRequestProfile) {
+    if (canRequestProfile && manager) {
       if (!resolvedContact.connected && !manager.isDataChannelOpen() && socket) {
         requestPeerOffer(peerId, manager, socket);
       }
@@ -5005,7 +5081,7 @@ function App() {
       return;
     }
 
-    if (socket && socket.readyState === WebSocket.OPEN && manager && !resolvedContact.connected) {
+    if (socket && socket.readyState === WebSocket.OPEN && !resolvedContact.connected) {
       requestPeerOffer(peerId, manager, socket);
       setProfileNotice(`Profile information for ${peerId.slice(0, 12)} is unavailable at the moment.`);
       return;

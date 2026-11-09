@@ -9,7 +9,11 @@ Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: tr
 
 const recipient = 'recipient';
 
-async function createSignedProfileUpdate(overrides: Partial<PeerMetadata> = {}, sender?: string) {
+async function createSignedProfileUpdate(
+  overrides: Partial<PeerMetadata> = {},
+  sender?: string,
+  packetType: 'PROFILE_UPDATE' | 'PROFILE_RESPONSE' = 'PROFILE_UPDATE'
+) {
   const keys = await generateIdentityKeyPair();
   const publicKey = await exportPublicKey(keys.publicKey);
   const privateKey = await exportPrivateKey(keys.privateKey);
@@ -20,12 +24,13 @@ async function createSignedProfileUpdate(overrides: Partial<PeerMetadata> = {}, 
     displayName: 'Peer',
     following: false,
     timestamp: new Date(0).toISOString(),
+    sequence: 1,
     ...overrides
   };
   const packet = await buildPacket(
     sender ?? peerId,
     recipient,
-    'PROFILE_UPDATE',
+    packetType,
     { profile: metadata },
     (unsigned) => signString(privateKey, canonicalize(unsigned))
   );
@@ -37,6 +42,35 @@ describe('profile metadata authentication', () => {
     const { metadata, packet, peerId } = await createSignedProfileUpdate();
 
     await expect(authenticateProfileMetadata(peerId, packet)).resolves.toEqual(metadata);
+  });
+
+  it('accepts a valid positive sequence for profile responses', async () => {
+    const { packet, peerId, metadata } = await createSignedProfileUpdate({}, undefined, 'PROFILE_RESPONSE');
+
+    await expect(authenticateProfileMetadata(peerId, packet)).resolves.toEqual(metadata);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['non-finite', Number.POSITIVE_INFINITY],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1]
+  ])('rejects a %s sequence value', async (_label, sequence) => {
+    const { packet, peerId } = await createSignedProfileUpdate({ sequence });
+
+    await expect(authenticateProfileMetadata(peerId, packet)).resolves.toBeNull();
+  });
+
+  it('rejects a packet whose signed sequence is changed after signing', async () => {
+    const { packet, peerId, metadata } = await createSignedProfileUpdate();
+    const tampered = {
+      ...packet,
+      payload: { profile: { ...metadata, sequence: metadata.sequence + 1 } }
+    };
+
+    await expect(authenticateProfileMetadata(peerId, tampered)).resolves.toBeNull();
   });
 
   it('rejects a profile update with an invalid packet signature', async () => {
@@ -69,6 +103,20 @@ describe('profile metadata authentication', () => {
     )).resolves.toBe(false);
 
     expect(updatePeerProfile).not.toHaveBeenCalled();
+  });
+
+  it('does not pass legacy unsequenced metadata to profile updates', async () => {
+    const { packet, peerId, metadata } = await createSignedProfileUpdate({ sequence: undefined });
+    const updatePeerProfile = vi.fn();
+
+    await expect(authenticateProfileMetadata(peerId, packet)).resolves.toBeNull();
+    await expect(dispatchAuthenticatedProfileMetadata(
+      peerId,
+      packet,
+      updatePeerProfile
+    )).resolves.toBe(false);
+    expect(updatePeerProfile).not.toHaveBeenCalled();
+    expect(metadata.sequence).toBeUndefined();
   });
 
   it('accepts a well-formed Web Push capability in an authenticated profile update', async () => {

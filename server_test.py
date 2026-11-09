@@ -153,6 +153,20 @@ class FakeWebSocket:
     async def send(self, message):
         self.messages.append(json.loads(message))
 
+
+class IncomingSignalWebSocket(FakeWebSocket):
+    def __init__(self, messages):
+        super().__init__()
+        self.incoming_messages = messages
+
+    def __aiter__(self):
+        async def receive_messages():
+            for message in self.incoming_messages:
+                yield json.dumps(message)
+
+        return receive_messages()
+
+
 class ModernFakeWebSocket:
     def __init__(self, state_name):
         self.state = type('State', (), {'name': state_name})()
@@ -786,6 +800,53 @@ class DiscoveryObjectServerTests(unittest.TestCase):
             'requester'
         ))
         self.assertEqual(websocket.messages, [])
+
+    def test_registration_rejects_non_fingerprint_peer_ids(self):
+        original_clients = self.server.clients.copy()
+        websocket = IncomingSignalWebSocket([{'type': 'register', 'id': 'browser'}])
+        try:
+            self.server.clients.clear()
+            asyncio.run(self.server.handle_client(websocket))
+            self.assertEqual(self.server.clients, {})
+        finally:
+            self.server.clients.clear()
+            self.server.clients.update(original_clients)
+
+    def test_signalling_relay_validates_envelope_and_registered_sender(self):
+        original_clients = self.server.clients.copy()
+        recipient = FakeWebSocket()
+        valid_offer = {
+            'type': 'offer',
+            'from': '00:00:00:00:00:00:00:01',
+            'to': 'ff:ff:ff:ff:ff:ff:ff:fe',
+            'payload': {
+                'type': 'offer',
+                'sdp': 'v=0\r\n',
+                'negotiationId': 'negotiation-1'
+            }
+        }
+        malformed_offer = {
+            **valid_offer,
+            'payload': {'type': 'offer', 'sdp': 'v=0\r\n'}
+        }
+        spoofed_offer = {**valid_offer, 'from': 'ff:ff:ff:ff:ff:ff:ff:fd'}
+        browser = IncomingSignalWebSocket([
+            {'type': 'register', 'id': 'not-a-fingerprint'},
+            {'type': 'register', 'id': '00:00:00:00:00:00:00:01'},
+            valid_offer,
+            malformed_offer,
+            spoofed_offer
+        ])
+        try:
+            self.server.clients.clear()
+            self.server.clients['ff:ff:ff:ff:ff:ff:ff:fe'] = recipient
+            asyncio.run(self.server.handle_client(browser))
+        finally:
+            self.server.clients.clear()
+            self.server.clients.update(original_clients)
+
+        offers = [message for message in recipient.messages if message.get('type') == 'offer']
+        self.assertEqual(offers, [valid_offer])
 
     def test_popular_peer_request_returns_correlated_protocol_response(self):
         self.store_object('popular-reply', 'mycelium.post', 'author', {'reply_to_author': 'popular-peer'})

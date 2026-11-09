@@ -21,6 +21,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 import websockets
 from websockets.server import WebSocketServerProtocol
 
+from bot.protocol import PEER_ID_PATTERN, validate_signal_message
+
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
 def normalize_client_id(value: Optional[str]) -> Optional[str]:
@@ -867,10 +869,11 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
             msg_type = message.get('type')
 
             if msg_type == 'register':
-                client_id = normalize_client_id(message.get('id'))
-                if not client_id:
+                registered_id = normalize_client_id(message.get('id'))
+                if not registered_id or not PEER_ID_PATTERN.fullmatch(registered_id):
                     logging.warning('Invalid register payload')
                     continue
+                client_id = registered_id
                 if client_id in clients and clients[client_id] is not websocket:
                     logging.info('Overwriting existing registration for %s', client_id)
                 clients[client_id] = websocket
@@ -884,10 +887,13 @@ async def handle_client(websocket: WebSocketServerProtocol) -> None:
                 continue
 
             if msg_type in {'offer', 'answer', 'ice-candidate'}:
+                if not validate_signal_message(message):
+                    logging.warning('Rejected malformed %s signalling message', msg_type)
+                    continue
                 target = normalize_client_id(message.get('to'))
                 sender = normalize_client_id(message.get('from'))
-                if not target:
-                    logging.warning('Signal missing target')
+                if not client_id or sender != client_id:
+                    logging.warning('Rejected %s signalling message with unregistered sender', msg_type)
                     continue
                 recipient = clients.get(target)
                 if recipient and websocket_is_open(recipient):

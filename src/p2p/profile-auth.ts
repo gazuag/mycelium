@@ -19,6 +19,7 @@ export async function authenticateProfileMetadata(
   const publicKey = (metadata as Partial<PeerMetadata>).publicKey;
   if (typeof publicKey !== 'string' || !publicKey.trim()) return null;
   const candidate = metadata as Partial<PeerMetadata>;
+  if (!Number.isSafeInteger(candidate.sequence) || (candidate.sequence ?? 0) < 1) return null;
   if (candidate.webPush !== undefined
     && (packet.type !== 'PROFILE_UPDATE' || !isWebPushCapability(candidate.webPush))) return null;
 

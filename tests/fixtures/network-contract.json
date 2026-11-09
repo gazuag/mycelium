@@ -1,0 +1,194 @@
+{
+  "identity": {
+    "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJbTHH9ia4mvJfV9JPoq9gLazHXQAGfBq1xJCO9ud/2pI5l2qYgwI86d3z1ze8uc1ZtrajPIsCUHdvhm+ubJvGA==",
+    "fingerprint": "75:87:7d:f5:ca:53:ff:49"
+  },
+  "peerIds": [
+    { "value": "00:00:00:00:00:00:00:01", "valid": true },
+    { "value": "FF:FF:FF:FF:FF:FF:FF:FE", "valid": true },
+    { "value": "00:00:00:00:00:00:01", "valid": false },
+    { "value": "not-a-fingerprint", "valid": false }
+  ],
+  "negotiationIds": [
+    { "value": "negotiation-01", "valid": true },
+    { "value": "", "valid": false }
+  ],
+  "signals": [
+    {
+      "valid": true,
+      "message": {
+        "type": "offer",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "type": "offer",
+          "sdp": "v=0\r\n",
+          "negotiationId": "offer-lower"
+        }
+      }
+    },
+    {
+      "valid": true,
+      "message": {
+        "type": "answer",
+        "from": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "to": "00:00:00:00:00:00:00:01",
+        "payload": {
+          "type": "answer",
+          "sdp": "v=0\r\n",
+          "negotiationId": "offer-lower"
+        }
+      }
+    },
+    {
+      "valid": true,
+      "message": {
+        "type": "ice-candidate",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "negotiationId": "offer-lower",
+          "candidate": {
+            "candidate": "candidate:1 1 udp 1 192.0.2.1 5000 typ host",
+            "sdpMid": "0",
+            "sdpMLineIndex": 0,
+            "usernameFragment": "abc"
+          }
+        }
+      }
+    },
+    {
+      "valid": true,
+      "message": {
+        "type": "ice-candidate",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "negotiationId": "offer-lower",
+          "candidate": null
+        }
+      }
+    },
+    {
+      "valid": false,
+      "message": {
+        "type": "offer",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": { "type": "offer", "sdp": "v=0\r\n" }
+      }
+    },
+    {
+      "valid": false,
+      "message": {
+        "type": "answer",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "type": "offer",
+          "sdp": "v=0\r\n",
+          "negotiationId": "offer-lower"
+        }
+      }
+    },
+    {
+      "valid": false,
+      "message": {
+        "type": "ice-candidate",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "negotiationId": "offer-lower",
+          "candidate": {
+            "candidate": "candidate:1 1 udp 1 192.0.2.1 5000 typ host",
+            "sdpMLineIndex": true
+          }
+        }
+      }
+    },
+    {
+      "valid": false,
+      "message": {
+        "type": "offer",
+        "from": "not-a-fingerprint",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "type": "offer",
+          "sdp": "v=0\r\n",
+          "negotiationId": "offer-lower"
+        }
+      }
+    },
+    {
+      "valid": false,
+      "message": {
+        "type": "ice-candidate",
+        "from": "00:00:00:00:00:00:00:01",
+        "to": "FF:FF:FF:FF:FF:FF:FF:FE",
+        "payload": {
+          "negotiationId": "offer-lower",
+          "candidate": {
+            "candidate": "candidate:1 1 udp 1 192.0.2.1 5000 typ host",
+            "sdpMLineIndex": 9007199254740992
+          }
+        }
+      }
+    }
+  ],
+  "packets": [
+    {
+      "valid": true,
+      "packet": {
+        "protocol": "mycelium",
+        "version": 1,
+        "id": "packet-01",
+        "type": "HELLO",
+        "timestamp": "2026-11-09T00:00:00.000Z",
+        "sender": "00:00:00:00:00:00:00:01",
+        "recipient": null,
+        "payload": { "protocolVersion": 1, "capabilities": ["profiles"] },
+        "signature": "unsigned-v1"
+      }
+    },
+    {
+      "valid": false,
+      "packet": {
+        "protocol": "mycelium",
+        "version": true,
+        "id": "packet-bad-version",
+        "type": "HELLO",
+        "timestamp": "2026-11-09T00:00:00.000Z",
+        "sender": "00:00:00:00:00:00:00:01",
+        "recipient": null,
+        "payload": {},
+        "signature": "unsigned-v1"
+      }
+    },
+    {
+      "valid": false,
+      "packet": {
+        "protocol": "mycelium",
+        "version": 1,
+        "id": "packet-bad-payload",
+        "type": "HELLO",
+        "timestamp": "2026-11-09T00:00:00.000Z",
+        "sender": "00:00:00:00:00:00:00:01",
+        "recipient": null,
+        "payload": [],
+        "signature": "unsigned-v1"
+      }
+    }
+  ],
+  "canonicalization": {
+    "value": { "b": 2, "a": "x", "nested": { "z": true, "a": null } },
+    "v1": "{\"a\":\"x\",\"b\":2,\"nested\":{\"a\":null,\"z\":true}}",
+    "v3": "{\"a\":\"x\",\"b\":2,\"nested\":{\"a\":null,\"z\":true}}"
+  },
+  "simultaneousOffers": {
+    "lowerPeerId": "00:00:00:00:00:00:00:01",
+    "higherPeerId": "FF:FF:FF:FF:FF:FF:FF:FE",
+    "lowerNegotiationId": "offer-lower",
+    "higherNegotiationId": "offer-higher",
+    "winningNegotiationId": "offer-lower"
+  }
+}

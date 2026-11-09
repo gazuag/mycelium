@@ -37,6 +37,7 @@ export interface PeerMetadata {
   displayName: string;
   following: boolean;
   timestamp: string;
+  sequence: number;
   bio?: string;
   tags?: string[];
   encryptionKeyBinding?: EncryptionKeyBinding;

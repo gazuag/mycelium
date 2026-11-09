@@ -3,6 +3,10 @@ import { isObjectExpired, validateDistributedObject } from '../object-layer/enve
 import type { DistributedObject } from '../object-layer/types';
 import type { Contact, WebPushCapability } from '../types';
 import { isWebPushCapability } from './web-push';
+import {
+  invalidateWebPushCapabilityAfterDispatch,
+  type InvalidateWebPushCapability
+} from './web-push-capability-invalidation';
 import type { WebPushDispatchResult } from './web-push-dispatch';
 
 export interface LocalReplyPushOptions {
@@ -13,6 +17,7 @@ export interface LocalReplyPushOptions {
   readonly localFingerprint: string;
   readonly contacts: readonly Contact[];
   readonly blockedPeers: ReadonlySet<string>;
+  readonly invalidateWebPushCapability?: InvalidateWebPushCapability;
   readonly dispatch: (
     object: DistributedObject,
     capability: WebPushCapability
@@ -27,6 +32,7 @@ export async function dispatchLocalReplyToParent({
   localFingerprint,
   contacts,
   blockedPeers,
+  invalidateWebPushCapability,
   dispatch
 }: LocalReplyPushOptions): Promise<void> {
   if (!storedLocally) return;
@@ -59,7 +65,15 @@ export async function dispatchLocalReplyToParent({
     );
     if (!recipient || !isWebPushCapability(recipient.webPush)) return;
 
-    await dispatch(reply, recipient.webPush);
+    const capability = recipient.webPush;
+    const result = await dispatch(reply, capability);
+    await invalidateWebPushCapabilityAfterDispatch(
+      result,
+      recipient.publicKey,
+      recipientFingerprint,
+      capability,
+      invalidateWebPushCapability
+    );
   } catch {
     console.warn('Web Push reply recipient validation or dispatch failed unexpectedly');
   }

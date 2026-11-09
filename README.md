@@ -205,6 +205,10 @@ An incoming valid push also asks any open app client to attempt the existing bou
 
 ## What travels through the signalling server
 
+The current cross-implementation networking contract, including signalling,
+negotiation election, MYP packet envelopes, and compatibility requirements,
+is documented in [`docs/network-protocol.md`](docs/network-protocol.md).
+
 - `register` messages announce your peer ID.
 - `offer` / `answer` SDP messages used for WebRTC setup.
 - `ice-candidate` messages used to establish the peer route.

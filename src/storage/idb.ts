@@ -1,13 +1,14 @@
-import { Contact, SignedProfile } from '../types';
+import type { Contact, SignedProfile, WebPushCapability } from '../types';
 import { exportEncryptionPrivateKey, exportEncryptionPublicKey, generateEncryptionKeyPair } from '../crypto/dm-crypto';
 import { compareFeedKey } from '../object-layer/feed-page';
 import type { InboxBackfillState } from '../object-layer/inbox-sync';
 import type { FeedCursor } from '../object-layer/types';
 
 const DB_NAME = 'mycelium_p2p';
-const DB_VERSION = 10;
+const DB_VERSION = 11;
 const IDENTITY_STORE = 'identity';
 const CONTACT_STORE = 'contacts';
+export const PEER_METADATA_STATE_STORE = 'peer_metadata_state';
 const PROFILE_STORE = 'profiles';
 const DISCOVERY_STORE = 'discovery_interactions';
 const INBOX_CURSOR_STORE = 'inbox_cursors';
@@ -38,12 +39,33 @@ export interface LocalIdentityRecord {
   id?: string;
   encryptionPublicKey?: string;
   encryptionPrivateKey?: string;
+  metadataSequence?: number;
 }
 
 export interface CompleteLocalIdentityRecord extends LocalIdentityRecord {
   encryptionPublicKey: string;
   encryptionPrivateKey: string;
 }
+
+export interface PeerMetadataStateRecord {
+  publicKey: string;
+  fingerprint: string;
+  highestSequence: number;
+}
+
+export interface PeerMetadataContactUpdate {
+  authenticatedDisplayName: string;
+  follower: boolean;
+  webPush: WebPushCapability | undefined;
+  verifiedEncryptionPublicKey?: string;
+}
+
+export type AcceptPeerMetadataResult =
+  | { status: 'accepted'; contact: Contact; highestSequence: number; encryptionKeyChanged: boolean }
+  | { status: 'stale'; highestSequence: number }
+  | { status: 'identity-mismatch' }
+  | { status: 'invalid-input' }
+  | { status: 'storage-failure' };
 
 export async function ensureIdentityEncryptionKeyPair(identity: LocalIdentityRecord): Promise<CompleteLocalIdentityRecord> {
   if (identity.encryptionPublicKey && identity.encryptionPrivateKey) {
@@ -58,21 +80,41 @@ export async function ensureIdentityEncryptionKeyPair(identity: LocalIdentityRec
 }
 
 export function identityBackupFields(identity: CompleteLocalIdentityRecord) {
+  if (identity.metadataSequence !== undefined && !isValidMetadataSequence(identity.metadataSequence)) {
+    throw new Error('Identity metadata sequence is invalid.');
+  }
   return {
     key: identity.key,
     publicKey: identity.publicKey,
     privateKey: identity.privateKey,
     id: identity.id,
     encryptionPublicKey: identity.encryptionPublicKey,
-    encryptionPrivateKey: identity.encryptionPrivateKey
+    encryptionPrivateKey: identity.encryptionPrivateKey,
+    ...(identity.metadataSequence === undefined
+      ? {}
+      : { metadataSequence: identity.metadataSequence })
   };
+}
+
+export async function loadCurrentIdentityBackupFields(
+  publicKey: string,
+  fallbackId: string
+): Promise<ReturnType<typeof identityBackupFields>> {
+  const identity = await loadIdentity();
+  if (!identity || identity.publicKey !== publicKey) {
+    throw new Error('The active identity could not be verified in local storage.');
+  }
+  return identityBackupFields({
+    ...identity,
+    id: identity.id ?? fallbackId
+  });
 }
 
 export async function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (db.objectStoreNames.contains('message_queue')) db.deleteObjectStore('message_queue');
       if (db.objectStoreNames.contains('direct_chat_messages')) db.deleteObjectStore('direct_chat_messages');
@@ -81,6 +123,9 @@ export async function openDatabase() {
       }
       if (!db.objectStoreNames.contains(CONTACT_STORE)) {
         db.createObjectStore(CONTACT_STORE, { keyPath: 'publicKey' });
+      }
+      if (!db.objectStoreNames.contains(PEER_METADATA_STATE_STORE)) {
+        db.createObjectStore(PEER_METADATA_STATE_STORE, { keyPath: 'publicKey' });
       }
       if (!db.objectStoreNames.contains(PROFILE_STORE)) {
         db.createObjectStore(PROFILE_STORE, { keyPath: 'author' });
@@ -109,6 +154,19 @@ export async function openDatabase() {
         const store = db.createObjectStore(PEER_CANDIDATE_STORE, { keyPath: 'peerId' });
         store.createIndex('lastSeenAt', 'lastSeenAt');
       }
+      if (event.oldVersion < 11) {
+        const identityStore = request.transaction!.objectStore(IDENTITY_STORE);
+        const cursorRequest = identityStore.openCursor();
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return;
+          const identity = cursor.value as LocalIdentityRecord;
+          if (identity.key === 'local' && identity.metadataSequence === undefined) {
+            cursor.update({ ...identity, metadataSequence: 0 });
+          }
+          cursor.continue();
+        };
+      }
     };
 
     request.onblocked = () => {
@@ -130,9 +188,75 @@ export async function saveIdentity(payload: LocalIdentityRecord) {
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(IDENTITY_STORE, 'readwrite');
     const store = tx.objectStore(IDENTITY_STORE);
-    store.put(payload);
+    const request = store.get(payload.key);
+    request.onsuccess = () => {
+      const current = request.result as LocalIdentityRecord | undefined;
+      let next = payload;
+      const currentSequence = current?.metadataSequence;
+      const payloadSequence = payload.metadataSequence;
+      if (current?.publicKey === payload.publicKey
+        && currentSequence !== undefined
+        && (isValidMetadataSequence(currentSequence)
+          ? (!isValidMetadataSequence(payloadSequence) || payloadSequence < currentSequence)
+          : !isValidMetadataSequence(payloadSequence))) {
+        next = { ...payload, metadataSequence: currentSequence };
+      }
+      store.put(next);
+    };
+    request.onerror = () => reject(request.error);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+export function parseIdentityMetadataSequence(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isValidMetadataSequence(value)) {
+    throw new Error('Identity backup metadata sequence is invalid.');
+  }
+  return value;
+}
+
+/**
+ * Sequence allocation assumes one active metadata publisher per identity.
+ * Separate devices importing the same identity are not coordinated.
+ */
+export async function nextLocalMetadataSequence(): Promise<number> {
+  const db = await openDatabase();
+  return new Promise<number>((resolve, reject) => {
+    const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+    const store = tx.objectStore(IDENTITY_STORE);
+    let sequence: number | null = null;
+    let failureMessage = 'Local metadata sequence allocation failed.';
+    const request = store.get('local');
+    request.onsuccess = () => {
+      const identity = request.result as LocalIdentityRecord | undefined;
+      if (!identity) {
+        failureMessage = 'Local identity is unavailable for metadata sequence allocation.';
+        tx.abort();
+        return;
+      }
+      const current = identity.metadataSequence;
+      if (!isValidMetadataSequence(current)) {
+        failureMessage = 'Local metadata sequence counter is missing or invalid.';
+        tx.abort();
+        return;
+      }
+      if (current === Number.MAX_SAFE_INTEGER) {
+        failureMessage = 'Local metadata sequence counter is exhausted.';
+        tx.abort();
+        return;
+      }
+      sequence = current + 1;
+      store.put({ ...identity, metadataSequence: sequence });
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => {
+      if (sequence === null) reject(new Error('Local metadata sequence allocation completed without a sequence.'));
+      else resolve(sequence);
+    };
+    tx.onerror = () => reject(tx.error ?? new Error('Local metadata sequence allocation failed.'));
+    tx.onabort = () => reject(new Error(failureMessage));
   });
 }
 
@@ -408,6 +532,224 @@ export async function saveContact(contact: Contact) {
   });
 }
 
+export async function acceptPeerMetadata(
+  publicKey: string,
+  fingerprint: string,
+  sequence: number,
+  fields: PeerMetadataContactUpdate
+): Promise<AcceptPeerMetadataResult> {
+  if (typeof publicKey !== 'string'
+    || !publicKey.trim()
+    || typeof fingerprint !== 'string'
+    || !fingerprint.trim()
+    || !Number.isSafeInteger(sequence)
+    || sequence < 1
+    || !fields
+    || typeof fields !== 'object'
+    || typeof fields.authenticatedDisplayName !== 'string'
+    || typeof fields.follower !== 'boolean'
+    || (fields.webPush !== undefined
+      && (!fields.webPush
+        || typeof fields.webPush !== 'object'
+        || typeof fields.webPush.endpoint !== 'string'
+        || typeof fields.webPush.p256dh !== 'string'
+        || typeof fields.webPush.auth !== 'string'))
+    || (fields.verifiedEncryptionPublicKey !== undefined
+      && (typeof fields.verifiedEncryptionPublicKey !== 'string'
+        || fields.verifiedEncryptionPublicKey.length === 0))) {
+    return { status: 'invalid-input' };
+  }
+
+  let db: IDBDatabase;
+  try {
+    db = await openDatabase();
+  } catch {
+    return { status: 'storage-failure' };
+  }
+
+  return new Promise<AcceptPeerMetadataResult>((resolve) => {
+    let outcome: AcceptPeerMetadataResult = { status: 'storage-failure' };
+    let settled = false;
+    const settle = (result: AcceptPeerMetadataResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction([CONTACT_STORE, PEER_METADATA_STATE_STORE], 'readwrite');
+    } catch {
+      settle({ status: 'storage-failure' });
+      return;
+    }
+
+    const contacts = tx.objectStore(CONTACT_STORE);
+    const states = tx.objectStore(PEER_METADATA_STATE_STORE);
+    let state: PeerMetadataStateRecord | undefined;
+    let currentContact: Contact | undefined;
+    let readsRemaining = 2;
+    const processReads = () => {
+      readsRemaining -= 1;
+      if (readsRemaining !== 0) return;
+
+      if ((state && state.fingerprint !== fingerprint)
+        || (currentContact && (
+          currentContact.publicKey !== publicKey
+          || currentContact.fingerprint !== fingerprint
+        ))) {
+        outcome = { status: 'identity-mismatch' };
+        return;
+      }
+      if (state && (!Number.isSafeInteger(state.highestSequence) || state.highestSequence < 1)) {
+        outcome = { status: 'storage-failure' };
+        return;
+      }
+      if (state && sequence <= state.highestSequence) {
+        outcome = { status: 'stale', highestSequence: state.highestSequence };
+        return;
+      }
+
+      const { contact: nextContact, encryptionKeyChanged } = buildUpdatedMetadataContact(
+        currentContact,
+        publicKey,
+        fingerprint,
+        fields
+      );
+      const nextState: PeerMetadataStateRecord = {
+        publicKey,
+        fingerprint,
+        highestSequence: sequence
+      };
+      outcome = {
+        status: 'accepted',
+        contact: nextContact,
+        highestSequence: sequence,
+        encryptionKeyChanged
+      };
+      contacts.put(nextContact);
+      states.put(nextState);
+    };
+    const stateRequest = states.get(publicKey);
+    stateRequest.onsuccess = () => {
+      state = stateRequest.result as PeerMetadataStateRecord | undefined;
+      processReads();
+    };
+    stateRequest.onerror = () => {
+      try {
+        tx.abort();
+      } catch {
+        settle({ status: 'storage-failure' });
+      }
+    };
+    const contactRequest = contacts.get(publicKey);
+    contactRequest.onsuccess = () => {
+      currentContact = contactRequest.result as Contact | undefined;
+      processReads();
+    };
+    contactRequest.onerror = () => {
+      try {
+        tx.abort();
+      } catch {
+        settle({ status: 'storage-failure' });
+      }
+    };
+    tx.oncomplete = () => settle(outcome);
+    tx.onerror = () => settle({ status: 'storage-failure' });
+    tx.onabort = () => settle({ status: 'storage-failure' });
+  });
+}
+
+function buildUpdatedMetadataContact(
+  current: Contact | undefined,
+  publicKey: string,
+  fingerprint: string,
+  fields: PeerMetadataContactUpdate
+): { contact: Contact; encryptionKeyChanged: boolean } {
+  let encryptionFields: Pick<Contact, 'encryptionPublicKey' | 'encryptionKeyChanged'> = {};
+  let encryptionKeyChanged = false;
+  if (fields.verifiedEncryptionPublicKey) {
+    if (current?.encryptionPublicKey
+      && current.encryptionPublicKey !== fields.verifiedEncryptionPublicKey) {
+      encryptionFields = {
+        encryptionPublicKey: current.encryptionPublicKey,
+        encryptionKeyChanged: true
+      };
+      encryptionKeyChanged = true;
+    } else if (current?.encryptionPublicKey === fields.verifiedEncryptionPublicKey) {
+      encryptionFields = {
+        encryptionPublicKey: current.encryptionPublicKey,
+        ...(current.encryptionKeyChanged === undefined
+          ? {}
+          : { encryptionKeyChanged: current.encryptionKeyChanged })
+      };
+    } else {
+      encryptionFields = {
+        encryptionPublicKey: fields.verifiedEncryptionPublicKey,
+        ...(current?.encryptionKeyChanged === undefined
+          ? {}
+          : { encryptionKeyChanged: current.encryptionKeyChanged })
+      };
+    }
+  } else if (current) {
+    encryptionFields = {
+      ...(current.encryptionPublicKey === undefined
+        ? {}
+        : { encryptionPublicKey: current.encryptionPublicKey }),
+      ...(current.encryptionKeyChanged === undefined
+        ? {}
+        : { encryptionKeyChanged: current.encryptionKeyChanged })
+    };
+  }
+
+  return {
+    contact: {
+      ...(current ?? {
+        publicKey,
+        fingerprint,
+        addedAt: new Date().toISOString(),
+        followed: false
+      }),
+      publicKey,
+      fingerprint,
+      authenticatedDisplayName: fields.authenticatedDisplayName,
+      follower: fields.follower,
+      webPush: fields.webPush,
+      online: true,
+      connected: true,
+      ...encryptionFields
+    },
+    encryptionKeyChanged
+  };
+}
+
+export async function clearContactWebPushCapabilityIfMatches(
+  publicKey: string,
+  fingerprint: string,
+  expectedCapability: WebPushCapability
+): Promise<Contact | null> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONTACT_STORE, 'readwrite');
+    const store = tx.objectStore(CONTACT_STORE);
+    const request = store.get(publicKey);
+    let updatedContact: Contact | null = null;
+
+    request.onsuccess = () => {
+      const current = request.result as Contact | undefined;
+      if (!current
+        || current.publicKey !== publicKey
+        || current.fingerprint !== fingerprint
+        || !sameWebPushCapability(current.webPush, expectedCapability)) return;
+      updatedContact = { ...current, webPush: undefined };
+      store.put(updatedContact);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve(updatedContact);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error('Contact update transaction aborted'));
+  });
+}
+
 export async function loadContacts(): Promise<Contact[]> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
@@ -417,6 +759,20 @@ export async function loadContacts(): Promise<Contact[]> {
     request.onsuccess = () => resolve(request.result as Contact[]);
     request.onerror = () => reject(request.error);
   });
+}
+
+function sameWebPushCapability(
+  current: WebPushCapability | undefined,
+  expected: WebPushCapability
+): boolean {
+  return current !== undefined
+    && current.endpoint === expected.endpoint
+    && current.p256dh === expected.p256dh
+    && current.auth === expected.auth;
+}
+
+function isValidMetadataSequence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 export async function deleteContact(publicKey: string) {
@@ -485,6 +841,7 @@ export async function clearAllLocalData() {
         DISCOVERY_STORE,
         INBOX_CURSOR_STORE,
         FEED_CURSOR_STORE,
+        PEER_METADATA_STATE_STORE,
         PEER_CONNECTION_OBSERVATION_STORE,
         FIND_FORWARDING_OBSERVATION_STORE,
         OBJECT_SUPPLY_OBSERVATION_STORE,
@@ -500,6 +857,7 @@ export async function clearAllLocalData() {
       tx.objectStore(DISCOVERY_STORE),
       tx.objectStore(INBOX_CURSOR_STORE),
       tx.objectStore(FEED_CURSOR_STORE),
+      tx.objectStore(PEER_METADATA_STATE_STORE),
       tx.objectStore(PEER_CONNECTION_OBSERVATION_STORE),
       tx.objectStore(FIND_FORWARDING_OBSERVATION_STORE),
       tx.objectStore(OBJECT_SUPPLY_OBSERVATION_STORE),

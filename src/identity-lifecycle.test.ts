@@ -29,12 +29,14 @@ describe('local identity initialization', () => {
 
     expect(result.created).toBe(true);
     expect(result.identity.id).toBe(await deriveFingerprint(result.identity.publicKey));
+    expect(result.identity.metadataSequence).toBe(0);
     expect(fingerprintToHumanName(result.identity.id)).not.toBe('Peer');
     await expect(loadIdentity()).resolves.toMatchObject({
       publicKey: result.identity.publicKey,
       privateKey: result.identity.privateKey,
       encryptionPublicKey: result.identity.encryptionPublicKey,
-      encryptionPrivateKey: result.identity.encryptionPrivateKey
+      encryptionPrivateKey: result.identity.encryptionPrivateKey,
+      metadataSequence: 0
     });
   });
 

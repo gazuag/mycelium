@@ -149,6 +149,11 @@ function makeHarness(options: {
     object: DistributedObject,
     capability: WebPushCapability
   ) => Promise<WebPushDispatchResult>;
+  invalidateWebPushCapability?: (
+    publicKey: string,
+    fingerprint: string,
+    capability: WebPushCapability
+  ) => Promise<void>;
   getContact?: (publicKey: string) => Contact | null;
 } = { identity: null }) {
   const records: DistributedObject[] = [];
@@ -201,6 +206,7 @@ function makeHarness(options: {
     connectedPeers: () => connectedPeers,
     getBlockedPeers: options.getBlockedPeers
       ?? (() => options.blockedPeers ?? new Set<string>()),
+    invalidateWebPushCapability: options.invalidateWebPushCapability,
     dispatchWebPush: options.dispatch
       ? async (object, capability) => {
           options.events?.push('dispatched');
@@ -247,6 +253,35 @@ describe('createDmService', () => {
     await harness.service.flushOutbox();
     await harness.service.flushOutbox();
     expect(dispatch).toHaveBeenCalledOnce();
+  });
+
+  it('conditionally invalidates the exact recipient capability after a permanent dispatch failure', async () => {
+    const sender = await makePushIdentity('sender');
+    const recipient = await makePushIdentity('recipient');
+    const contact = await makePushContact(recipient);
+    const dispatch = vi.fn(async () => ({ status: 'invalid-subscription' } as const));
+    const invalidateWebPushCapability = vi.fn(async () => {});
+    const harness = makeHarness({
+      identity: sender,
+      contact,
+      dispatch,
+      invalidateWebPushCapability,
+      peers: []
+    });
+
+    const result = await harness.service.sendMessage(contact.publicKey, 'private message');
+
+    expect(result.status).toBe('sent');
+    if (result.status !== 'sent') throw new Error('Expected a sent DM');
+    await vi.waitFor(() => expect(invalidateWebPushCapability).toHaveBeenCalledOnce());
+    expect(invalidateWebPushCapability).toHaveBeenCalledWith(
+      recipient.publicKey,
+      await deriveFingerprint(recipient.publicKey),
+      contact.webPush
+    );
+    await harness.service.flushOutbox();
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(invalidateWebPushCapability).toHaveBeenCalledOnce();
   });
 
   it('does not dispatch when recipient identity or capability is unavailable or inconsistent', async () => {

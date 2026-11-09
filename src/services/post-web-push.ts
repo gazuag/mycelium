@@ -3,6 +3,10 @@ import { validateDistributedObject } from '../object-layer/envelope';
 import type { DistributedObject } from '../object-layer/types';
 import type { Contact, WebPushCapability } from '../types';
 import { isWebPushCapability } from './web-push';
+import {
+  invalidateWebPushCapabilityAfterDispatch,
+  type InvalidateWebPushCapability
+} from './web-push-capability-invalidation';
 import type { WebPushDispatchResult } from './web-push-dispatch';
 
 export interface LocalPostFollowerPushOptions {
@@ -12,6 +16,7 @@ export interface LocalPostFollowerPushOptions {
   readonly localFingerprint: string;
   readonly contacts: readonly Contact[];
   readonly blockedPeers: ReadonlySet<string>;
+  readonly invalidateWebPushCapability?: InvalidateWebPushCapability;
   readonly replyParent?: DistributedObject;
   readonly dispatch: (
     object: DistributedObject,
@@ -37,6 +42,7 @@ export async function dispatchLocalPostToFollowers({
   contacts,
   blockedPeers,
   replyParent,
+  invalidateWebPushCapability,
   dispatch
 }: LocalPostFollowerPushOptions): Promise<void> {
   if (post.object_type !== 'mycelium.post'
@@ -77,8 +83,16 @@ export async function dispatchLocalPostToFollowers({
         || blockedPeers.has(fingerprint)
         || !isWebPushCapability(contact.webPush)) continue;
       dispatchedPublicKeys.add(contact.publicKey);
+      const capability = contact.webPush;
       try {
-        await dispatch(post, contact.webPush);
+        const result = await dispatch(post, capability);
+        await invalidateWebPushCapabilityAfterDispatch(
+          result,
+          contact.publicKey,
+          fingerprint,
+          capability,
+          invalidateWebPushCapability
+        );
       } catch {
         console.warn('Web Push followed-post dispatch failed unexpectedly');
       }

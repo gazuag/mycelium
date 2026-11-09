@@ -936,6 +936,71 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             await remote_node.close()
             remote_store.close()
 
+    @unittest.skipUnless(importlib.util.find_spec("aiortc"), "aiortc is not installed")
+    async def test_simultaneous_bot_offers_converge_on_lower_peer_and_open_one_link(self) -> None:
+        remote_identity = Identity.create()
+        remote_store = PeerStore(self.root / "simultaneous-remote.sqlite3")
+        remote_node = PeerNode(remote_identity, remote_store)
+        nodes = sorted((self.node, remote_node), key=lambda node: node.identity.node_id)
+        lower, higher = nodes
+        outgoing_links = {}
+        signals = {node.identity.node_id: [] for node in nodes}
+
+        async def capture(node_id, message):
+            signals[node_id].append(message)
+
+        try:
+            with patch("bot.peer._ice_configuration", return_value=[]):
+                for node in nodes:
+                    node._send_signal = lambda message, node_id=node.identity.node_id: capture(node_id, message)
+                    peer_id = next(other.identity.node_id for other in nodes if other is not node)
+                    await node._create_offer(peer_id)
+                    outgoing_links[node.identity.node_id] = node.links[peer_id]
+
+                offers = {node.identity.node_id: signals[node.identity.node_id][0] for node in nodes}
+                await lower.handle_signal(offers[higher.identity.node_id])
+                await higher.handle_signal(offers[lower.identity.node_id])
+
+                winning_id = offers[lower.identity.node_id]["payload"]["negotiationId"]
+                lower_link = lower.links[higher.identity.node_id]
+                higher_link = higher.links[lower.identity.node_id]
+                self.assertIs(lower_link, outgoing_links[lower.identity.node_id])
+                self.assertTrue(outgoing_links[higher.identity.node_id].closed)
+                self.assertTrue(higher_link.remote_offer_accepted)
+                self.assertEqual(lower_link.negotiation_id, winning_id)
+                self.assertEqual(higher_link.negotiation_id, winning_id)
+
+                answer = signals[higher.identity.node_id][-1]
+                self.assertEqual(answer["type"], "answer")
+                self.assertEqual(answer["payload"]["negotiationId"], winning_id)
+                await lower.handle_signal(answer)
+
+                deadline = asyncio.get_running_loop().time() + 10
+                while (not lower_link.is_open or not higher_link.is_open) and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.05)
+                self.assertTrue(lower_link.is_open)
+                self.assertTrue(higher_link.is_open)
+                self.assertEqual(len([link for link in lower.links.values() if not link.closed]), 1)
+                self.assertEqual(len([link for link in higher.links.values() if not link.closed]), 1)
+                abandoned_id = offers[higher.identity.node_id]["payload"]["negotiationId"]
+                await lower.handle_signal({
+                    "type": "answer",
+                    "from": higher.identity.node_id,
+                    "to": lower.identity.node_id,
+                    "payload": {"type": "answer", "sdp": "stale", "negotiationId": abandoned_id},
+                })
+                await lower.handle_signal({
+                    "type": "ice-candidate",
+                    "from": higher.identity.node_id,
+                    "to": lower.identity.node_id,
+                    "payload": {"candidate": None, "negotiationId": abandoned_id},
+                })
+                self.assertEqual(lower_link.negotiation_id, winning_id)
+                self.assertTrue(lower_link.is_open)
+        finally:
+            await remote_node.close()
+            remote_store.close()
+
     async def test_invalid_packet_signature_is_rejected(self) -> None:
         remote = Identity.create()
         packet = sign_packet(remote, new_packet(
@@ -1124,6 +1189,32 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
         self.node.attempts[remote_id] = (1, 0)
         await self.node.maintain_connections()
         self.assertEqual(attempts, [remote_id, remote_id])
+
+    async def test_signalling_disconnect_releases_pending_links_and_keeps_open_links(self) -> None:
+        peer_ids: set[str] = set()
+        while len(peer_ids) < 2:
+            peer_id = Identity.create().node_id
+            if peer_id != self.identity.node_id:
+                peer_ids.add(peer_id)
+        pending_peer, open_peer = peer_ids
+        self.node._send_signal = AsyncMock()
+        with patch("bot.peer._ice_configuration", return_value=[]):
+            await self.node._create_offer(pending_peer)
+        pending_link = self.node.links[pending_peer]
+        open_link = StubLink()
+        open_link.peer_id = open_peer
+        self.node.links[open_peer] = open_link
+        self.assertFalse(pending_link.is_open)
+        self.assertTrue(open_link.is_open)
+        self.node.attempts[pending_peer] = (1, time.monotonic() + 300)
+
+        await self.node._close_pending_links()
+
+        self.assertTrue(pending_link.closed)
+        self.assertNotIn(pending_peer, self.node.links)
+        self.assertNotIn(pending_peer, self.node.attempts)
+        self.assertFalse(open_link.closed)
+        self.assertIs(self.node.links[open_peer], open_link)
 
     async def test_peer_capacity_and_retry_selection_rotate_candidates(self) -> None:
         self.assertEqual(DEFAULT_MAX_PEERS, 16)

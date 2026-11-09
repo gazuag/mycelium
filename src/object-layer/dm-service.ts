@@ -1,5 +1,9 @@
 import { deriveFingerprint } from '../crypto/identity';
 import { isWebPushCapability } from '../services/web-push';
+import {
+  invalidateWebPushCapabilityAfterDispatch,
+  type InvalidateWebPushCapability
+} from '../services/web-push-capability-invalidation';
 import type { WebPushDispatchResult } from '../services/web-push-dispatch';
 import type { Contact, WebPushCapability } from '../types';
 import { sendDm, type SendDmResult } from './dm-send';
@@ -25,6 +29,7 @@ export interface DmServiceOptions {
   outbox: DmOutboxService;
   connectedPeers: () => string[];
   getBlockedPeers?: () => ReadonlySet<string>;
+  invalidateWebPushCapability?: InvalidateWebPushCapability;
   dispatchWebPush?: (
     object: DistributedObject,
     capability: WebPushCapability
@@ -41,6 +46,7 @@ export function createDmService({
   outbox,
   connectedPeers,
   getBlockedPeers,
+  invalidateWebPushCapability,
   dispatchWebPush,
   now
 }: DmServiceOptions): {
@@ -75,6 +81,7 @@ export function createDmService({
             identity,
             getContact,
             getBlockedPeers,
+            invalidateWebPushCapability,
             dispatchWebPush
           }).catch(() => {
             console.warn('Web Push direct-message dispatch failed unexpectedly');
@@ -125,8 +132,9 @@ async function dispatchLocalDm(
     identity,
     getContact,
     getBlockedPeers,
+    invalidateWebPushCapability,
     dispatchWebPush
-  }: Pick<DmServiceOptions, 'getContact' | 'getBlockedPeers' | 'dispatchWebPush'> & {
+  }: Pick<DmServiceOptions, 'getContact' | 'getBlockedPeers' | 'invalidateWebPushCapability' | 'dispatchWebPush'> & {
     readonly identity: DmObjectIdentity;
   }
 ): Promise<void> {
@@ -148,5 +156,14 @@ async function dispatchLocalDm(
   const blockedPeers = getBlockedPeers?.() ?? new Set<string>();
   if (blockedPeers.has(contact.publicKey) || blockedPeers.has(recipientFingerprint)) return;
 
-  await dispatchWebPush?.(object, contact.webPush);
+  const result = await dispatchWebPush?.(object, contact.webPush);
+  if (result) {
+    await invalidateWebPushCapabilityAfterDispatch(
+      result,
+      contact.publicKey,
+      recipientFingerprint,
+      contact.webPush,
+      invalidateWebPushCapability
+    );
+  }
 }

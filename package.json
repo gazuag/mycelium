@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:integration": "playwright test",
     "test:integration:observations": "playwright test src/integration/local-observations-multi-peer.test.ts",
+    "test:integration:network": "playwright test src/integration/browser-python-peer.test.ts",
     "preview": "vite preview",
     "deploy": "npx wrangler deploy",
     "deploy:preview": "npx wrangler preview",

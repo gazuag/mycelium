@@ -20,6 +20,11 @@ aiortc and its PyAV dependency, and creates `data/` and `runtime/`. It does not
 leave the peer running. If a copied `.venv` cannot run on the target computer,
 the installer recreates it there.
 
+The requirements file is self-contained so a copied distribution does not
+depend on files outside `mycelium-peer/`. Its Python networking and protocol
+modules are deployment copies of the repository's canonical modules under
+`bot/`; repository tests require the copies to stay identical.
+
 ## Configuration
 
 Edit `config.env` before starting. It defaults to hoarder mode, display name

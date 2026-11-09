@@ -6,6 +6,7 @@ import { createSignedObject } from '../object-layer/envelope';
 import type { DistributedObject, JsonValue } from '../object-layer/types';
 import type { Contact, WebPushCapability } from '../types';
 import type { WebPushDispatchResult } from './web-push-dispatch';
+import type { InvalidateWebPushCapability } from './web-push-capability-invalidation';
 import {
   completePostDirectSharingAndDispatchFollowers,
   dispatchLocalPostToFollowers
@@ -71,6 +72,7 @@ function makeOptions(
       object: DistributedObject,
       capability: WebPushCapability
     ) => Promise<WebPushDispatchResult>;
+    readonly invalidateWebPushCapability?: InvalidateWebPushCapability;
   } = {}
 ) {
   const dispatch = vi.fn(overrides.dispatch ?? (async () => ({ status: 'accepted' } as const)));
@@ -82,6 +84,9 @@ function makeOptions(
     contacts,
     blockedPeers: overrides.blockedPeers ?? new Set<string>(),
     ...(overrides.replyParent ? { replyParent: overrides.replyParent } : {}),
+    ...(overrides.invalidateWebPushCapability
+      ? { invalidateWebPushCapability: overrides.invalidateWebPushCapability }
+      : {}),
     dispatch
   };
 }
@@ -235,6 +240,58 @@ describe('followed-author post Web Push', () => {
     expect(events).toEqual(['first', 'second', 'third']);
     expect(dispatch).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledWith('Web Push followed-post dispatch failed unexpectedly');
+  });
+
+  it('invalidates each exact permanently unusable follower capability without stopping fan-out', async () => {
+    const local = await createIdentity();
+    const first = await createIdentity();
+    const second = await createIdentity();
+    const post = await createPost(local);
+    const firstContact = contact(first);
+    const secondContact = contact(second);
+    const dispatch = vi.fn()
+      .mockResolvedValueOnce({ status: 'invalid-subscription' } as const)
+      .mockResolvedValueOnce({ status: 'accepted' } as const);
+    const invalidateWebPushCapability = vi.fn(async () => {});
+    const options = makeOptions(post, local, [firstContact, secondContact], {
+      dispatch,
+      invalidateWebPushCapability
+    });
+
+    await dispatchLocalPostToFollowers(options);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(invalidateWebPushCapability).toHaveBeenCalledOnce();
+    expect(invalidateWebPushCapability).toHaveBeenCalledWith(
+      firstContact.publicKey,
+      firstContact.fingerprint,
+      firstContact.webPush
+    );
+  });
+
+  it('continues to other followers when one invalidation persistence attempt fails', async () => {
+    const local = await createIdentity();
+    const first = await createIdentity();
+    const second = await createIdentity();
+    const post = await createPost(local);
+    const dispatch = vi.fn()
+      .mockResolvedValueOnce({ status: 'invalid-subscription' } as const)
+      .mockResolvedValueOnce({ status: 'accepted' } as const);
+    const invalidateWebPushCapability = vi.fn(async () => {
+      throw new Error('sensitive persistence detail');
+    });
+    const options = makeOptions(post, local, [contact(first), contact(second)], {
+      dispatch,
+      invalidateWebPushCapability
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(dispatchLocalPostToFollowers(options)).resolves.toBeUndefined();
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(invalidateWebPushCapability).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith('Failed to invalidate unusable Web Push capability');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('sensitive persistence detail');
   });
 
   it('excludes the verified parent author from reply fan-out and rejects a mismatched parent', async () => {

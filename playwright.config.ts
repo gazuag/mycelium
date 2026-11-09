@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const baseURL = process.env.MYCELIUM_BASE_URL ?? 'http://127.0.0.1:8080';
+const testPort = process.env.MYCELIUM_TEST_PORT ?? '8080';
+const baseURL = process.env.MYCELIUM_BASE_URL ?? `http://127.0.0.1:${testPort}`;
 
 export default defineConfig({
   testDir: './src/integration',
@@ -17,7 +18,7 @@ export default defineConfig({
   },
   ...(process.env.MYCELIUM_BASE_URL ? {} : {
     webServer: {
-      command: 'npm run dev -- --host 127.0.0.1 --port 8080 --strictPort',
+      command: `npm run dev -- --host 127.0.0.1 --port ${testPort} --strictPort`,
       url: baseURL,
       env: { ...process.env, VITE_E2E_TEST_API: 'true' },
       reuseExistingServer: false,

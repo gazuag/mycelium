@@ -8,6 +8,7 @@ import type { Contact, WebPushCapability } from '../types';
 import type { WebPushDispatchResult } from './web-push-dispatch';
 import { dispatchLocalPostToFollowers } from './post-web-push';
 import { dispatchLocalReplyToParent } from './post-reply-web-push';
+import type { InvalidateWebPushCapability } from './web-push-capability-invalidation';
 
 Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
 
@@ -69,6 +70,7 @@ function makeOptions(
       object: DistributedObject,
       capability: WebPushCapability
     ) => Promise<WebPushDispatchResult>;
+    readonly invalidateWebPushCapability?: InvalidateWebPushCapability;
   } = {}
 ) {
   const dispatch = vi.fn(overrides.dispatch ?? (async () => ({ status: 'accepted' } as const)));
@@ -80,6 +82,9 @@ function makeOptions(
     localFingerprint: local.id,
     contacts,
     blockedPeers: overrides.blockedPeers ?? new Set<string>(),
+    ...(overrides.invalidateWebPushCapability
+      ? { invalidateWebPushCapability: overrides.invalidateWebPushCapability }
+      : {}),
     dispatch
   };
 }
@@ -194,6 +199,29 @@ describe('locally created reply Web Push', () => {
     await expect(dispatchLocalReplyToParent(options)).resolves.toBeUndefined();
     expect(options.dispatch).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith('Web Push reply recipient validation or dispatch failed unexpectedly');
+  });
+
+  it('conditionally invalidates the exact parent-author capability after invalid-subscription', async () => {
+    const local = await createIdentity();
+    const parentAuthor = await createIdentity();
+    const parent = await createPost(parentAuthor);
+    const reply = await createPost(local, { content: 'reply', tags: [], reply_to: parent.object_id });
+    const recipient = contact(parentAuthor);
+    const invalidateWebPushCapability = vi.fn(async () => {});
+    const options = makeOptions(reply, parent, local, [recipient], {
+      dispatch: async () => ({ status: 'invalid-subscription' }),
+      invalidateWebPushCapability
+    });
+
+    await dispatchLocalReplyToParent(options);
+
+    expect(invalidateWebPushCapability).toHaveBeenCalledOnce();
+    expect(invalidateWebPushCapability).toHaveBeenCalledWith(
+      recipient.publicKey,
+      recipient.fingerprint,
+      recipient.webPush
+    );
+    expect(options.dispatch).toHaveBeenCalledWith(reply, recipient.webPush);
   });
 
   it('does not duplicate the parent-author attempt through Stage 8G follower fan-out', async () => {

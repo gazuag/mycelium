@@ -1,6 +1,6 @@
-import type { PeerSignalMessage, SignalMessage } from './signalling';
+import { shouldYieldToRemoteOffer, type PeerSignalMessage, type SignalMessage } from './signalling';
 import type { ConnectionState, PeerMetadata } from '../types';
-import { buildPacket, createPacketId, isMyceliumPacket, type MyceliumPacket, type PacketSigner } from './protocol';
+import { buildPacket, createPacketId, isMyceliumPacket, isPeerFingerprint, type MyceliumPacket, type PacketSigner } from './protocol';
 import { MAX_FEED_PAGE_SIZE } from '../object-layer/feed-page';
 import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import { FALLBACK_ICE_SERVERS } from '../services/metered-turn';
@@ -19,12 +19,8 @@ export interface PeerListExchangeCallbacks {
   readonly onPeerList: (sourcePeerId: string, peerIds: readonly string[]) => void;
 }
 
-function isValidPeerFingerprint(peerId: unknown): peerId is string {
-  return typeof peerId === 'string' && /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(peerId);
-}
-
 function normalizePeerFingerprint(peerId: unknown): string | null {
-  return isValidPeerFingerprint(peerId) ? peerId.toLowerCase() : null;
+  return isPeerFingerprint(peerId) ? peerId.toLowerCase() : null;
 }
 
 function isValidPeerListRequestId(requestId: unknown): requestId is string {
@@ -605,6 +601,14 @@ export class PeerConnectionManager {
       || this.peerConnection.iceConnectionState === 'closed';
   }
 
+  public isUnused() {
+    return !this.destroyed
+      && this.peerConnection.connectionState === 'new'
+      && this.peerConnection.signalingState === 'stable'
+      && this.dataChannel === null
+      && this.activeNegotiationId === null;
+  }
+
   private async sendPacket(
     type: Parameters<typeof buildPacket>[2],
     payload: Record<string, unknown>,
@@ -787,7 +791,7 @@ export class PeerConnectionManager {
     }
     this.isOfferer = true;
     this.activeNegotiationId = createPacketId();
-    this.polite = this.localId > remoteId;
+    this.polite = shouldYieldToRemoteOffer(this.localId, remoteId);
     this.makingOffer = true;
     try {
       this.onState(remoteId, 'signalling');
@@ -864,7 +868,7 @@ export class PeerConnectionManager {
     }
 
     this.remoteId = message.from;
-    this.polite = this.localId > message.from;
+    this.polite = shouldYieldToRemoteOffer(this.localId, message.from);
     const receivedNegotiationId = typeof message.payload?.negotiationId === 'string' ? message.payload.negotiationId : null;
     this.onEvent(message.from, `${this.connectionLabel()} signalling received type=${message.type} localConnectionId=${this.localConnectionId} negotiationId=${receivedNegotiationId ?? '<missing>'} activeNegotiationId=${this.activeNegotiationId ?? '<none>'} signaling=${this.peerConnection.signalingState} ice=${this.peerConnection.iceConnectionState} connection=${this.peerConnection.connectionState}`);
     if (!receivedNegotiationId) {
@@ -877,7 +881,17 @@ export class PeerConnectionManager {
     }
 
     if (message.type === 'offer') {
+      if (this.isDataChannelOpen() || this.peerConnection.connectionState === 'connected') {
+        this.onEvent(message.from, `${this.connectionLabel()} ignored offer for an already connected peer negotiationId=${receivedNegotiationId} active=${this.activeNegotiationId ?? '<none>'}`);
+        return;
+      }
       const offerCollision = this.makingOffer || this.peerConnection.signalingState !== 'stable';
+      if (!offerCollision
+        && this.activeNegotiationId !== null
+        && (!this.isOfferer || this.dataChannel !== null)) {
+        this.onEvent(message.from, `${this.connectionLabel()} ignored competing offer while negotiation is active negotiationId=${receivedNegotiationId} active=${this.activeNegotiationId}`);
+        return;
+      }
       if (offerCollision) {
         if (!this.polite) {
           this.onEvent(message.from, `${this.connectionLabel()} glare collision: impolite peer ignored offer negotiationId=${receivedNegotiationId} active=${this.activeNegotiationId ?? '<none>'}`);
@@ -888,8 +902,9 @@ export class PeerConnectionManager {
         await this.peerConnection.setLocalDescription({ type: 'rollback' });
         if (this.dataChannel) {
           this.onEvent(message.from, `${this.connectionLabel()} closing locally-created channel after yielding offer collision`);
-          this.dataChannel.close();
+          const abandonedChannel = this.dataChannel;
           this.dataChannel = null;
+          abandonedChannel.close();
         }
       }
 

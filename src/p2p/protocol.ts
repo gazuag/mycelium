@@ -1,5 +1,10 @@
 export const MYP_PROTOCOL = 'mycelium';
 export const MYP_VERSION = 1;
+const PEER_FINGERPRINT_PATTERN = /^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i;
+
+export function isPeerFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && PEER_FINGERPRINT_PATTERN.test(value);
+}
 
 export type MyceliumPacketType =
   | 'HELLO'
@@ -63,6 +68,8 @@ export function isMyceliumPacket(value: unknown): value is MyceliumPacket {
     && typeof candidate.sender === 'string'
     && (candidate.recipient === null || typeof candidate.recipient === 'string')
     && !!candidate.payload
+    && typeof candidate.payload === 'object'
+    && !Array.isArray(candidate.payload)
     && typeof candidate.signature === 'string';
 }
 

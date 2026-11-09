@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import tempfile
 import time
 import uuid
@@ -26,20 +25,23 @@ from .protocol import (
     Identity,
     MAX_OBJECT_BYTES,
     MAX_PACKET_BYTES,
+    PEER_ID_PATTERN,
     canonicalize,
     canonicalize_v3,
     fingerprint,
+    is_negotiation_id,
     object_expired,
     is_safe_integer,
     packet_unsigned,
     sign_packet,
     validate_object,
     validate_packet_shape,
+    validate_signal_message,
+    should_yield_to_remote_offer,
     verify_signature,
 )
 from .store import DEFAULT_OBJECT_CACHE_BYTES, PeerStore
 
-PEER_ID_PATTERN = re.compile(r"^(?:[0-9a-f]{2}:){7}[0-9a-f]{2}$")
 FIND_LIFETIME_SECONDS = 5.0
 FIND_MAX_TTL = 8
 FIND_MAX_IDS = 200
@@ -1629,7 +1631,7 @@ class PeerNode:
         if kind not in ("offer", "answer", "ice-candidate"):
             return
         payload = message.get("payload")
-        if not isinstance(payload, dict):
+        if not validate_signal_message(message):
             return
         try:
             if len(json.dumps(message, separators=(",", ":")).encode("utf-8")) > MAX_PACKET_BYTES:
@@ -1639,16 +1641,25 @@ class PeerNode:
         self.store.add_peer(sender, time.time())
         link = self.links.get(sender)
         if kind == "offer":
+            if link and not link.closed:
+                if link.is_open:
+                    logging.info("Ignoring offer from %s: peer link is already open", sender)
+                    return
+                if link.outgoing and not should_yield_to_remote_offer(self.identity.node_id, sender):
+                    logging.info("Ignoring colliding offer from %s: local peer is the elected initiator", sender)
+                    return
+                if not link.outgoing and link.remote_offer_accepted:
+                    logging.info("Ignoring competing offer from %s: an inbound negotiation is already active", sender)
+                    return
+                if link.outgoing:
+                    # The higher fingerprint is polite and yields to the lower peer's offer.
+                    await link.close()
+                    link = None
             if (link is None or link.closed) and sum(
                 not existing.closed for existing in self.links.values()
             ) >= self.max_peers:
                 logging.info("Ignoring incoming offer from %s: peer limit reached", sender)
                 return
-            if link and link.outgoing and link.negotiation_id:
-                # The browser's deterministic ID election makes this uncommon. Yield
-                # safely rather than applying simultaneous offers to one connection.
-                await link.close()
-                link = None
             if link is None or link.closed:
                 link = await self._new_incoming_link(sender)
             try:
@@ -1722,6 +1733,8 @@ class PeerNode:
                         maintenance.cancel()
                         pool_refresh.cancel()
                         await asyncio.gather(maintenance, pool_refresh, return_exceptions=True)
+                        self.online_peers.clear()
+                        await self._close_pending_links()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1748,6 +1761,13 @@ class PeerNode:
                     await self.signalling.send(json.dumps(packet, separators=(",", ":")))
                 except Exception as error:
                     logging.warning("Peer-pool request failed: %s", error)
+
+    async def _close_pending_links(self) -> None:
+        pending = [link for link in self.links.values() if not link.is_open]
+        for link in pending:
+            self.attempts.pop(link.peer_id, None)
+        if pending:
+            await asyncio.gather(*(link.close() for link in pending), return_exceptions=True)
 
     async def close(self) -> None:
         self.stopping = True
@@ -1785,6 +1805,7 @@ class PeerLink:
         self.negotiation_id = str(uuid.uuid4())
         self.closed = False
         self.open_handled = False
+        self.remote_offer_accepted = False
         self.candidate_queue: list[tuple[str, int | None, str]] = []
         self.signal_lock = asyncio.Lock()
         self.pending_ping: tuple[str, float] | None = None
@@ -1864,20 +1885,27 @@ class PeerLink:
 
     async def handle_signal(self, kind: str, payload: dict[str, Any]) -> None:
         async with self.signal_lock:
+            if self.closed:
+                return
             from aiortc import RTCSessionDescription
 
             negotiation_id = payload.get("negotiationId")
-            if not isinstance(negotiation_id, str) or len(negotiation_id) > 128:
+            if not is_negotiation_id(negotiation_id):
                 return
             if kind == "offer":
-                self.negotiation_id = negotiation_id
                 sdp, session_type = payload.get("sdp"), payload.get("type")
                 if not isinstance(sdp, str) or len(sdp) > 100_000 or session_type != "offer":
                     return
+                self.negotiation_id = negotiation_id
+                self.remote_offer_accepted = True
                 await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+                if self.closed:
+                    return
                 await self._flush_candidates()
                 answer = await self.pc.createAnswer()
                 await self.pc.setLocalDescription(answer)
+                if self.closed:
+                    return
                 await self.node._send_signal({
                     "type": "answer",
                     "from": self.node.identity.node_id,

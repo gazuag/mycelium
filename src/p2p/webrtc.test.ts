@@ -249,6 +249,16 @@ describe('signed identity profile exchange', () => {
     manager.closeConnection();
   });
 
+  it('identifies only never-used managers as safe to discard after a deferred dial', async () => {
+    const manager = createManager();
+    expect(manager.isUnused()).toBe(true);
+
+    await manager.createOffer('peer-b', fakeSocket());
+    expect(manager.isUnused()).toBe(false);
+    manager.closeConnection();
+    expect(manager.isUnused()).toBe(false);
+  });
+
   it('forwards well-formed incoming requests to the responder callback', () => {
     const requests: Array<{ peerId: string; requestId: string }> = [];
     const manager = createManager({
@@ -309,7 +319,8 @@ describe('PROFILE_UPDATE metadata forwarding', () => {
       publicKey: 'public-key',
       displayName: 'Peer B',
       following: false,
-      timestamp: new Date(0).toISOString()
+      timestamp: new Date(0).toISOString(),
+      sequence: 1
     };
     const packet: MyceliumPacket = {
       protocol: 'mycelium',
@@ -863,6 +874,46 @@ describe('PeerConnectionManager lifecycle', () => {
     expect(a.getConnectionId()).not.toBe(b.getConnectionId());
     expect(aEvents.some((event) => event.includes('glare collision: impolite peer ignored'))).toBe(true);
     expect(bEvents.some((event) => event.includes('glare collision: polite peer rolling back'))).toBe(true);
+  });
+
+  it('does not replace an active or established negotiation with a competing offer', async () => {
+    const events: string[] = [];
+    const manager = createManager({ onEvent: (peerId, event) => events.push(`${peerId} ${event}`) });
+    const socket = fakeSocket() as WebSocket & { send: ReturnType<typeof vi.fn> };
+    const peerConnection = FakePeerConnection.instances[0]!;
+    await manager.createOffer('peer-b', socket);
+    const negotiationId = manager.getActiveNegotiationId();
+    const setRemoteDescription = vi.spyOn(peerConnection, 'setRemoteDescription');
+
+    await manager.handleSignal({
+      type: 'answer',
+      from: 'peer-b',
+      to: 'peer-a',
+      payload: { type: 'answer', sdp: 'answer', negotiationId }
+    }, socket);
+    await manager.handleSignal({
+      type: 'offer',
+      from: 'peer-b',
+      to: 'peer-a',
+      payload: { type: 'offer', sdp: 'competing', negotiationId: 'stale-offer' }
+    }, socket);
+
+    expect(manager.getActiveNegotiationId()).toBe(negotiationId);
+    expect(setRemoteDescription).toHaveBeenCalledOnce();
+    expect(events.some((event) => event.includes('ignored competing offer'))).toBe(true);
+
+    const channel = peerConnection.lastDataChannel!;
+    channel.readyState = 'open';
+    channel.onopen?.();
+    await manager.handleSignal({
+      type: 'offer',
+      from: 'peer-b',
+      to: 'peer-a',
+      payload: { type: 'offer', sdp: 'replacement', negotiationId: 'new-offer' }
+    }, socket);
+    expect(manager.getActiveNegotiationId()).toBe(negotiationId);
+    expect(setRemoteDescription).toHaveBeenCalledOnce();
+    manager.closeConnection();
   });
 
   it('does not create another channel for repeated offers', async () => {

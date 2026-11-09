@@ -12,7 +12,13 @@ export async function createLocalIdentityRecord(): Promise<CompleteLocalIdentity
   const publicKey = await exportPublicKey(keys.publicKey);
   const privateKey = await exportPrivateKey(keys.privateKey);
   const id = await deriveFingerprint(publicKey);
-  const identity = await ensureIdentityEncryptionKeyPair({ key: 'local', publicKey, privateKey, id });
+  const identity = await ensureIdentityEncryptionKeyPair({
+    key: 'local',
+    publicKey,
+    privateKey,
+    id,
+    metadataSequence: 0
+  });
   return { ...identity, id };
 }
 

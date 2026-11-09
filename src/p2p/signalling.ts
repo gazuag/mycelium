@@ -1,9 +1,11 @@
+import { isPeerFingerprint } from './protocol';
+
 export type SignalMessage =
   | {
       type: 'offer' | 'answer' | 'ice-candidate';
       from: string;
       to: string;
-      payload: any;
+      payload: Record<string, unknown>;
     }
   | {
       type: 'peer-list';
@@ -28,6 +30,51 @@ const pendingOnlinePeerLists = new Map<string, PendingOnlinePeerList>();
 const ONLINE_PEER_LIST_TIMEOUT_MS = 5_000;
 
 export type PeerSignalMessage = Extract<SignalMessage, { type: 'offer' | 'answer' | 'ice-candidate' }>;
+
+export function isNegotiationId(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
+}
+
+export function shouldYieldToRemoteOffer(localPeerId: string, remotePeerId: string): boolean {
+  return localPeerId > remotePeerId;
+}
+
+export function isPeerSignalMessage(value: unknown): value is PeerSignalMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const message = value as Partial<PeerSignalMessage>;
+  if ((message.type !== 'offer' && message.type !== 'answer' && message.type !== 'ice-candidate')
+    || !isPeerFingerprint(message.from)
+    || !isPeerFingerprint(message.to)
+    || !message.payload
+    || typeof message.payload !== 'object'
+    || Array.isArray(message.payload)) return false;
+
+  const payload = message.payload as Record<string, unknown>;
+  if (!isNegotiationId(payload.negotiationId)) return false;
+
+  if (message.type === 'offer' || message.type === 'answer') {
+    return payload.type === message.type
+      && typeof payload.sdp === 'string'
+      && payload.sdp.length > 0
+      && payload.sdp.length <= 100_000;
+  }
+
+  const candidate = payload.candidate;
+  if (candidate === null) return true;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+  const iceCandidate = candidate as Record<string, unknown>;
+  return typeof iceCandidate.candidate === 'string'
+    && iceCandidate.candidate.length <= 2048
+    && (iceCandidate.sdpMid === undefined || iceCandidate.sdpMid === null || typeof iceCandidate.sdpMid === 'string')
+    && (iceCandidate.sdpMLineIndex === undefined
+      || iceCandidate.sdpMLineIndex === null
+      || (typeof iceCandidate.sdpMLineIndex === 'number'
+        && Number.isSafeInteger(iceCandidate.sdpMLineIndex)
+        && iceCandidate.sdpMLineIndex >= 0))
+    && (iceCandidate.usernameFragment === undefined
+      || iceCandidate.usernameFragment === null
+      || typeof iceCandidate.usernameFragment === 'string');
+}
 
 const SIGNAL_SERVER_HOST = 'discover.unfilter.ing';
 const SIGNAL_SERVER_PORT = 8443;
@@ -106,6 +153,12 @@ export function connectToSignalling(
         return;
       }
       const message = parsed as SignalMessage;
+      if (message?.type === 'offer' || message?.type === 'answer' || message?.type === 'ice-candidate') {
+        if (!isPeerSignalMessage(message)) {
+          console.warn('Ignoring malformed peer signalling message');
+          return;
+        }
+      }
       onMessage(message);
     } catch (error) {
       console.error('Failed to parse signalling message', error);

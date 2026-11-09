@@ -25,7 +25,8 @@ describe('authenticated peer authors', () => {
       publicKey,
       displayName: 'Peer',
       following: false,
-      timestamp: new Date(0).toISOString()
+      timestamp: new Date(0).toISOString(),
+      sequence: 1
     };
     const packet = await buildPacket(
       peerId,

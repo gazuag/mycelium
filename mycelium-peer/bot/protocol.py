@@ -16,6 +16,54 @@ from cryptography.exceptions import InvalidSignature
 MAX_PACKET_BYTES = 1_048_576
 MAX_OBJECT_BYTES = 262_144
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+PEER_ID_PATTERN = re.compile(r"^(?:[0-9a-f]{2}:){7}[0-9a-f]{2}$", re.IGNORECASE)
+MAX_NEGOTIATION_ID_LENGTH = 128
+
+
+def is_peer_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and PEER_ID_PATTERN.fullmatch(value) is not None
+
+
+def is_negotiation_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= MAX_NEGOTIATION_ID_LENGTH
+
+
+def should_yield_to_remote_offer(local_peer_id: str, remote_peer_id: str) -> bool:
+    return local_peer_id > remote_peer_id
+
+
+def validate_signal_message(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    kind = value.get("type")
+    sender, recipient = value.get("from"), value.get("to")
+    payload = value.get("payload")
+    if (kind not in ("offer", "answer", "ice-candidate")
+            or not is_peer_fingerprint(sender)
+            or not is_peer_fingerprint(recipient)
+            or not isinstance(payload, dict)):
+        return False
+    negotiation_id = payload.get("negotiationId")
+    if not is_negotiation_id(negotiation_id):
+        return False
+    if kind in ("offer", "answer"):
+        sdp = payload.get("sdp")
+        return payload.get("type") == kind and isinstance(sdp, str) and 0 < len(sdp) <= 100_000
+    if "candidate" not in payload:
+        return False
+    candidate = payload["candidate"]
+    if candidate is None:
+        return True
+    if not isinstance(candidate, dict):
+        return False
+    candidate_line = candidate.get("candidate")
+    sdp_mid = candidate.get("sdpMid")
+    sdp_line = candidate.get("sdpMLineIndex")
+    username_fragment = candidate.get("usernameFragment")
+    return (isinstance(candidate_line, str) and len(candidate_line) <= 2048
+            and (sdp_mid is None or isinstance(sdp_mid, str))
+            and (sdp_line is None or (is_safe_integer(sdp_line) and sdp_line >= 0))
+            and (username_fragment is None or isinstance(username_fragment, str)))
 
 
 def is_safe_integer(value: Any) -> bool:
