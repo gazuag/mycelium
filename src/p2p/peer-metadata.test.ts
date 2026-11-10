@@ -3,6 +3,7 @@ import type { Contact, PeerMetadata } from '../types';
 import type { AcceptPeerMetadataResult } from '../storage/idb';
 import {
   createSequencedPeerMetadata,
+  describePeerMetadataPreparationFailure,
   mergeAcceptedPeerMetadataContact,
   recordAcceptedPeerMetadataSequence
 } from './peer-metadata';
@@ -54,6 +55,20 @@ describe('sequenced peer metadata', () => {
         'Invalid local profile metadata sequence.'
       );
     }
+  });
+
+  it('formats preparation failures with a cause while redacting key material', () => {
+    expect(describePeerMetadataPreparationFailure(
+      new Error('Local identity is unavailable.')
+    )).toBe('Error: Local identity is unavailable.');
+    expect(describePeerMetadataPreparationFailure(
+      new Error('Local metadata sequence counter is missing or invalid.')
+    )).toBe('Error: Local metadata sequence counter is missing or invalid.');
+    expect(describePeerMetadataPreparationFailure(
+      new Error(`privateKey: ${'A'.repeat(100)}`)
+    )).toBe('Error: [redacted key]');
+    expect(describePeerMetadataPreparationFailure({ privateKey: 'not an Error' }))
+      .toBe('Non-Error rejection (object).');
   });
 
   it('allows one sequenced snapshot to be reused for multiple recipients', async () => {

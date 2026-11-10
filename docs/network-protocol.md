@@ -19,16 +19,14 @@ shared vectors, and the implementations/tests in the same change.
 | --- | --- |
 | Browser signalling and negotiation | `src/p2p/signalling.ts`, `src/p2p/webrtc.ts`, and `src/App.tsx` |
 | Browser MYP packet envelope and object transport | `src/p2p/protocol.ts`, `src/p2p/object-transport.ts`, and `src/object-layer/` |
-| Python peer signalling, negotiation, packet handling | `bot/protocol.py` and `bot/peer.py` |
-| Signalling relay and discovery storage | `server.py` |
-| Portable Python deployment copy | `mycelium-peer/bot/`; it is a checked-in distribution copy, not a separate protocol authority |
+| Python peer signalling, negotiation, packet handling | `mycelium-peer/bot/protocol.py` and `mycelium-peer/bot/peer.py` |
+| Signalling relay and discovery storage | `mycelium-server/server.py` and its local `protocol.py` |
 
-`bot/` is the canonical Python source in this repository. The portable
-`mycelium-peer/` distribution intentionally duplicates the bot modules to
-preserve its standalone deployment paths. `bot.test_protocol_contract` checks
-that `peer.py`, `protocol.py`, and `store.py` stay byte-identical across the
-two locations. Update both copies when changing those modules; do not move or
-rename the portable files without updating its installer and service scripts.
+The bot and server are separately deployable services. The peer implementation
+and its dependencies live in `mycelium-peer/`; server validation and its
+dependencies live in `mycelium-server/`. Neither imports code from the other.
+Their signalling wire contract is independently validated against the shared
+fixture at `tests/fixtures/network-contract.json`.
 
 ## Identity and peer IDs
 
@@ -176,7 +174,7 @@ The current packet families and their payload contracts are:
 | `PING`, `PONG` | `pingId` and `sentAt`; `PONG` echoes the ping correlation |
 | `GOODBYE` | No required payload fields; closes the peer link |
 | `PROFILE_REQUEST` | Empty object; requests the signed connection profile |
-| `PROFILE_UPDATE`, `PROFILE_RESPONSE` | `profile` (legacy-compatible `metadata` may be read); contains the public key and profile fields and is packet-signed by that key. The derived fingerprint must match `sender` |
+| `PROFILE_UPDATE`, `PROFILE_RESPONSE` | `profile` (legacy-compatible `metadata` may be read); contains `publicKey` and a positive safe-integer `sequence`, plus profile fields, and is packet-signed by that key. The derived fingerprint must match `sender` |
 | `IDENTITY_PROFILE_REQUEST` | `requestId` string, at most 128 characters |
 | `IDENTITY_PROFILE_RESPONSE` | Matching `requestId` and `object` (signed `mycelium.identity` distributed object) |
 | `OBJECT_STORE` | `object`: one validated signed distributed object |
@@ -226,11 +224,10 @@ remaining per-implementation checks.
 For any network/protocol change:
 
 1. Update this specification and `tests/fixtures/network-contract.json`.
-2. Update the TypeScript reference and both Python implementation copies as
-   applicable.
+2. Update the TypeScript reference and each affected independent Python service.
 3. Add a TypeScript and Python test consuming the shared vector; add a
    deterministic interaction test for lifecycle changes.
 4. Run `npm test`, `npm run build`, the Python bot/server tests, and
    `npm run test:integration:network`.
-5. Keep `bot/` and `mycelium-peer/bot/` synchronized and keep their dependency
-   requirements self-contained.
+5. Keep both deployment directories self-contained; install each service from
+   its own `requirements.txt`.

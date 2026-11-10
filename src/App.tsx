@@ -71,6 +71,7 @@ import { canonicalize, createPacketId, isPeerFingerprint, type MyceliumPacket, t
 import { dispatchAuthenticatedProfileMetadata } from './p2p/profile-auth';
 import {
   createSequencedPeerMetadata,
+  describePeerMetadataPreparationFailure,
   mergeAcceptedPeerMetadataContact,
   recordAcceptedPeerMetadataSequence
 } from './p2p/peer-metadata';
@@ -1936,27 +1937,31 @@ function App() {
   const buildPeerMetadata = async (peerId: string, followingOverride?: boolean) => {
     const p = myProfileRef.current;
     const id = identityRef.current;
-    const fallbackName = id ? fingerprintToHumanName(id.id) : 'Me';
+    if (!id) throw new Error('Local identity is unavailable.');
+    if (await deriveFingerprint(id.publicKey) !== id.id) {
+      throw new Error('Local identity peer ID does not match its public key.');
+    }
+    const fallbackName = fingerprintToHumanName(id.id);
     const webPush = await webPushManager.getPublishedCapability();
     const metadata = {
-      author: id?.id ?? '',
-      publicKey: id?.publicKey,
+      author: id.id,
+      publicKey: id.publicKey,
       displayName: p.displayName.trim() || fallbackName || 'Me',
       following: followingOverride ?? contactsRef.current.find((c) => c.fingerprint === peerId)?.followed ?? false,
       timestamp: new Date().toISOString(),
-      bio: p.bio.trim() || `Peer id: ${id?.id ?? 'unknown'}`,
+      bio: p.bio.trim() || `Peer id: ${id.id}`,
       tags: [],
       ...(webPush ? { webPush } : {})
     };
     const sequencedMetadata = await createSequencedPeerMetadata(metadata, nextLocalMetadataSequence);
-    return id?.encryptionPublicKey ? addEncryptionKeyBinding(sequencedMetadata, id) : sequencedMetadata;
+    return id.encryptionPublicKey ? addEncryptionKeyBinding(sequencedMetadata, id) : sequencedMetadata;
   };
 
   const sendPeerMetadata = async (manager: PeerConnectionManager, peerId: string, followingOverride?: boolean) => {
     try {
       manager.sendMetadata(await buildPeerMetadata(peerId, followingOverride));
-    } catch {
-      addLog('Profile metadata was not sent because it could not be prepared safely.');
+    } catch (error) {
+      addLog(`Profile metadata was not sent: ${describePeerMetadataPreparationFailure(error)}`);
     }
   };
 
@@ -2576,11 +2581,10 @@ function App() {
         const accepted = await dispatchAuthenticatedProfileMetadata(
           peer,
           packet,
-          (authenticatedMetadata) => handlePeerMetadata(peer, authenticatedMetadata, manager)
+          (authenticatedMetadata) => handlePeerMetadata(peer, authenticatedMetadata, manager),
+          (failure) => addLog(`Rejected unauthenticated profile metadata from ${peer}: ${failure}`)
         );
-        if (!accepted) {
-          addLog(`Rejected unauthenticated profile metadata from ${peer}`);
-        }
+        if (!accepted) return;
       },
       async (peer: string, _since: string | null = null, limit = 100, after: FeedCursor | null = null, requestId?: string) => {
         if (!isCurrentManager(peer)) return;

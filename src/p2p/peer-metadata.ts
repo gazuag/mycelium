@@ -12,6 +12,17 @@ export async function createSequencedPeerMetadata(
   return { ...metadata, sequence };
 }
 
+export function describePeerMetadataPreparationFailure(error: unknown): string {
+  if (!(error instanceof Error)) return `Non-Error rejection (${typeof error}).`;
+
+  const safeMessage = error.message
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, '[redacted private key]')
+    .replace(/\b(?:private|secret|auth|p256dh|public)?_?key\b\s*[:=]\s*["']?[^,\s}"']+/gi, '[redacted key]')
+    .replace(/\b[A-Za-z0-9+/]{80,}={0,2}\b/g, '[redacted key material]')
+    .slice(0, 240);
+  return `${error.name || 'Error'}${safeMessage ? `: ${safeMessage}` : ''}`;
+}
+
 export function recordAcceptedPeerMetadataSequence(
   sequences: Map<string, number>,
   publicKey: string,

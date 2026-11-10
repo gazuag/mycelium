@@ -85,7 +85,7 @@ async function state(page: Page) {
   return page.evaluate(() => window.__MYCELIUM_E2E__?.state() ?? null);
 }
 
-test('browser and Python bot resolve a queued simultaneous offer to one usable connection', async ({ browser, baseURL }, testInfo) => {
+test('browser and Python bot establish one authenticated connection through the standalone server', async ({ browser, baseURL }, testInfo) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), 'mycelium-browser-python-'));
   let signalServer: ChildProcess | undefined;
   let bot: ChildProcess | undefined;
@@ -109,8 +109,9 @@ test('browser and Python bot resolve a queued simultaneous offer to one usable c
 
     const projectPython = resolve(ROOT, '.venv/bin/python');
     const python = process.env.MYCELIUM_PYTHON ?? (existsSync(projectPython) ? projectPython : 'python3');
-    const startedServer = spawn(python, [resolve(ROOT, 'server.py')], {
-      cwd: ROOT,
+    const serverDirectory = resolve(ROOT, 'mycelium-server');
+    const startedServer = spawn(python, [resolve(serverDirectory, 'server.py')], {
+      cwd: serverDirectory,
       env: {
         ...process.env,
         SIGNAL_HOST: '127.0.0.1',
@@ -187,19 +188,24 @@ test('browser and Python bot resolve a queued simultaneous offer to one usable c
     await expect.poll(async () => (await state(page))?.connectedPeers.includes(botId) ?? false, {
       timeout: 45_000
     }).toBe(true);
+    await testInfo.attach('python-bot-log', { body: botOutput, contentType: 'text/plain' });
+    await testInfo.attach('browser-log', {
+      body: (await state(page))?.logs.join('\n') ?? '',
+      contentType: 'text/plain'
+    });
     await expect.poll(async () => (await state(page))?.logs.join('\n') ?? '', {
       timeout: 15_000
-    }).toContain('glare collision: polite peer rolling back local negotiationId=');
+    }).toMatch(new RegExp(`Received authenticated profile metadata revision \\d+ from ${botId}`));
     await waitForOutput(
       () => botOutput,
-      `Ignoring colliding offer from ${browserId}: local peer is the elected initiator`,
-      15_000
+      `Authenticated peer ${browserId} via PROFILE_UPDATE`,
+      10_000
     );
-    await expect.poll(async () => (await state(page))?.logs.join('\n') ?? '', {
-      timeout: 15_000
-    }).toContain(`Received authenticated connection metadata from ${botId}`);
+    const browserLogs = (await state(page))?.logs.join('\n') ?? '';
+    expect(browserLogs).not.toContain('Profile metadata was not sent:');
+    expect(browserLogs).not.toContain(`Rejected unauthenticated profile metadata from ${botId}:`);
+    expect(botOutput).not.toContain(`Rejected profile from ${browserId}:`);
     expect((await state(page))?.connectedPeers.filter((peerId) => peerId === botId)).toHaveLength(1);
-    await testInfo.attach('python-bot-log', { body: botOutput, contentType: 'text/plain' });
   } finally {
     await context?.close();
     if (bot) await stopChild(bot);

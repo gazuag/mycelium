@@ -34,7 +34,7 @@
       "type": "shell",
       "command": "python3 server.py",
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}/mycelium-server"
       },
       "isBackground": true,
       "problemMatcher": []

@@ -1,5 +1,0 @@
--r ../requirements.txt
-aiortc>=1.9,<2
-aiohttp>=3.10,<4
-cryptography>=42,<47
-websockets>=11.0.3

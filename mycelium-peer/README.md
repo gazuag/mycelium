@@ -21,9 +21,9 @@ leave the peer running. If a copied `.venv` cannot run on the target computer,
 the installer recreates it there.
 
 The requirements file is self-contained so a copied distribution does not
-depend on files outside `mycelium-peer/`. Its Python networking and protocol
-modules are deployment copies of the repository's canonical modules under
-`bot/`; repository tests require the copies to stay identical.
+depend on files outside `mycelium-peer/`. This directory is the canonical
+location for the Python peer implementation; it has no source or runtime
+dependency on `mycelium-server/`.
 
 ## Configuration
 

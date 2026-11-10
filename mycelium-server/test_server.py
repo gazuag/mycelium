@@ -80,7 +80,7 @@ def generate_typescript_identity_profiles():
     ''')
     return subprocess.run(
         ['node', '--input-type=module', '-e', script],
-        cwd=Path(__file__).resolve().parent,
+        cwd=Path(__file__).resolve().parents[1],
         check=True,
         capture_output=True,
         text=True
@@ -811,6 +811,19 @@ class DiscoveryObjectServerTests(unittest.TestCase):
         finally:
             self.server.clients.clear()
             self.server.clients.update(original_clients)
+
+    def test_signalling_validation_matches_shared_cross_language_fixtures(self):
+        fixture_path = (
+            Path(__file__).resolve().parents[1]
+            / 'tests' / 'fixtures' / 'network-contract.json'
+        )
+        fixture = json.loads(fixture_path.read_text(encoding='utf-8'))
+        for signal in fixture['signals']:
+            with self.subTest(message=signal['message']):
+                self.assertEqual(
+                    self.server.validate_signal_message(signal['message']),
+                    signal['valid'],
+                )
 
     def test_signalling_relay_validates_envelope_and_registered_sender(self):
         original_clients = self.server.clients.copy()

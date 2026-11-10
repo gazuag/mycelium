@@ -347,7 +347,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1}},
         ))
         await node.handle_data(
             remote.node_id,
@@ -485,7 +485,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1}},
         ))
         with self.assertLogs(level="DEBUG") as captured:
             await self.node.handle_data(
@@ -502,7 +502,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             "another-recipient",
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1}},
         ))
         with self.assertLogs(level="WARNING") as captured:
             await self.node.handle_data(
@@ -522,17 +522,59 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             peer,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1}},
         ))
         self.assertTrue(self.node._authenticate_profile(peer, packet))
         self.assertIn(peer, self.node.authenticated)
+        invalid_sequence = sign_packet(remote, new_packet(
+            peer,
+            self.identity.node_id,
+            "PROFILE_UPDATE",
+            {"profile": {"publicKey": remote.public_key, "sequence": True}},
+        ))
+        self.assertFalse(self.node._authenticate_profile(peer, invalid_sequence))
         impostor = sign_packet(remote, new_packet(
             "00:00:00:00:00:00:00:00",
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 2}},
         ))
         self.assertFalse(self.node._authenticate_profile(peer, impostor))
+
+    async def test_profile_authentication_rejects_bad_signature_fingerprint_and_sequence(self) -> None:
+        remote = Identity.create()
+        peer = remote.node_id
+
+        invalid_signature = sign_packet(remote, new_packet(
+            peer,
+            self.identity.node_id,
+            "PROFILE_UPDATE",
+            {"profile": {"publicKey": remote.public_key, "sequence": 1}},
+        ))
+        invalid_signature["signature"] = "invalid"
+        with self.assertLogs(level="WARNING") as captured:
+            self.assertFalse(self.node._authenticate_profile(peer, invalid_signature))
+        self.assertIn("signature verification failed", "\n".join(captured.output))
+
+        wrong_fingerprint = sign_packet(remote, new_packet(
+            peer,
+            self.identity.node_id,
+            "PROFILE_UPDATE",
+            {"profile": {"publicKey": self.identity.public_key, "sequence": 1}},
+        ))
+        with self.assertLogs(level="WARNING") as captured:
+            self.assertFalse(self.node._authenticate_profile(peer, wrong_fingerprint))
+        self.assertIn("public-key fingerprint mismatch", "\n".join(captured.output))
+
+        missing_sequence = sign_packet(remote, new_packet(
+            peer,
+            self.identity.node_id,
+            "PROFILE_UPDATE",
+            {"profile": {"publicKey": remote.public_key}},
+        ))
+        with self.assertLogs(level="WARNING") as captured:
+            self.assertFalse(self.node._authenticate_profile(peer, missing_sequence))
+        self.assertIn("invalid profile sequence", "\n".join(captured.output))
 
     async def test_display_name_persists_and_signed_profile_uses_browser_identity_fields(self) -> None:
         configured = PeerNode(self.identity, self.store, display_name="Cache Relay")
@@ -549,6 +591,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
         profile = packet["payload"]["profile"]
         self.assertEqual(profile["author"], self.identity.node_id)
         self.assertEqual(profile["publicKey"], self.identity.public_key)
+        self.assertEqual(profile["sequence"], 1)
         self.assertEqual(profile["displayName"], "Cache Relay")
         self.assertFalse(profile["following"])
         self.assertTrue(validate_packet_shape(packet))
@@ -557,6 +600,13 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             canonicalize({key: value for key, value in packet.items() if key != "signature"}),
             packet["signature"],
         ))
+        restarted_channel = StubChannel()
+        restarted.links[remote.node_id] = StubLink(restarted_channel)
+        await restarted._send_profile(remote.node_id, "PROFILE_UPDATE")
+        self.assertEqual(
+            restarted_channel.packets[0]["payload"]["profile"]["sequence"],
+            2,
+        )
 
     async def test_browser_profile_exchange_drives_persisted_follow_back_once(self) -> None:
         remote = Identity.create()
@@ -565,6 +615,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
         profile = {
             "author": remote.node_id,
             "publicKey": remote.public_key,
+            "sequence": 1,
             "displayName": "Browser peer",
             "following": True,
             "timestamp": "2026-10-20T12:34:56.000Z",
@@ -638,6 +689,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
                 {"profile": {
                     "author": remote.node_id,
                     "publicKey": remote.public_key,
+                    "sequence": 1,
                     "following": True,
                 }},
             ))
@@ -691,7 +743,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key, "following": False}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1, "following": False}},
         ))
         raw_profile = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
         await node.handle_data(remote.node_id, raw_profile)
@@ -715,7 +767,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key, "following": False}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1, "following": False}},
         ))
         await self.node.handle_data(
             remote.node_id,
@@ -757,7 +809,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             remote.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": remote.public_key, "following": True}},
+            {"profile": {"publicKey": remote.public_key, "sequence": 1, "following": True}},
         ))
         await self.node.handle_data(
             remote.node_id,
@@ -775,6 +827,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
         profile = {
             "author": browser.node_id,
             "publicKey": browser.public_key,
+            "sequence": 1,
             "displayName": "Browser peer",
             "following": False,
             "timestamp": "2026-10-20T12:34:56.000Z",
@@ -855,7 +908,7 @@ class TestBootstrapPeer(unittest.IsolatedAsyncioTestCase):
             browser.node_id,
             self.identity.node_id,
             "PROFILE_UPDATE",
-            {"profile": {"publicKey": browser.public_key}},
+            {"profile": {"publicKey": browser.public_key, "sequence": 1}},
         ))
         await self.node.handle_data(
             browser.node_id,

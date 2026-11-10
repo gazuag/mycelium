@@ -15,7 +15,7 @@ from .protocol import (
     validate_signal_message,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = json.loads((ROOT / "tests" / "fixtures" / "network-contract.json").read_text())
 
 
@@ -47,15 +47,6 @@ class SharedNetworkingContractTests(unittest.TestCase):
         canonical = FIXTURE["canonicalization"]
         self.assertEqual(canonicalize(canonical["value"]), canonical["v1"])
         self.assertEqual(canonicalize_v3(canonical["value"]), canonical["v3"])
-
-    def test_portable_peer_sources_are_kept_identical(self) -> None:
-        for filename in ("peer.py", "protocol.py", "store.py"):
-            with self.subTest(filename=filename):
-                self.assertEqual(
-                    (ROOT / "bot" / filename).read_bytes(),
-                    (ROOT / "mycelium-peer" / "bot" / filename).read_bytes(),
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

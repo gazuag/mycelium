@@ -1,0 +1,4 @@
+.venv/
+discovery.db*
+*.crt
+*.key

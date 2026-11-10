@@ -52,7 +52,8 @@ than the remaining allowance before the client can abort it.
 - `src/services/web-push-sender.ts` — optional authenticated request to the Web Push sender.
 - `public/service-worker.js` — registered PWA worker, including bounded untrusted Web Push staging.
 - `src/markdown/external-content.ts` — safe URL handling, Markdown image-size metadata, and bounded raster image loading.
-- `server.py` — Python WebSocket server handling signalling and discovery over one WebSocket endpoint.
+- `mycelium-server/` — self-contained Python WebSocket server for signalling and discovery.
+- `mycelium-peer/` — self-contained Python WebRTC peer and portable deployment.
 - `server_push.py` — separate TLS-only authenticated Web Push sender; it does not persist objects or subscriptions.
 
 ## Peer-gossip candidates
@@ -71,8 +72,12 @@ Contacts or initiate connections.
 
 ```bash
 npm install
-python3 -m pip install -r requirements.txt
 ```
+
+The root `requirements.txt` is for the optional Web Push sender. Install
+signalling-server and peer dependencies separately from
+[`mycelium-server/requirements.txt`](./mycelium-server/requirements.txt) and
+[`mycelium-peer/requirements.txt`](./mycelium-peer/requirements.txt).
 
 ## Run locally
 
@@ -90,18 +95,22 @@ Open the local URL printed by Vite.
 ### Server
 
 ```bash
-python3 server.py
+cd mycelium-server
+python3 -m pip install -r requirements.txt
+TLS_CERT_PATH=/path/to/server.crt TLS_KEY_PATH=/path/to/server.key python3 server.py
 ```
 
 The server listens for peer signalling and discovery on port `8443`. The deployed secure WebSocket endpoint is `wss://discover.unfilter.ing:8443`.
+The server folder contains its own signalling validation and requirements; it
+does not import bot code or depend on the peer installation.
 
 ### Standalone Python bootstrap peer
 
-The optional cache/relay peer under [`bot/`](./bot/) uses the existing WebRTC
-data-channel protocol and signalling endpoint. It has its own persistent
-identity and SQLite store; it does not use a browser identity or create social
-objects. See [`bot/README.md`](./bot/README.md) for installation, VPS
-configuration, and tests.
+The optional cache/relay peer under [`mycelium-peer/`](./mycelium-peer/) uses
+the existing WebRTC data-channel protocol and signalling endpoint. It has its
+own persistent identity and SQLite store; it does not use a browser identity
+or create social objects. See [`mycelium-peer/README.md`](./mycelium-peer/README.md)
+for installation, VPS configuration, and tests.
 
 ## Testing with two browser windows or devices
 

@@ -334,6 +334,14 @@ describe('inbox cursor IndexedDB persistence', () => {
       webPush: undefined
     });
 
+    it('reports when the local identity is unavailable for sequence allocation', async () => {
+      await deleteDatabase();
+
+      await expect(nextLocalMetadataSequence()).rejects.toThrow(
+        'Local identity is unavailable for metadata sequence allocation.'
+      );
+    });
+
     it('allocates the first and successive positive metadata sequences', async () => {
       await saveIdentity({
         key: 'local',
@@ -466,7 +474,9 @@ describe('inbox cursor IndexedDB persistence', () => {
       }>(await openDatabase(), 'identity', 'local');
       expect(replacedIdentity?.publicKey).toBe('metadata-backup-origin-b');
       expect(replacedIdentity?.metadataSequence).toBeUndefined();
-      await expect(nextLocalMetadataSequence()).rejects.toThrow();
+      await expect(nextLocalMetadataSequence()).rejects.toThrow(
+        'Local metadata sequence counter is missing or invalid.'
+      );
     });
 
     it('allows a valid same-identity backup counter to recover malformed local counter state', async () => {
@@ -508,7 +518,9 @@ describe('inbox cursor IndexedDB persistence', () => {
         metadataSequence
       });
 
-      await expect(nextLocalMetadataSequence()).rejects.toThrow();
+      await expect(nextLocalMetadataSequence()).rejects.toThrow(
+        'Local metadata sequence counter is missing or invalid.'
+      );
       await expect(readRecord(await openDatabase(), 'identity', 'local')).resolves.toMatchObject({ metadataSequence });
     });
 

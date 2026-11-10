@@ -64,6 +64,7 @@ DEFAULT_DISPLAY_NAME = "Mycelium peer"
 DEFAULT_BIO = "I'm an automatic cache node."
 MAX_DISPLAY_NAME_LENGTH = 80
 MAX_BIO_LENGTH = 2000
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 PEER_MODES = ("social", "hoarder")
 
 
@@ -711,6 +712,10 @@ class PeerNode:
         if not isinstance(metadata, dict) or not isinstance(metadata.get("publicKey"), str):
             logging.warning("Rejected profile from %s: missing profile public key", peer_id)
             return False
+        sequence = metadata.get("sequence")
+        if type(sequence) is not int or sequence < 1 or sequence > MAX_SAFE_INTEGER:
+            logging.warning("Rejected profile from %s: invalid profile sequence", peer_id)
+            return False
         public_key = metadata["publicKey"]
         try:
             key_fingerprint = fingerprint(public_key)
@@ -901,6 +906,7 @@ class PeerNode:
         profile = {
             "author": self.identity.node_id,
             "publicKey": self.identity.public_key,
+            "sequence": self._next_profile_sequence(),
             "displayName": self.display_name,
             "bio": self.bio,
             "following": self.store.is_following(peer_id),
@@ -913,6 +919,18 @@ class PeerNode:
         await self.send_packet(peer_id, packet_type, {
             "profile": profile,
         })
+
+    def _next_profile_sequence(self) -> int:
+        stored = self.store.get_setting("profile_sequence")
+        try:
+            current = int(stored) if stored is not None else 0
+        except ValueError as error:
+            raise ValueError("stored profile sequence is invalid") from error
+        if current < 0 or current >= MAX_SAFE_INTEGER:
+            raise ValueError("stored profile sequence is outside the supported range")
+        sequence = current + 1
+        self.store.set_setting("profile_sequence", str(sequence))
+        return sequence
 
     async def receive_object_from(
         self,

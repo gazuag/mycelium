@@ -98,7 +98,6 @@ export class PeerConnectionManager {
   private readonly peerListExchange: PeerListExchangeCallbacks;
   private packetSigner?: PacketSigner;
   private helloSent = false;
-  private remoteSupportsMyp = false;
   private readonly remoteCapabilities = new Set<string>();
   private peerListRequestStarted = false;
   private pendingPeerListRequestId: string | null = null;
@@ -342,7 +341,6 @@ export class PeerConnectionManager {
         try {
           const parsed = JSON.parse(data);
           if (isMyceliumPacket(parsed)) {
-            this.remoteSupportsMyp = true;
             this.handleMyceliumPacket(parsed);
             return;
           }
@@ -644,10 +642,6 @@ export class PeerConnectionManager {
     }
   }
 
-  private sendLegacyPayload(type: string, payload: Record<string, unknown>) {
-    this.sendData({ type, ...payload });
-  }
-
   private sendHello() {
     if (this.helloSent) return;
     this.helloSent = true;
@@ -684,11 +678,7 @@ export class PeerConnectionManager {
   }
 
   public sendMetadata(metadata: PeerMetadata) {
-    if (this.remoteSupportsMyp) {
-      void this.sendPacket('PROFILE_UPDATE', { profile: metadata });
-      return;
-    }
-    this.sendLegacyPayload('metadata', { metadata });
+    void this.sendPacket('PROFILE_UPDATE', { profile: metadata });
   }
 
   public requestProfile() {

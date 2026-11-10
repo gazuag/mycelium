@@ -101,8 +101,9 @@ async function startSignallingServer() {
   }
   const projectPython = resolve(process.cwd(), '.venv/bin/python');
   const python = process.env.MYCELIUM_PYTHON ?? (existsSync(projectPython) ? projectPython : 'python3');
-  const child = spawn(python, [resolve(process.cwd(), 'server.py')], {
-    cwd: process.cwd(),
+  const serverDirectory = resolve(process.cwd(), 'mycelium-server');
+  const child = spawn(python, [resolve(serverDirectory, 'server.py')], {
+    cwd: serverDirectory,
     env: {
       ...process.env,
       SIGNAL_HOST: '127.0.0.1',
@@ -268,15 +269,16 @@ async function waitForPeerConnection(left: Peer, right: Peer) {
 
 async function waitForAuthenticatedConnection(left: Peer, right: Peer) {
   const authenticateFrom = async (peer: Peer, remote: Peer) => {
+    const authenticatedProfileLog = new RegExp(
+      `Received authenticated profile metadata revision \\d+ from ${remote.identityId}`
+    );
     await expect.poll(async () => {
       await peer.page.evaluate(async (peerId) => {
         const api = window.__MYCELIUM_E2E__;
         if (!api) throw new Error('Development-only Mycelium test API is unavailable');
         await api.sendAuthenticatedProfile(peerId);
       }, remote.identityId);
-      return (await readPeerState(peer.page)).logs.some((entry) => entry.includes(
-        `Received authenticated connection metadata from ${remote.identityId}`
-      ));
+      return (await readPeerState(peer.page)).logs.some((entry) => authenticatedProfileLog.test(entry));
     }, {
       timeout: 20_000,
       message: `${peer.label} did not authenticate ${remote.label}; logs: ${(await readPeerState(peer.page)).logs.slice(-25).join('\n')}`

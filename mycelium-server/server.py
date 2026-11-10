@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from bot.protocol import PEER_ID_PATTERN, validate_signal_message
+from protocol import PEER_ID_PATTERN, validate_signal_message
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
@@ -44,7 +44,12 @@ MAX_IDENTITY_PROFILE_SIZE = int(os.environ.get('MAX_IDENTITY_PROFILE_SIZE', '102
 MAX_DISCOVERY_BATCH_SIZE = int(os.environ.get('MAX_DISCOVERY_BATCH_SIZE', '50'))
 SIGNAL_QUEUE_TTL_SECONDS = int(os.environ.get('SIGNAL_QUEUE_TTL_SECONDS', '60'))
 MAX_QUEUED_SIGNALS_PER_CLIENT = int(os.environ.get('MAX_QUEUED_SIGNALS_PER_CLIENT', '32'))
-DB_PATH = Path(os.environ.get('DISCOVERY_DB_PATH', 'discovery.db'))
+SERVER_DIRECTORY = Path(__file__).resolve().parent
+DB_PATH = (
+    Path(os.environ['DISCOVERY_DB_PATH'])
+    if 'DISCOVERY_DB_PATH' in os.environ
+    else SERVER_DIRECTORY / 'discovery.db'
+)
 SIGNAL_HOST = os.environ.get('SIGNAL_HOST', '0.0.0.0')
 SIGNAL_PORT = int(os.environ.get('SIGNAL_PORT', '8443'))
 TLS_CERT_PATH = os.environ.get('TLS_CERT_PATH')

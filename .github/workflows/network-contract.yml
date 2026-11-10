@@ -23,7 +23,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r bot/requirements.txt
+          python -m pip install -r requirements.txt -r mycelium-peer/requirements.txt -r mycelium-server/requirements.txt
       - name: Install Node dependencies
         run: npm ci
       - name: Require contract fixtures and documentation for wire changes
@@ -33,7 +33,7 @@ jobs:
         run: |
           git fetch origin "$BASE_REF"
           changed_files="$(git diff --name-only "origin/$BASE_REF...HEAD")"
-          if printf '%s\n' "$changed_files" | grep -Eq '^(src/p2p/(protocol|signalling|webrtc)\.ts|bot/(protocol|peer)\.py|mycelium-peer/bot/(protocol|peer)\.py|server\.py)$'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(src/p2p/(protocol|signalling|webrtc)\.ts|mycelium-peer/bot/(protocol|peer)\.py|mycelium-server/(protocol|server)\.py)$'; then
             for required in docs/network-protocol.md tests/fixtures/network-contract.json; do
               if ! printf '%s\n' "$changed_files" | grep -Fxq "$required"; then
                 echo "A networking contract source changed without updating $required." >&2
@@ -48,6 +48,10 @@ jobs:
       - name: Build and type-check browser
         run: npm run build
       - name: Run Python bot and server tests
-        run: python -m unittest bot.test_protocol_contract bot.test_peer server_test -q
+        run: |
+          cd mycelium-peer
+          python -m unittest bot.test_protocol_contract bot.test_peer -q
+          cd ../mycelium-server
+          python -m unittest test_server -q
       - name: Run browser to Python bot interoperability test
         run: npm run test:integration:network

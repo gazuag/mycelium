@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { DistributedObject, FeedCursor, FeedPageMetadata, ObjectPacket } from '../object-layer/types';
 import type { PeerSignalMessage } from './signalling';
 import type { PeerMetadata } from '../types';
-import type { MyceliumPacket } from './protocol';
+import type { MyceliumPacket, PacketSigner } from './protocol';
 import {
   configureIceServers,
   MAX_PEER_LIST_SIZE,
@@ -120,6 +120,7 @@ function createManager(options: {
   onRequestPosts?: (peerId: string, since?: string | null, limit?: number, after?: FeedCursor | null, requestId?: string) => void;
   onMetadata?: (peerId: string, metadata: PeerMetadata, packet?: MyceliumPacket) => void;
   onEvent?: (peerId: string, event: string) => void;
+  packetSigner?: PacketSigner;
   onIdentityProfileRequest?: (peerId: string, requestId: string) => void;
   onIdentityProfileResponse?: (peerId: string, requestId: string, object: unknown) => void;
   onObject?: (peerId: string, object: DistributedObject) => void;
@@ -137,7 +138,7 @@ function createManager(options: {
     noop,
     options.onEvent ?? noop,
     noop,
-    undefined,
+    options.packetSigner,
     options.localCapabilities ?? ['profiles', 'posts', 'messages', 'relay-v1', PEER_GOSSIP_CAPABILITY],
     undefined,
     undefined,
@@ -301,6 +302,33 @@ beforeEach(() => {
 });
 
 describe('PROFILE_UPDATE metadata forwarding', () => {
+  it('sends a signed profile update without waiting for a remote HELLO', async () => {
+    const packetSigner = vi.fn(async () => 'test-signature');
+    const manager = createManager({ packetSigner });
+    const channel = await openDataChannel(manager);
+    await flushMicrotasks();
+    const metadata: PeerMetadata = {
+      author: 'peer-a',
+      publicKey: 'public-key',
+      displayName: 'Peer A',
+      following: false,
+      timestamp: new Date(0).toISOString(),
+      sequence: 1
+    };
+
+    manager.sendMetadata(metadata);
+    await flushMicrotasks();
+
+    const sentProfileUpdate = channel.send.mock.calls[channel.send.mock.calls.length - 1]?.[0] as string;
+    expect(JSON.parse(sentProfileUpdate)).toMatchObject({
+      protocol: 'mycelium',
+      type: 'PROFILE_UPDATE',
+      payload: { profile: metadata },
+      signature: 'test-signature'
+    });
+    manager.closeConnection();
+  });
+
   it('allows clearing ICE servers for host-only peers', () => {
     configureIceServers([]);
 
