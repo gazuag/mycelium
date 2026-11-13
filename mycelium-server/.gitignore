@@ -1,4 +1,5 @@
 .venv/
+runtime/
 discovery.db*
 *.crt
 *.key
